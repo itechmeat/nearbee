@@ -71,26 +71,51 @@ Delivers:
    it in `~/.config/nearbee/credentials` (mode 0600, outside the repository);
    config and listings name agents by handle only; the token of
    `repo-audit-fast` moves there from `.env` (D-022).
-3. `nearbee list` publishes one draft listing from a materialised playbook;
+3. `nearbee list` publishes one draft listing from a materialised playbook
+   whose installed current version carries `trial_candidates: off` (apb would
+   otherwise run a candidate version, `docs/apb.md`): materialisation sets
+   it, and publishing refuses a source playbook that sets another value or
+   an installed version that does not read back with it;
    `nearbee serve` polls, takes a hire, runs a trivial playbook, submits the
    manifest's Markdown. **First end-to-end hire**: the owner hires the draft
    from the web.
 4. `examples/x402-hire`: builds and signs a NEP-366 delegate for a 402
    response and proves key type and relayer acceptance without spending
    (open question 13); falls back to `near-api-js` if the Rust path is
-   awkward (D-003).
+   awkward (D-003). No-spend proof: the demo caller account (O-5) pays the
+   owner's agent while the owner has it live for the test (O-6; draft agents
+   take no x402 calls, `docs/market.md`), `serve` declines the hire with
+   `rejected`, and the hold is released (nothing is charged on a rejected hire, `docs/market.md`).
+5. `cargo deny check advisories` (and licenses) in the native gate and CI
+   (security-audit recommendation from S1).
+
+All hires in S2 are the owner's own tests (the owner's web hire of the draft,
+the demo caller account), so no third-party data runs and apb's
+`external_data` flag is not needed yet (D-023).
 
 Owner items: O-1, O-2 (first variant), O-5 (asked at the start of S2; no
-spend, signature only).
+spend, signature only), O-3 top-up and the billed-launch go-ahead for item 0.
 
 Done when: native gate green; the end-to-end hire is recorded (task id,
 timestamps) in `docs/demo-log.md`; the signature check result is in
 `docs/market.md`.
 
 Out of scope: recovery after a crash, intake decisions, attachments, paid
-hires.
+hires (a hire that settles money; item 0's billed Cloud runs are model spend,
+not hires).
 
 ## S3. `durable-hire-machine`
+
+Carried from S2 (owner items open when S2 merged, 2026-11-10; tasks of
+`openspec/changes/archive/*-market-and-first-hire/tasks.md`): 3.4 recorded
+market fixtures and the move of the `repo-audit-fast` token from `.env` into
+the credentials store (needs the draft's agent id from the owner, O-2:
+drafts are invisible to every lookup the agent token can make); the real
+draft publish of 5.4; the owner's web hires 7.1 and 7.2 (first end-to-end
+hire into `docs/demo-log.md`); the x402 proof 8.2 and 8.3 (O-5, O-6); the
+billed Cloud smokes 9.1 (O-3). They run first in S3, before its own work, and
+the recorded fixtures replace the schema-shaped mock bodies where they
+differ.
 
 Delivers: the journal with intents before every external write and the
 recovery table; the lock file; cancellation, refund and dispute handling;

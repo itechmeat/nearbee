@@ -1,0 +1,14 @@
+{
+  "name": "nearbee-x402-hire",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Nearbee demo buyer: hire a market agent agent-to-agent and pay per call with x402 (USDC on NEAR).",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "near-api-js": "^7.4.0"
+  }
+}

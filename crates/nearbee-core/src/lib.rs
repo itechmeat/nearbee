@@ -5,12 +5,15 @@
 //! `nearbee-market`) implement the traits defined here.
 
 pub mod config;
+pub mod credentials;
 pub mod journal;
+pub mod listing;
 pub mod manifest;
 pub mod market;
 pub mod redact;
 pub mod runner;
 pub mod secret;
+pub mod serve;
 
 pub use market::Market;
 pub use runner::Runner;

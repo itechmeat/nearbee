@@ -280,7 +280,15 @@ filesystem, the network or local credentials, and an agent or script can call
 any HTTP endpoint. The CLI accepts run-level `--overrides <yaml>`, but the REST
 start has no such field, so listing variants are **materialised as separate
 playbook ids** with fixed profile bindings (`docs/pricing.md` § SKUs), and
-Nearbee checks the executed run's playbook id and version against the listing.
+Nearbee checks the executed run's playbook id and version against the listing:
+the start body has no `version`, so serve starts a new run only when `GET
+/api/playbooks` names the listing's recorded version as `current`, and stops
+and declines `failed` any run whose detail reports another `version` or none
+(the published version and digest are recorded per hire in the run intent).
+Every check after a hire's run intent, also after a restart, uses the version
+and digest that intent recorded, so a republish never moves a hire that
+already started; serve reads the listing records again each polling round, so
+the next new hire takes a republished version without a restart.
 
 For NEAR AI Cloud models the executor path today is a CLI agent with a custom
 OpenAI-compatible provider: OpenCode (`opencode.json` provider with

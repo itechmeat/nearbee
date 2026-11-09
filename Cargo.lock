@@ -987,10 +987,16 @@ dependencies = [
  "clap",
  "nearbee-apb",
  "nearbee-core",
+ "nearbee-market",
+ "nearbee-market-fixture",
+ "rust_decimal",
  "serde_json",
  "tempfile",
+ "thiserror",
+ "time",
  "tokio",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
  "yaml_serde",
 ]
@@ -1011,6 +1017,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1027,6 +1034,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+ "tokio",
  "url",
  "uuid",
  "yaml_serde",
@@ -1037,6 +1045,23 @@ name = "nearbee-market"
 version = "0.1.0"
 dependencies = [
  "nearbee-core",
+ "nearbee-market-fixture",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "nearbee-market-fixture"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

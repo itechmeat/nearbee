@@ -12,6 +12,8 @@
 //! and system proxies are not used. Every error detail is cut to 2 KiB and
 //! has configured secret values and bearer tokens removed.
 
+pub mod install;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -637,6 +639,40 @@ impl Runner for ApbRunner {
         let path = format!("/api/runs/{}", path_segment(id.as_str())?);
         let v = self.client.get(&path, &self.ws(), Kind::Read).await?;
         parse_run_detail(&v).map_err(|e| self.client.protocol(&format!("GET {path}: {e}")))
+    }
+
+    async fn stop(&self, id: &RunId) -> Result<(), RunnerError> {
+        // apb has no hard cancel for a run; pause is its predictive stop:
+        // no further agent node starts, the engine keeps the state.
+        let path = format!("/api/runs/{}/pause", path_segment(id.as_str())?);
+        let resp = self
+            .client
+            .request(reqwest::Method::POST, &path)
+            .query(&self.ws())
+            .timeout(self.client.timing.read)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|e| RunnerError::RetryableRead {
+                detail: self
+                    .client
+                    .redact(&format!("POST {path}: {}", describe(&e))),
+            })?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.map_err(|e| RunnerError::RetryableRead {
+            detail: self
+                .client
+                .redact(&format!("POST {path}: {}", describe(&e))),
+        })?;
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        Err(RunnerError::Refused {
+            status,
+            code: String::new(),
+            detail: self.client.redact(&text),
+            estimate: None,
+        })
     }
 
     async fn find(&self, q: RunQuery) -> Result<RunLookup, RunnerError> {

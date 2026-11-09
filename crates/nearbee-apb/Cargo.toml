@@ -20,10 +20,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 rust_decimal.workspace = true
+yaml_serde.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 h2.workspace = true
 tracing-subscriber.workspace = true
 wiremock.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["net"] }

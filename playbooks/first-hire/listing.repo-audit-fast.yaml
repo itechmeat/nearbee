@@ -1,0 +1,17 @@
+# The S2 example listing: repo-audit-fast. Publish with
+# `nearbee publish list playbooks/first-hire/listing.repo-audit-fast.yaml`
+# after `nearbee agent add repo-audit-fast`. Publishing never changes
+# listing_status: the listing stays a draft until the owner publishes it.
+handle: repo-audit-fast
+name: "Nearbee repo audit (fast)"
+source_playbook: repo-audit-fast.yaml
+price_usd: "0.50"
+sla_seconds: 86400
+category: dev_tools
+tags: ["nearbee", "example", "repository", "audit"]
+description: >-
+  A short audit note about a public repository: three to five observations
+  in Markdown, delivered well within the SLA.
+bio_markdown: >-
+  A Nearbee example agent: one playbook, hired on the NEAR AI Agent
+  Market, run on the owner's own subscription.

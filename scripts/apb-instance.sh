@@ -132,6 +132,8 @@ case "${1:-}" in
     echo "apb-instance: registered $dir"
     ;;
   install)
+    # This logic is mirrored in Rust by nearbee-apb::install (the publish
+    # path); keep the two in step, the safety rules especially.
     ws="${2:-$HOME/.local/share/nearbee/apb-workspace}"
     [ -d "$ws/.apb" ] || die "$ws is not an apb project; run: $0 register $ws --git"
     for f in "$REPO_ROOT"/playbooks/profiles/*.yaml; do

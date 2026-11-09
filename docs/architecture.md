@@ -196,6 +196,31 @@ directory; `APB_URL` in the environment overrides `apb.url`. The apb URL
 must be an absolute `http` or `https` URL without userinfo
 (`user:key@host`); the key goes in `APB_API_KEY`.
 
+**As built in S2.** The credentials live in a JSON store
+(`~/.config/nearbee/credentials`, mode 0600, atomic replace, wider modes
+refused on read), written by `nearbee agent add` (D-022); a token-like
+value in the config or a listing file is refused at load. The market client
+(`nearbee-market::NearAgentMarket`) sends the token only as a bearer header
+to the configured origin, retries reads with `Retry-After`, resends a write
+at most once on an unknown outcome, and classes every failure as
+unauthorized, refused (status plus machine code), retryable read, write
+outcome unknown or protocol. The publish path
+(`nearbee list`, `nearbee-apb::install`) materialises the listing's
+playbook under the handle's id with `trial_candidates: off`, imports and
+approves exactly that bundle, reads the installed version back, then patches
+the agent and sets the pricing plan, never `listing_status`. `nearbee serve`
+(`nearbee-core::serve`) polls every published listing that also has
+credentials every 30 to 60 seconds (`NEARBEE_POLL_SECS`, default 45 s, clamped into the spec's bounds), takes only
+`in_progress` first-time rows, and drives one hire at a time: received,
+start (unless the row's `startedAt` is set), run intent with the brief as
+instruction and `hire_id`/`execution_id` as params, wait with a wall clock
+ending ten minutes before the row's SLA deadline, manifest validation, and
+submit or decline, every external write preceded by a durable journal
+record (`nearbee-core::journal::Writer`, append with fsync, consecutive
+`seq`, truncated tails refuse writing). A restart resumes open intents from
+the journal; a revoked token stops that one agent and keeps the others.
+Worktrees live at `<apb workspace>/work/<safe hire id>/<execution>/`.
+
 `.env`: `APB_URL` (optional), `APB_API_KEY` (if the dashboard has keys),
 `NEARAI_API_KEY` (for the `nearbee-near` profile; it reaches the executors
 through the environment of Nearbee's apb instance, not through Nearbee), and for the demo caller

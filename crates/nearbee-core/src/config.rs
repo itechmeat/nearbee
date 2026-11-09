@@ -144,6 +144,12 @@ pub enum ConfigError {
     /// never shown.
     #[error("{origin} must be an absolute http or https URL")]
     UrlInvalid { origin: String },
+    /// The file holds a token-like value (`aat_...`). Configuration names
+    /// agents by handle only; the value is never shown.
+    #[error(
+        "config file {path} holds an agent token; tokens belong in the credentials store (`nearbee agent add`), not the config"
+    )]
+    TokenInFile { path: PathBuf },
 }
 
 /// Where to read the configuration from.
@@ -170,6 +176,11 @@ pub fn load(
             path: file_path.clone(),
             source,
         })?;
+        if crate::credentials::find_token_like(&text).is_some() {
+            return Err(ConfigError::TokenInFile {
+                path: file_path.clone(),
+            });
+        }
         let parsed: FileConfig = if text.trim().is_empty() {
             FileConfig::default()
         } else {
@@ -662,6 +673,45 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.limits.files, 3);
         assert_eq!(cfg.limits.markdown_bytes, 262_144);
+    }
+
+    #[test]
+    fn a_token_like_value_in_the_config_is_refused_without_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let tok = "aat_0123456789abcdef0123456789abcdef";
+        let file = write(
+            dir.path(),
+            "nearbee.yaml",
+            &format!("apb:\n  url: http://127.0.0.1:7322 # {tok}\n"),
+        );
+        let err = load(
+            LoadOptions {
+                file: Some(&file),
+                cwd: dir.path(),
+            },
+            env_of(&[]),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("token"), "{msg}");
+        assert!(msg.contains(&file.display().to_string()), "{msg}");
+        assert!(!msg.contains(tok), "{msg}");
+        // An uppercase or short value is not token-shaped and passes.
+        let file = write(
+            dir.path(),
+            "nearbee.yaml",
+            "apb:\n  url: http://127.0.0.1:7322 # AAT_0123\n",
+        );
+        assert!(
+            load(
+                LoadOptions {
+                    file: Some(&file),
+                    cwd: dir.path(),
+                },
+                env_of(&[]),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

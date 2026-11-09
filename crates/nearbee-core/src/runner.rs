@@ -295,6 +295,9 @@ pub trait Runner: Send + Sync {
     ) -> impl Future<Output = Result<Estimate, RunnerError>> + Send;
     fn start(&self, req: StartRequest) -> impl Future<Output = Result<RunId, RunnerError>> + Send;
     fn run(&self, id: &RunId) -> impl Future<Output = Result<RunDetail, RunnerError>> + Send;
+    /// Stops a running run (apb's pause: a predictive stop before agent
+    /// nodes). Best effort; serve ignores a failure and reports the hire.
+    fn stop(&self, id: &RunId) -> impl Future<Output = Result<(), RunnerError>> + Send;
     fn find(&self, q: RunQuery) -> impl Future<Output = Result<RunLookup, RunnerError>> + Send;
 }
 
