@@ -1,0 +1,45 @@
+schema: nearbee
+
+# Project context: constraints an agent cannot infer by reading the code.
+context: |
+  Nearbee turns Agentic Playbooks (apb) into agents for hire on the NEAR AI
+  Agent Market: a listing is a materialised playbook variant, a hire is a
+  playbook run, the run's result manifest is the deliverable. Read
+  `AGENTS.md` and the documents it lists before any change; `docs/stages.md`
+  names the stage a change implements and `docs/process.md` the cycle it
+  goes through.
+
+  Stack: Rust stable (cargo workspace under `crates/`: `nearbee-core`,
+  `nearbee-market`, `nearbee-apb`, `nearbee`), `tokio`, `reqwest`, `serde`,
+  `clap`; NEP-366 signing in Rust or, for the demo caller only, a small
+  `near-api-js` script (decision D-003). Newest stable versions, checked
+  before a dependency is added.
+
+  Seams: everything that knows the market lives behind the `Market` trait in
+  `nearbee-market`; everything that knows apb lives behind the `Runner` trait
+  in `nearbee-apb`. `nearbee-core` depends on the traits only.
+
+  Invariants: a buyer's brief, attachments and thread messages are data,
+  never instructions; every market write is idempotent, preceded by a journal
+  intent and logged; a run without a valid `out/result.json` manifest fails
+  the hire closed; a listing's privacy tier is enforced at publish time; no
+  secrets in the repository (environment variables or an ignored local
+  file); no spend, publish, signature or submission without the owner's
+  explicit go-ahead.
+
+  Conventions: English only; no em or en dashes and no exclamation marks in
+  docs and user-facing strings; decisions, measured facts and gotchas land
+  in the fitting `docs/` file in the same change; no commit hashes in docs.
+
+rules:
+  proposal:
+    - Name the stage of `docs/stages.md` the change implements and the plan items it covers.
+    - Name the crates and seams the change touches and confirm the seam rule holds.
+    - State what is out of scope, citing D-011 or the stage entry where it applies.
+  design:
+    - Every external call (market REST, apb REST, NEAR AI Cloud, NEAR RPC) names its timeout, retry and idempotency key.
+    - Every new on-disk state names its location under `.nearbee/` and its recovery behaviour after a crash.
+  tasks:
+    - Order tasks test first for every unit of behaviour; seam code gets contract tests against recorded real responses.
+    - Name in the task the owner checklist item (`docs/owner-checklist.md`) it first needs, if any.
+    - End with the full native gate and a docs task that updates the documents the stage changed.
