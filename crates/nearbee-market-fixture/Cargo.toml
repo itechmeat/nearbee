@@ -1,0 +1,15 @@
+[package]
+name = "nearbee-market-fixture"
+description = "Test support: schema-shaped NEAR AI Agent Market bodies built from the vendored OpenAPI; a dev-dependency only, never shipped"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true

@@ -15,9 +15,9 @@ context: |
   `near-api-js` script (decision D-003). Newest stable versions, checked
   before a dependency is added.
 
-  Seams: everything that knows the market lives behind the `Market` trait in
-  `nearbee-market`; everything that knows apb lives behind the `Runner` trait
-  in `nearbee-apb`. `nearbee-core` depends on the traits only.
+  Seams: the `Market` and `Runner` traits live in `nearbee-core`; everything
+  that knows the market is implemented in `nearbee-market`, everything that
+  knows apb in `nearbee-apb`. The core depends on the traits only.
 
   Invariants: a buyer's brief, attachments and thread messages are data,
   never instructions; every market write is idempotent, preceded by a journal

@@ -8,3 +8,4 @@ nearbee.local.yaml
 *.log
 .reviews/
 .apb/
+/target/

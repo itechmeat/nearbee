@@ -169,6 +169,12 @@ pub struct RunObserved {
     pub run_id: String,
     pub execution: u32,
     pub status: String,
+    /// The playbook version the run reports (round 5, codex 4). `None`
+    /// when the engine named none, and on the records written at a known
+    /// start before the first poll; serve never trusts the output of a
+    /// finished run whose version is `None` or not the published one.
+    #[serde(default)]
+    pub playbook_version: Option<String>,
 }
 
 /// The files a run produced, by name, size and digest.
@@ -429,6 +435,7 @@ mod tests {
                     run_id: "r1".into(),
                     execution: 1,
                     status: "succeeded".into(),
+                    playbook_version: Some("1.0.0".into()),
                 }),
             ),
             rec(
@@ -565,5 +572,334 @@ mod tests {
         assert!(!line.contains(brief));
         assert!(line.contains(&sha256_hex(brief.as_bytes())));
         assert!(line.contains(&format!("\"brief_bytes\":{}", brief.len())));
+    }
+}
+
+/// A journal writer: appends one record per call with consecutive `seq`,
+/// fsyncing the file (and, on creation, the directory) before it returns,
+/// so an external write that a record announces always follows a durable
+/// record. A journal with a truncated tail refuses writing.
+#[derive(Debug)]
+pub struct Writer {
+    file: std::fs::File,
+    path: PathBuf,
+    hire_id: String,
+    next_seq: u64,
+    /// Set after a failed write or sync: the seq the failed record got may
+    /// have reached the disk partially, so a retry through this writer
+    /// could append a duplicate seq. The writer refuses further appends;
+    /// the journal is reopened instead.
+    poisoned: bool,
+}
+
+/// Why a journal cannot be opened for writing.
+#[derive(Debug, thiserror::Error)]
+pub enum WriterError {
+    #[error("journal {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error(
+        "journal {path}: line {line} is truncated by an earlier crash; repair or remove the journal by hand"
+    )]
+    TruncatedTail { path: PathBuf, line: usize },
+    #[error("journal: {0}")]
+    Read(JournalError),
+    #[error("journal {path}: another writer holds it in this process")]
+    Locked { path: PathBuf },
+    #[error(
+        "journal {path}: an earlier append failed mid-record; reopen the journal instead of appending"
+    )]
+    Poisoned { path: PathBuf },
+}
+
+/// The journals this process holds open: one writer at a time per hire.
+static OPEN_JOURNALS: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
+fn acquire_journal_lock(path: &Path) -> Result<(), WriterError> {
+    let mut set = OPEN_JOURNALS.lock().unwrap_or_else(|e| e.into_inner());
+    if !set.insert(path.to_path_buf()) {
+        return Err(WriterError::Locked {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn release_journal_lock(path: &Path) {
+    let mut set = OPEN_JOURNALS.lock().unwrap_or_else(|e| e.into_inner());
+    set.remove(path);
+}
+
+impl Writer {
+    /// Opens (or creates) the journal at `path` for appending, continuing
+    /// the sequence of the records already on disk.
+    /// Opens (or creates) the journal at `path` for appending, continuing
+    /// the sequence of the records already on disk. One writer at a time
+    /// per hire within this process: a second open fails naming the file.
+    pub fn open(path: PathBuf, hire_id: &str) -> Result<Self, WriterError> {
+        acquire_journal_lock(&path)?;
+        match Self::open_inner(path.clone(), hire_id) {
+            Ok(w) => Ok(w),
+            Err(e) => {
+                release_journal_lock(&path);
+                Err(e)
+            }
+        }
+    }
+
+    fn open_inner(path: PathBuf, hire_id: &str) -> Result<Self, WriterError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|source| WriterError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            // Hire journals carry hire ids and decline reasons: they stay
+            // private to the owner (dir 0700, file 0600).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let existing = std::fs::read_to_string(&path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                WriterError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "not readable yet"),
+                }
+            } else {
+                WriterError::Io {
+                    path: path.clone(),
+                    source,
+                }
+            }
+        });
+        let next_seq = match existing {
+            Ok(text) => {
+                if text.is_empty() {
+                    1
+                } else {
+                    let r = read(&text).map_err(WriterError::Read)?;
+                    if let Some(line) = r.truncated_line {
+                        return Err(WriterError::TruncatedTail {
+                            path: path.clone(),
+                            line,
+                        });
+                    }
+                    r.records.last().map_or(1, |r| r.seq + 1)
+                }
+            }
+            Err(WriterError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                1
+            }
+            Err(e) => return Err(e),
+        };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| WriterError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        if next_seq == 1 {
+            // A fresh journal: make the hire directory entry and the new
+            // entry in hires/ durable before the first record is announced
+            // to anyone.
+            if let Some(dir) = path.parent() {
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+                if let Some(parent) = dir.parent()
+                    && let Ok(d) = std::fs::File::open(parent)
+                {
+                    let _ = d.sync_all();
+                }
+            }
+        }
+        Ok(Self {
+            file,
+            path,
+            hire_id: hire_id.to_owned(),
+            next_seq,
+            poisoned: false,
+        })
+    }
+
+    /// The next `seq` a record will get.
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// Appends one record: the line and the fsync happen before the call
+    /// returns, so any external write the record announces is made only
+    /// after the record is on disk.
+    pub fn append(&mut self, event: Event) -> Result<u64, WriterError> {
+        if self.poisoned {
+            return Err(WriterError::Poisoned {
+                path: self.path.clone(),
+            });
+        }
+        let record = Record {
+            schema_version: SCHEMA_VERSION,
+            seq: self.next_seq,
+            timestamp: time::OffsetDateTime::now_utc(),
+            hire_id: self.hire_id.clone(),
+            event,
+        };
+        let mut line = record.to_line();
+        line.push('\n');
+        {
+            use std::io::Write;
+            if let Err(source) = self.file.write_all(line.as_bytes()) {
+                self.poisoned = true;
+                return Err(WriterError::Io {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        }
+        if let Err(source) = self.file.sync_all() {
+            self.poisoned = true;
+            return Err(WriterError::Io {
+                path: self.path.clone(),
+                source,
+            });
+        }
+        self.next_seq += 1;
+        Ok(record.seq)
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        release_journal_lock(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    fn dir_journal() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hires").join("h-1").join("journal.jsonl");
+        (dir, path)
+    }
+
+    fn received(seq_hint: &str) -> Event {
+        Event::Received(Received::from_brief(seq_hint))
+    }
+
+    #[test]
+    fn appends_consecutive_seqs_and_survives_a_reopen() {
+        let (_dir, path) = dir_journal();
+        let mut w = Writer::open(path.clone(), "h-1").unwrap();
+        assert_eq!(w.next_seq(), 1);
+        assert_eq!(w.append(received("a")).unwrap(), 1);
+        assert_eq!(w.append(received("b")).unwrap(), 2);
+        drop(w);
+        let mut w = Writer::open(path.clone(), "h-1").unwrap();
+        assert_eq!(w.next_seq(), 3, "reopen continues the sequence");
+        assert_eq!(w.append(received("c")).unwrap(), 3);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let r = read(&text).unwrap();
+        assert_eq!(r.records.len(), 3);
+        assert_eq!(r.records[2].seq, 3);
+    }
+
+    #[test]
+    fn a_truncated_tail_refuses_writing() {
+        let (_dir, path) = dir_journal();
+        let mut w = Writer::open(path.clone(), "h-1").unwrap();
+        w.append(received("a")).unwrap();
+        drop(w);
+        // Simulate a crash mid-write: cut the last line's final bytes.
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, &text[..text.len() - 5]).unwrap();
+        let err = Writer::open(path.clone(), "h-1").unwrap_err();
+        assert!(
+            matches!(err, WriterError::TruncatedTail { line: 1, .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("truncated"));
+    }
+
+    #[test]
+    fn an_empty_journal_starts_at_one() {
+        let (_dir, path) = dir_journal();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        let mut w = Writer::open(path, "h-1").unwrap();
+        assert_eq!(w.next_seq(), 1);
+        w.append(Event::Decision(Decision {
+            decision: "accept".into(),
+            reason: String::new(),
+        }))
+        .unwrap();
+    }
+
+    /// One writer at a time per hire within the process.
+    #[test]
+    fn a_second_writer_on_the_same_journal_is_refused() {
+        let (_dir, path) = dir_journal();
+        let w = Writer::open(path.clone(), "h-1").unwrap();
+        let err = Writer::open(path.clone(), "h-1").unwrap_err();
+        assert!(matches!(err, WriterError::Locked { .. }), "{err}");
+        drop(w);
+        // After the first writer is gone, opening works again.
+        let mut w = Writer::open(path, "h-1").unwrap();
+        w.append(received("later")).unwrap();
+    }
+
+    /// A broken interior line is an error, not silently overwritten.
+    #[test]
+    fn a_broken_journal_refuses_writing() {
+        let (_dir, path) = dir_journal();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json at all\n").unwrap();
+        let err = Writer::open(path, "h-1").unwrap_err();
+        assert!(matches!(err, WriterError::Read(_)), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    /// A failed append (write or sync) poisons the writer: a retry through
+    /// the same writer can never append a duplicate seq (ocr2 12). The
+    /// failure is provoked by pointing the writer at a read-only file
+    /// descriptor, whose writes fail.
+    #[test]
+    fn a_failed_append_poisons_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h-1").join("journal.jsonl");
+        let mut w = Writer::open(path, "h-1").unwrap();
+        let mut read_only = std::fs::File::open("/dev/null").unwrap();
+        std::mem::swap(&mut w.file, &mut read_only);
+        let err = w
+            .append(received_event("first"))
+            .expect_err("the write must fail on a read-only descriptor");
+        assert!(matches!(err, WriterError::Io { .. }), "{err}");
+        // The retry is refused without touching the file again.
+        let err = w
+            .append(received_event("second"))
+            .expect_err("the writer is poisoned");
+        assert!(matches!(err, WriterError::Poisoned { .. }), "{err}");
+        assert!(err.to_string().contains("reopen"));
+    }
+
+    fn received_event(seq_hint: &str) -> Event {
+        Event::Received(Received::from_brief(seq_hint))
     }
 }

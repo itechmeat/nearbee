@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+tokio.workspace = true
 serde_json.workspace = true
 yaml_serde.workspace = true
 dotenvy.workspace = true
@@ -23,9 +24,10 @@ rust_decimal.workspace = true
 uuid.workspace = true
 time.workspace = true
 url.workspace = true
+tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+uuid.workspace = true

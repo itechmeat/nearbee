@@ -51,6 +51,17 @@ Going live needs a live default pricing plan. The owner can hire their own
 draft agent for a test (no reputation effect, no review). An agent that
 publishes itself with its token is not blocked by the owner's unconfirmed email.
 
+- A draft agent is invisible to every lookup the agent token can make
+  (measured 2026-11-10 against the draft `repo-audit-fast`):
+  `GET /v1/agents/repo-audit-fast` answers 404 `not_found` with and without
+  `Authorization: Bearer <aat_...>`, and `GET /v1/agents?q=...` lists live
+  agents only. The token itself still works:
+  `GET /v1/agents/me/assignments?status=all` answers 200
+  (`{"assignments":[]}`) and `GET /v1/agents/me/bids` answers 200. So the
+  agent id of a draft cannot be resolved from the handle or the token; the
+  owner copies it from the agent's settings page in the web app and
+  `nearbee agent add <handle> --agent-id <uuid>` takes it from there.
+
 ## Pricing plans
 
 `POST /v1/agents/{agent_id}/pricing-plans {model, price_amount, sla_seconds?, display_name?, description?}`.
@@ -158,6 +169,12 @@ POST /v1/assignments/{id}/decline         {"reason":"rejected"|"failed","detail"
   `hire.refunded` right after means the hold was refused. Submit is accepted
   automatically and settles the payment; the treasury sweep pays the owner's
   share as USDC "usually within minutes".
+- A **draft** agent takes no x402 calls (checked 2026-11-09 against the
+  draft `repo-audit-fast`): its agent card answers 404 and `SendMessage`
+  answers JSON-RPC `-32004 this agent is not taking calls`. An x402 test
+  therefore needs the agent live. The A2A message part is ProtoJSON
+  (`{"role":"ROLE_USER","parts":[{"text":"..."}]}`; a `kind` field is refused
+  with `-32700`).
 - `verifiableOffered` appears on bids in the schema; its semantics are *to verify*.
 
 ## Money
@@ -188,12 +205,81 @@ POST /v1/assignments/{id}/decline         {"reason":"rejected"|"failed","detail"
   buyers, no lost dispute in 90 days.
 - Suspension reasons: broken_skill, failed_validation, non_payment, policy.
 
+## Wire shapes (verified against the OpenAPI, 2026-11-10)
+
+Checked against the vendored `docs/reference/market-openapi.json`, not yet
+against live answers: the live fixture captures of task 3.4 are still to
+confirm them. Casing is mixed and is the API's own: assignment, job,
+message and file components are camelCase; agent and pricing-plan
+components are snake_case. The Rust types are in
+`crates/nearbee-market/src/wire.rs`; the core `Row`, `AgentRecord` and
+`PricingPlan` are Nearbee's own models, mapped from them.
+
+| Call | Request body | Answer |
+| --- | --- | --- |
+| `GET /v1/agents/me/assignments?status=all&limit=&offset=` | none | `MyAssignmentsResponse` `{"assignments": [MyAssignmentItem]}`; never a flat array |
+| `POST /v1/assignments/{id}/start` | none (the operation defines no body) | `StartAssignmentResponse` `{startedAt}` |
+| `POST /v1/assignments/{id}/messages` | `SendMessageRequest` `{body, clientRequestId?, attachmentIds?}` | 201 `ThreadMessage` |
+| `POST /v1/assignments/{id}/progress` | `ReportProgressRequest` `{message, percent?}` (`percent` int32, 0 to 100) | `WorkerProgressReport` |
+| `POST /v1/assignments/{id}/submit` | `SubmitRequest` `{deliverableMarkdown, files?}` (a `fileUrl`, bare token or `fileId` each) | `JobAssignment` |
+| `POST /v1/assignments/{id}/decline` | `DeclineAssignmentRequest` `{reason?: rejected \| failed, detail?}` | `JobAssignment` |
+| `POST /v1/files` | `ReserveFileRequest` `{filename, byteSize, link?}` | 201 `ReserveFileResponse` `{fileId, uploadUrl, directUploadUrl, byteSize, expiresInSecs, fileUrl?}`; `fileUrl` only for `link: true` |
+| `POST /v1/files/{file_id}/complete` | none | `CompleteFileResponse` `{fileId, filename, byteSize, sha256, contentType}` |
+| `GET /v1/agents/{id_or_handle}` | none | `AgentView`: one of `OwnerAgentView`, `AdminAgentView`, `AgentPublic` |
+| `PATCH /v1/agents/{agent_id}` | `PatchAgentRequest` (snake_case, every field optional; `category` from the closed enum, `sla_seconds` int32) | `OwnerAgentView` |
+| `GET /v1/agents/{agent_id}/pricing-plans` | none | array of `PricingPlan` (no envelope) |
+| `POST /v1/agents/{agent_id}/pricing-plans` | `CreatePricingPlanRequest` `{model, price_amount, sla_seconds?, display_name?, ...}` | 201 `PricingPlan` |
+| `POST /v1/pricing-plans/{pricing_plan_id}/make-default` | none | `PricingPlan` |
+
+- `MyAssignmentItem`: `{assignment: JobAssignment, job: WorkerJobBrief,
+  latestMessage?: LatestMessageBrief | null, autoAcceptAt?: date-time | null}`.
+  `JobAssignment` requires `assignmentId`, `jobId`, `workerAgentId`,
+  `status` (`in_progress`, `submitted`, `accepted`, `disputed`,
+  `dispute_resolved`, `cancelled`), `escrowAmount`, `escrowToken`,
+  `slaSeconds`, `slaDeadlineAt`, `acceptanceWindowDays`, `createdAt`,
+  `updatedAt`; `startedAt`, `submittedAt`, `deliverableUrl`,
+  `cancelReason`, `cancelDetail` and the rest are nullable. The buyer's
+  brief is `job.title` and `job.description`.
+- Agent views name the id `agent_id` and the status `listing_status`
+  (`draft`, `live`, `paused`, `archived`); `category`, `runtime` and
+  `availability` are closed enums.
+- `PricingPlan` requires `pricing_plan_id`, `agent_id`, `model` (`per_call`,
+  `per_task`, `subscription`), `price_amount`, `is_default`,
+  `listing_status`, `created_at`, `updated_at`; `sla_seconds` is nullable.
+- Nearbee does not read the answers of start, message, progress, submit,
+  decline, complete and make-default beyond "2xx with a JSON or empty
+  body".
+
+The contract test `crates/nearbee-market/tests/contract.rs` loads the
+OpenAPI, pins each operation to its component, deserializes schema-built
+instances (required properties only, and with the optional ones Nearbee
+reads) with the client's types, and checks every request body the client
+sends against its component (names, required properties, types, enums).
+The wiremock tests build every mocked body with the same schema fixture
+builder, the dev-only crate `crates/nearbee-market-fixture`, which the
+tests take as a dev-dependency; nothing of it ships in `nearbee-market`.
+
+## Built against these facts (S2)
+
+The offline S2 build used exactly the facts above; the wiremock contract
+tests (`crates/nearbee-market/tests/client.rs`) encode them: `status=all`
+paging with `limit`/`offset`, `Retry-After` on 503 reads, one resend of an
+unknown write, `invalid_state_transition` on a repeated decline answered by
+a fresh read, `progress_report_too_soon` with `retry_after`,
+`clientRequestId` on thread sends, and the reserve/PUT/complete file trio
+(PUT with the exact bytes and no extra headers). Before fix round 5 the
+mocks were written to the code (a flat row array, camelCase agent and plan
+fields) and did not match the API; they are now built from the OpenAPI.
+The live fixture captures of task 3.4 and the hires of task 7 are
+owner-gated and still pending; any difference the captures show will be
+recorded here.
+
 ## Not yet checked (to verify before relying on it)
 
 1. Number of listings one owner may have, and any review before a listing goes
    live (the docs describe none beyond the email confirmation).
 2. Rate limits on worker REST calls beyond the x402 60/min per IP.
 3. Whether `input_schema` is shown to web buyers as a form or only to callers.
-4. The exact `files` upload sequence payloads (`POST /v1/files {link:true}`,
-   `PUT`, `/complete`) and size limits.
+4. The `files` upload sequence against the live API (the payloads above are
+   from the OpenAPI) and size limits.
 5. `verifiableOffered` on bids.

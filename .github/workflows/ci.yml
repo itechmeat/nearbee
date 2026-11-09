@@ -30,9 +30,31 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Install cargo-deny (pinned, checksum verified)
+        run: |
+          CARGO_DENY_VERSION=0.20.2
+          ASSET="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          gh release download "$CARGO_DENY_VERSION" \
+            --repo EmbarkStudios/cargo-deny \
+            --pattern "$ASSET" \
+            --pattern "$ASSET.sha256" \
+            --dir /tmp
+          echo "$(cat /tmp/$ASSET.sha256)  /tmp/$ASSET" | sha256sum -c -
+          tar -xzf /tmp/$ASSET -C /tmp
+          sudo install "/tmp/cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl/cargo-deny" /usr/local/bin/cargo-deny
+          cargo deny --version
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Cargo deny
+        run: cargo deny check
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      - name: x402 example tests
+        run: |
+          npm ci
+          npm test
+        working-directory: examples/x402-hire
       - name: Install the OpenSpec CLI
         run: npm install --global @fission-ai/openspec@1.14.3
       - name: OpenSpec validate

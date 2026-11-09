@@ -1,6 +1,6 @@
 [package]
 name = "nearbee-market"
-description = "Nearbee market adapter (NEAR AI Agent Market); implemented in stage S2"
+description = "Nearbee market adapter (NEAR AI Agent Market worker API)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,16 @@ workspace = true
 
 [dependencies]
 nearbee-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+nearbee-market-fixture.workspace = true
+wiremock.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net"] }

@@ -6,8 +6,9 @@ agents on the [NEAR AI Agent Market](https://market.near.ai), runs every hire as
 playbook run on the owner's machine (or with TEE models on NEAR AI Cloud), and
 delivers the result back to the buyer, who pays per job in USDC on NEAR.
 
-Status: design complete, implementation starting (NEAR Hackathon, 2026-11-01 to
-2026-11-14). See `docs/plan.md`.
+Status: stage S2 in (NEAR Hackathon, 2026-11-01 to 2026-11-14): market
+listing, credentials, the hire journal and `serve` are implemented; the live
+market round trip waits for the owner. See `docs/plan.md`.
 
 ## The problem
 
@@ -52,8 +53,7 @@ Nearbee is that agent, for any playbook:
 
 ## Try it
 
-Implementation in progress (stage S1 of `docs/stages.md` is in). What works
-today, with Rust stable and `apb` 1.0.0-beta.6 installed:
+What works today, with Rust stable and `apb` 1.0.0-beta.6 installed:
 
 1. `cp .env.example .env` and set `NEARAI_API_KEY` (only needed for the
    NEAR AI Cloud profile; the checks below report it by name, never its value).
@@ -71,17 +71,37 @@ today, with Rust stable and `apb` 1.0.0-beta.6 installed:
 5. `cargo run -p nearbee -- runs find --execution-id <id printed by step 4>`
    prints the run and `complete: yes` (exit 0); exit 1 means no run and the
    search was complete, exit 2 no run but some runs could not be searched.
+6. Store your own market agent token (shown once in the web app; it goes to
+   standard input, never to a flag or the environment):
+   `nearbee agent add <handle>` with the token on standard input. A draft
+   agent answers 404 to every public lookup, so its id cannot be resolved
+   from the handle: copy the agent id from the agent's settings page in the
+   market web app and run `nearbee agent add <handle> --agent-id <uuid>`
+   (a live agent resolves without the flag). It is kept
+   in `~/.config/nearbee/credentials` with mode 0600 and printed only as
+   `aat_...` plus its last four characters. `nearbee agent list` shows the
+   handles with masked tokens. Set `NEARBEE_CREDENTIALS` to use a different
+   store file (an operator override, honoured by `agent`, `list` and
+   `serve`); the default stays under `XDG_CONFIG_HOME`.
+7. `nearbee list playbooks/first-hire/listing.repo-audit-fast.yaml`
+   installs the listing's playbook into the apb workspace, patches the
+   market agent and sets the pricing plan. Publishing never changes
+   `listing_status`: the listing stays a draft until you publish it in the
+   web app.
+8. `nearbee serve` watches the market for your draft agent's hires and
+   turns each one into an apb run and a submitted deliverable; every step
+   is journaled under `.nearbee/hires/` and resumed after a restart.
+   `nearbee serve --reject <handle>` declines every new first-time hire of
+   that agent with `rejected` before any work (the no-spend x402 proof).
+9. `cd examples/x402-hire && npm install && node index.mjs <handle> "<task>"
+   --dry-run` reads an agent's 402 challenge, signs the NEP-366 delegate
+   with `near-api-js` v7, verifies it locally and stops without sending
+   (needs `NEAR_CALLER_ACCOUNT_ID` and `NEAR_CALLER_PRIVATE_KEY` in
+   `examples/x402-hire/.env`; the key is never printed).
 
-The steps below are the target for the judges' walkthrough and will be kept
-exact as the code lands.
-
-1. `cargo build --release` (Rust stable; `apb` installed and `apb dashboard` running).
-2. Put your market agent token and apb address into `.env` (see `.env.example`).
-3. `nearbee list playbooks/repo-audit/listing.fast.yaml` - publishes a draft listing.
-4. Hire your own draft agent on its market page with a short brief.
-5. `nearbee serve` - watch the hire become a run and a deliverable.
-6. `cargo run -p x402-hire -- <handle>` - hire it agent-to-agent with USDC.
-7. `nearbee replay` - the same lifecycle on recorded responses, no accounts needed.
+The live round trip (a real hire on the draft agent, and the paid x402
+decline proof) needs the owner's accounts and is exercised in the demo;
+see `docs/demo-log.md` once run.
 
 ## Hackathon
 
