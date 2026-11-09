@@ -1,0 +1,81 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:43:13Z",
+  "request": {
+    "body": {
+      "budget": {
+        "tokens": 200000,
+        "usd": 0.5
+      },
+      "instruction": "Synthetic fixture capture; never runs.",
+      "params": {
+        "execution_id": "fixture-exec-refused",
+        "hire_id": "fixture-hire-refused",
+        "topic": "honey bees"
+      },
+      "worktree": "<home>/.local/share/nearbee/apb-workspace/work/refusal"
+    },
+    "method": "POST",
+    "path": "/api/playbooks/smoke-own/run",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": {
+      "error": "budget_needs_decision",
+      "estimate": {
+        "comparable": {
+          "attempts_without_cost": 0,
+          "attempts_without_usage": 0,
+          "key_version": 2,
+          "runs": 2,
+          "runs_without_usage": 0,
+          "succeeded": 0,
+          "window": 50
+        },
+        "cost_usd": null,
+        "execution": "cli",
+        "note": "2 comparable runs: indicative only",
+        "playbook": "smoke-own",
+        "summary": "estimate (2 comparable runs of smoke-own 1.0.1, cli):\n  time    ~2 min (declared expected durations)\n  tokens  unknown: no comparable attempt reported usage\n  cost    unknown: no comparable attempt reported a cost\n  not estimated: write (no history)\n  note: 2 comparable runs: indicative only",
+        "time": {
+          "basis": "declared",
+          "spread": {
+            "high": 130000,
+            "kind": "single",
+            "low": 130000,
+            "n": 0,
+            "p50": 130000
+          }
+        },
+        "tokens": null,
+        "unestimated": [
+          "write"
+        ],
+        "unestimated_cost": [
+          "write"
+        ],
+        "unestimated_tokens": [
+          "write"
+        ],
+        "version": "1.0.1"
+      },
+      "instruction": "these gated nodes have no spend estimate in a dimension the budget limits, and the budget's on_no_estimate is ask: ask the person whether the run should pause before such a node (pause) or run it anyway (continue), then start it again with budget.on_no_estimate set to their answer",
+      "options": [
+        "pause",
+        "continue"
+      ],
+      "unestimated": [
+        "write"
+      ]
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 409
+  }
+}

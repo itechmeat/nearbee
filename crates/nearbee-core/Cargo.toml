@@ -1,0 +1,31 @@
+[package]
+name = "nearbee-core"
+description = "Nearbee core: domain types, the Market and Runner seams, result manifest, hire journal types, configuration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+yaml_serde.workspace = true
+dotenvy.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rust_decimal.workspace = true
+uuid.workspace = true
+time.workspace = true
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -7,3 +7,4 @@ nearbee.local.yaml
 .nearbee/
 *.log
 .reviews/
+.apb/

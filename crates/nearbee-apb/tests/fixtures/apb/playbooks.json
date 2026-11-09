@@ -1,0 +1,117 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:53:55Z",
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/api/playbooks",
+    "query": []
+  },
+  "response": {
+    "body": [
+      {
+        "current": "1.0.1",
+        "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+        "frozen": false,
+        "id": "smoke-deepseek",
+        "name": "Nearbee smoke (NEAR AI Cloud, DeepSeek)",
+        "node_count": 4,
+        "profiles": [
+          "nearbee-near-deepseek"
+        ],
+        "project": "scratch-project",
+        "versions": [
+          "1.0.1"
+        ],
+        "workspace_id": "ws-6f506366373b4c6ea2809fdd15552cba"
+      },
+      {
+        "current": "1.0.1",
+        "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+        "frozen": false,
+        "id": "smoke-own",
+        "name": "Nearbee smoke (own subscription)",
+        "node_count": 4,
+        "profiles": [
+          "nearbee-own"
+        ],
+        "project": "scratch-project",
+        "versions": [
+          "1.0.1"
+        ],
+        "workspace_id": "ws-6f506366373b4c6ea2809fdd15552cba"
+      },
+      {
+        "current": "1.0.1",
+        "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+        "frozen": false,
+        "id": "smoke-qwen",
+        "name": "Nearbee smoke (NEAR AI Cloud, Qwen)",
+        "node_count": 4,
+        "profiles": [
+          "nearbee-near"
+        ],
+        "project": "scratch-project",
+        "versions": [
+          "1.0.1"
+        ],
+        "workspace_id": "ws-6f506366373b4c6ea2809fdd15552cba"
+      },
+      {
+        "current": "1.0.1",
+        "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+        "frozen": false,
+        "id": "smoke-deepseek",
+        "name": "Nearbee smoke (NEAR AI Cloud, DeepSeek)",
+        "node_count": 4,
+        "profiles": [
+          "nearbee-near-deepseek"
+        ],
+        "project": "apb-workspace",
+        "versions": [
+          "1.0.0",
+          "1.0.1"
+        ],
+        "workspace_id": "ws-c0188762df734bf4a1f03f8db22f19d7"
+      },
+      {
+        "current": "1.0.1",
+        "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+        "frozen": false,
+        "id": "smoke-own",
+        "name": "Nearbee smoke (own subscription)",
+        "node_count": 4,
+        "profiles": [
+          "nearbee-own"
+        ],
+        "project": "apb-workspace",
+        "versions": [
+          "1.0.0",
+          "1.0.1"
+        ],
+        "workspace_id": "ws-c0188762df734bf4a1f03f8db22f19d7"
+      },
+      {
+        "current": "1.0.1",
+        "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+        "frozen": false,
+        "id": "smoke-qwen",
+        "name": "Nearbee smoke (NEAR AI Cloud, Qwen)",
+        "node_count": 4,
+        "profiles": [
+          "nearbee-near"
+        ],
+        "project": "apb-workspace",
+        "versions": [
+          "1.0.0",
+          "1.0.1"
+        ],
+        "workspace_id": "ws-c0188762df734bf4a1f03f8db22f19d7"
+      }
+    ],
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

@@ -1,0 +1,17 @@
+# Nearbee configuration example. Copy to nearbee.yaml (or nearbee.local.yaml,
+# which git ignores) and pass it with --config. Secrets never go here: they
+# come from the process environment or a .env file next to this file.
+# Relative paths resolve against this file's directory; `~` is your home.
+
+state_dir: .nearbee
+apb:
+  # Nearbee's own apb instance (scripts/apb-instance.sh), never the owner's
+  # everyday dashboard. APB_URL in the environment overrides it.
+  url: http://127.0.0.1:7322
+  # The dedicated apb project that holds Nearbee's market playbooks.
+  workspace_path: ~/.local/share/nearbee/apb-workspace
+limits:
+  markdown_bytes: 262144
+  file_bytes: 26214400
+  files: 20
+  total_bytes: 104857600

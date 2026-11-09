@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "nearai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NEAR AI Cloud (Confidential TEE models)",
+      "options": {
+        "baseURL": "https://cloud-api.near.ai/v1",
+        "apiKey": "{env:NEARAI_API_KEY}"
+      },
+      "models": {
+        "Qwen/Qwen3.8-27B": { "name": "Qwen3.8 27B (NEAR AI TEE)" },
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017": { "name": "DeepSeek V4.1 Flash (NEAR AI TEE)" }
+      }
+    }
+  }
+}

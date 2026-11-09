@@ -1,0 +1,32 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:53:55Z",
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/api/projects",
+    "query": []
+  },
+  "response": {
+    "body": [
+      {
+        "name": "scratch-project",
+        "parent_workspace_id": null,
+        "path": "<home>/.cache/nearbee-foundation-and-runner/scratch-project",
+        "playbook_count": 3,
+        "workspace_id": "ws-6f506366373b4c6ea2809fdd15552cba"
+      },
+      {
+        "name": "apb-workspace",
+        "parent_workspace_id": null,
+        "path": "<home>/.local/share/nearbee/apb-workspace",
+        "playbook_count": 3,
+        "workspace_id": "ws-c0188762df734bf4a1f03f8db22f19d7"
+      }
+    ],
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

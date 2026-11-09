@@ -78,3 +78,23 @@ buyer, and only for playbook steps where the model does the whole step.
    `/v1/models`; check per model with the attestation endpoint.
 3. Whether apb's current OpenCode or Codex custom-provider path handles the
    NEAR AI base URL with reasoning models cleanly is untested (`docs/plan.md`).
+
+## Smoke runs through apb (S1)
+
+Setup verified 2026-11-09: OpenCode 2.2.5 with the custom provider `nearai`
+in the dedicated workspace's `opencode.json` (`docs/apb.md`, "OpenCode on
+NEAR AI Cloud") lists `nearai/Qwen/Qwen3.8-27B` and
+`nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017`. The profiles are
+`playbooks/profiles/nearbee-near.yaml` (Qwen, DeepSeek fallback) and the
+smoke-only `nearbee-near-deepseek.yaml`.
+
+| Model | apb | OpenCode | Run | Status | Manifest | Usage | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `Qwen/Qwen3.8-27B` | 1.0.0-beta.6 | 2.2.5 | not run | blocked: the account balance is empty (O-3, 2026-11-09) | | | |
+| `deepseek-ai/DeepSeek-V4.1-Flash-1017` | 1.0.0-beta.6 | 2.2.5 | not run | blocked: same | | | |
+
+To run them once the credits are on the account and the owner allows the
+spend: `scripts/apb-instance.sh allow-billed` (apb otherwise refuses every
+OpenCode-on-`nearai` start with `billing_requires_confirmation`), then `NEARBEE_LIVE=1 cargo test -p nearbee-apb --test live --
+--ignored live_smoke_qwen --nocapture` and the same with
+`live_smoke_deepseek` (budget USD 0.50 each).
