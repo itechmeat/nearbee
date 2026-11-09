@@ -85,10 +85,17 @@ retention window (default 7 days), `nearbee cleanup` removes, for that hire:
 
 It keeps the hire journal (hashes, timestamps, states) and writes `deleted`
 with the list of what was removed and what could not be. Declined-before-start
-hires delete at once. Market playbooks run in a dedicated apb project with
-discover, memory, corrections capture and judge-example capture turned off in
-its `.apb/config.yaml`; the exact settings are recorded in `playbooks/README.md`
-once verified against apb.
+hires delete at once. Market playbooks run on Nearbee's own apb instance
+(separate config and data directory, `docs/apb.md`), so nothing they produce
+reaches the operator's everyday apb. apb itself learns from every run today
+with no switch to turn it off (S1 finding); apb's `near-ai-cloud-models`
+change adds an `external_data` run flag that excludes a run from every
+learning and reuse path (corrections, known problems, stats and estimates,
+judge examples, scenario capture, run memory) and keeps it visible on the run
+(D-023). Nearbee sets that flag on every market run once apb ships it and
+checks it on the run detail; until then only the owner's own test hires run.
+The flag does not cover an agent CLI's own memory and session files: those
+are executor caches in item 5 above, removed per executor.
 
 ## What is honestly not guaranteed
 

@@ -52,8 +52,28 @@ Nearbee is that agent, for any playbook:
 
 ## Try it
 
-Implementation in progress. The steps below are the target for the judges'
-walkthrough and will be kept exact as the code lands.
+Implementation in progress (stage S1 of `docs/stages.md` is in). What works
+today, with Rust stable and `apb` 1.0.0-beta.6 installed:
+
+1. `cp .env.example .env` and set `NEARAI_API_KEY` (only needed for the
+   NEAR AI Cloud profile; the checks below report it by name, never its value).
+2. `scripts/apb-instance.sh start` starts Nearbee's own apb dashboard on port
+   7322 (it never touches an apb you already run on 7321); then
+   `scripts/apb-instance.sh register ~/.local/share/nearbee/apb-workspace --git`
+   and `scripts/apb-instance.sh install` create the dedicated workspace with
+   the profiles and the smoke playbooks (`docs/apb.md`).
+3. `cargo run -p nearbee -- config check` prints one line per check (`ok`,
+   `missing`, `failed`): the config file, each variable by name, the apb
+   dashboard, the workspace. Exit 0 when everything required is there.
+4. `NEARBEE_LIVE=1 cargo test -p nearbee-apb --test live -- --ignored live_smoke_own --nocapture`
+   runs the synthetic smoke playbook through Nearbee's runner on your own
+   agent subscription and validates its result manifest.
+5. `cargo run -p nearbee -- runs find --execution-id <id printed by step 4>`
+   prints the run and `complete: yes` (exit 0); exit 1 means no run and the
+   search was complete, exit 2 no run but some runs could not be searched.
+
+The steps below are the target for the judges' walkthrough and will be kept
+exact as the code lands.
 
 1. `cargo build --release` (Rust stable; `apb` installed and `apb dashboard` running).
 2. Put your market agent token and apb address into `.env` (see `.env.example`).

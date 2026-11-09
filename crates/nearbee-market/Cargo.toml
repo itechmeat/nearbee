@@ -1,0 +1,15 @@
+[package]
+name = "nearbee-market"
+description = "Nearbee market adapter (NEAR AI Agent Market); implemented in stage S2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nearbee-core.workspace = true

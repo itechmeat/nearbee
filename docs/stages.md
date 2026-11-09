@@ -45,8 +45,7 @@ Delivers:
 Owner items: O-3 (NEAR AI Cloud key, credits topped up before the live Cloud
 runs). O-1 and O-2 were provided on 2026-11-09 ahead of S2.
 
-Done when: native gate green; the runner's contract tests pass offline; a
-recorded live run on each Cloud model is in the docs; `nearbee runs find
+Done when: native gate green; the runner's contract tests pass offline; `nearbee runs find
 --hire-id` (or the equivalent library test) finds a REST-started run.
 
 Out of scope: market code, intake, journal recovery logic.
@@ -55,15 +54,28 @@ Out of scope: market code, intake, journal recovery logic.
 
 Delivers:
 
+0. Carried from S1 (owner, 2026-11-09): the two billed smoke runs on
+   `Qwen/Qwen3.8-27B` and `deepseek-ai/DeepSeek-V4.1-Flash-1017` through
+   `ApbRunner` once the NEAR AI Cloud balance is topped up and the owner
+   allows billed launches on Nearbee's apb instance
+   (`scripts/apb-instance.sh allow-billed`); results into `docs/apb.md` and
+   `docs/near-ai-cloud.md`. The tests are ready:
+   `NEARBEE_LIVE=1 cargo test -p nearbee-apb --test live -- --ignored live_smoke_qwen`
+   and `live_smoke_deepseek`.
 1. `nearbee-market`: assignments in all statuses with paging, start, messages
    with `clientRequestId`, progress, file upload, submit, decline, agent patch,
    pricing plans; recorded real responses as fixtures; `X-Market-Delivery`
    dedup kept for v1.1 webhooks only as a type.
-2. `nearbee list` publishes one draft listing from a materialised playbook;
+2. Agent tokens are owned by Nearbee, not by `.env`: `nearbee agent add
+   <handle>` takes an `aat_` token once (stdin, never an argument) and stores
+   it in `~/.config/nearbee/credentials` (mode 0600, outside the repository);
+   config and listings name agents by handle only; the token of
+   `repo-audit-fast` moves there from `.env` (D-022).
+3. `nearbee list` publishes one draft listing from a materialised playbook;
    `nearbee serve` polls, takes a hire, runs a trivial playbook, submits the
    manifest's Markdown. **First end-to-end hire**: the owner hires the draft
    from the web.
-3. `examples/x402-hire`: builds and signs a NEP-366 delegate for a 402
+4. `examples/x402-hire`: builds and signs a NEP-366 delegate for a 402
    response and proves key type and relayer acceptance without spending
    (open question 13); falls back to `near-api-js` if the Rust path is
    awkward (D-003).
@@ -143,7 +155,19 @@ the payload and sent the submission once (`docs/hackathon.md`).
 ## Dependencies outside this repository
 
 1. **apb native NEAR AI Cloud support** (requested from the apb project on
-   2026-11-09, see `docs/apb.md` "Things apb may need"). Nearbee does not wait
+   2026-11-09, `docs/apb-request-near-models.md`; specified there as the apb
+   change `near-ai-cloud-models`: NEAR models through apb's built-in `dsh`
+   agent with a run-scoped route, key in `NEARAI_API_KEY`, privacy class per
+   model, validator warnings V220 to V222; no release date promised). Nearbee does not wait
    for it: S1 uses whatever executor path works on the day; if the apb change
    lands before S4, the profile templates and the tier validator switch to it
    in S4.
+
+## Deferred (only if time is left after S6)
+
+1. **`nearbee login`**: one owner sign-in over OAuth on the market's
+   `/mcp/pro`, after which `nearbee list` creates the agent, sets its price
+   and mints its token itself. Needs a live check first: `docs/market.md`
+   says `/mcp/pro` carries agent management, the vendored worker skill lists
+   no such tools (D-022).
+

@@ -19,14 +19,22 @@ as written. Accounts, keys and go-aheads moved to `docs/owner-checklist.md`
     payloads and limits, `verifiableOffered` semantics, the refund-policy field
     of a listing (Job Terms 5.1) in the API.
 11. NEAR AI Cloud: OpenCode custom provider with `DeepSeek-V4.1-Flash-1017`
-    (reasoning) inside apb; which models expose `provider_tee` response
+    (reasoning) inside apb (the provider config is in place and OpenCode
+    lists both models, 2026-11-09; the billed smoke runs wait for credits,
+    O-3); which models expose `provider_tee` response
     signatures on non-streamed calls; `typesafe/jev-1.13` processing policy and
     reachability through apb's decision providers.
-12. apb: the exact `RunDetail` fields for node outputs and `outputs.files`;
-    `apb runs --field` on a `search: true` param from the REST-started run;
-    deleting a run's artifacts by run id; which `.apb/config.yaml` settings turn
-    off discover, memory, corrections and judge-example capture; whether a
-    loopback dashboard without keys accepts Nearbee's calls.
+12. apb: answered 2026-11-09 (S1, `docs/apb.md`): the `RunDetail` fields
+    (`run_status`, `nodes` and `outputs` as maps by node id, `worktree`,
+    `params`, `usage`); field search on `search: true` params of a
+    REST-started run works (`GET /api/runs?field=execution_id:<id>`, complete
+    with `not_indexed` and `withheld` at 0); a loopback dashboard without keys
+    accepts Nearbee's calls, writes included, with no credential. Still open:
+    `outputs.files` (no smoke playbook declares it yet); deleting a run's
+    artifacts by run id; which `.apb/config.yaml` settings turn off discover,
+    memory, corrections and judge-example capture; whether a dashboard with a
+    redirected `APB_CONFIG_DIR` is held to the default config dir's `billing`
+    settings.
 13. x402 on mainnet: does the relayer accept a function-call access key limited
     to the USDC contract, or must the delegate be signed with a full-access key;
     does the Rust `near-api` crate build and sign a `SignedDelegateAction`

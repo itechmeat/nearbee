@@ -1,0 +1,12 @@
+# The owner's own subscription executor: runs that spend no NEAR AI Cloud
+# credit. Installed as the project profile nearbee-own of Nearbee's apb
+# workspace (scripts/apb-instance.sh install).
+name: nearbee-own
+description: Nearbee runs on the owner's own agent subscription
+executor:
+  agent: claude
+  model: claude-haiku-5-5
+soul: any
+environment: minimal
+process_env:
+  policy: allowlist

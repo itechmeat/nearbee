@@ -33,16 +33,18 @@ is files under `.nearbee/` (one durable journal per hire) and the market itself.
 | `core/intake` | take or decline a hire against its listing: hard limits, scope question to a decision model, cost ceiling | `Runner.decide` |
 | `core/pricing` | price and SLA from run observations; per-hire cumulative cost ceiling; the SKU expansion of one playbook into several materialised playbooks and listings | `Runner.runs`, `Runner.estimate` |
 | `core/privacy` | tiers (plain, attested, blind), the profile, connector and decision-provider rules per tier, the data statement, evidence collection, deletion inventory | `Runner.profiles`, `Runner.connectors` |
-| `core/deliverable` | validate the run's `out/result.json` manifest (containment, hashes, sizes), build Markdown + files, append evidence and the data statement, enforce 256 KiB in UTF-8 bytes | nothing external |
+| `core/deliverable` | validate the run's `out/result.json` manifest (containment, hashes, sizes; `nearbee_core::manifest` since S1), build Markdown + files, append evidence and the data statement, enforce 256 KiB in UTF-8 bytes | the local filesystem (narrow synchronous reads of the finished run's `out/`) |
 | `core/hire` | the state machine of one hire with a durable journal: received → intake → start-intent → started → run-intent → running → submitted → accepted / rework / redo / cancelled / disputed → closed → deleted | `Market`, `Runner` |
 | `core/recovery` | on boot and on every poll: reconcile journal vs market rows vs apb runs; resolve ambiguous starts; stop local work on cancelled or refunded hires | `Market`, `Runner` |
 | `market/` | `Market` interface and its one implementation `NearAgentMarket`: REST client with retries, `clientRequestId` on sends, file upload, assignments in every status with paging | fetch |
-| `runner/` | `Runner` interface and its implementation `ApbRunner`: REST client to apb, run start with params and worktree, run lookup by `hire_id` search field, polling, answer and review, estimate, profiles, connectors, `decide`; `apb stats --json` and `apb runs --json` over the CLI where REST lacks a route | fetch, child process |
+| `runner/` | `Runner` interface and its implementation `ApbRunner` (`crates/nearbee-apb`): REST client to Nearbee's own apb instance pinned to one workspace, run start with params, worktree and budget, run lookup by the `hire_id` and `execution_id` search fields with completeness, polling; later stages add answer and review, profiles, connectors, `decide`, and `apb stats --json` over the CLI where REST lacks a route | fetch, child process |
 | `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check`, `nearbee replay` (fixture walkthrough) | all of the above |
 | `config` | `nearbee.yaml` (committed example) + `.env` secrets | |
 
 Interfaces are small and typed; the core never imports `market/` or `runner/`
-implementations. Tests use in-memory fakes of both interfaces; a recorded set
+implementations. The core does no network I/O; it may run narrow synchronous
+file checks of its own (the result manifest validation reads the finished
+run's `out/` with bounded reads and returns the checked bytes). Tests use in-memory fakes of both interfaces; a recorded set
 of real market responses drives the `replay` walkthrough without credentials.
 
 ## Flows
@@ -54,9 +56,15 @@ of real market responses drives the `replay` walkthrough without credentials.
    optional limits and scope, refund policy text.
 2. **Materialise** the variant as its own apb playbook id (the REST start has
    no `version` or `overrides`): copy the source playbook into
-   `playbooks/<name>/<variant>/` with fixed profile names, register it in the
+   `playbooks/<name>/<variant>/` with fixed profile names (`nearbee-own` for
+   the owner's subscriptions, `nearbee-near` for NEAR AI Cloud TEE models;
+   `playbooks/README.md`), register it in the
    dedicated apb project, record its version digest in the listing. A hire runs
    that id and nothing else; `serve` checks the run's playbook id and version.
+   The materialised playbook declares `supervisor.policy.trial_candidates: off`
+   (publishing refuses one without it): under apb's default `next_run` policy a
+   start without a version runs a supervisor's candidate version instead of
+   the published one (`docs/apb.md`, "Current version and candidates").
 3. Validate the variant against its tier (`docs/privacy.md`); generate the
    description, bio, data statement and refund policy text; derive the per-hire
    ceiling from the price (`docs/pricing.md`).
@@ -83,11 +91,15 @@ of real market responses drives the `replay` walkthrough without credentials.
      buyer with the plan and the deadline (with `clientRequestId`);
    - decline: `POST decline {reason: rejected, detail}` within the first hour.
    Questions to the buyer before start are v1.1 (web and MCP buyers only).
-3. Journal `run-intent` with the hire id, then start the run: fresh worktree per
-   hire, params from the brief plus `hire_id` (a `search: true` param),
-   `instruction`, `budget` (`docs/pricing.md`). Journal `running` with the run
-   id. A start that times out is resolved by `apb runs --field hire_id=<id>`
-   before any retry.
+3. Journal `run-intent` with the hire id and a fresh `execution_id`, then
+   start the run: fresh worktree per hire, params from the brief plus
+   `hire_id` and `execution_id` (both `search: true` params, added by the
+   runner), `instruction`, `budget` (`docs/pricing.md`). Journal `running` with
+   the run id. A start whose outcome is unknown is resolved by a search on
+   `execution_id` before any retry. An empty search after an ambiguous start
+   does not prove that no run exists unless the search was complete (no runs
+   `not_indexed` or `withheld`, `docs/apb.md`); an incomplete empty search
+   leaves the hire for recovery, never a second start.
 4. Follow the run: poll `GET /api/runs/{id}`; map node stage changes to `POST
    progress` (at most one per 30 s); keep a wall-clock limit at SLA minus a
    margin; owner review gates (if the playbook has any) go to the owner through
@@ -136,8 +148,9 @@ external write (intent) and after it (done). On boot and on every poll cycle
 | Journal state | Market says | apb says | Action |
 | --- | --- | --- | --- |
 | `start-intent` without `started` | `startedAt` set | - | journal `started`, continue |
-| `run-intent` without `running` | - | a run with `hire_id` exists | adopt it, journal `running` |
-| `run-intent` without `running` | - | no run | start again (the intent proves no run exists) |
+| `run-intent` without `running` | - | a run with the intent's `execution_id` exists | adopt it, journal `running` |
+| `run-intent` without `running` | - | a complete search finds no run | start again with a new `execution_id` |
+| `run-intent` without `running` | - | an incomplete search finds no run | do not start; report to the owner (absence is not proven) |
 | `running` | row cancelled or refunded | run alive | pause and abort the run, journal `cancelled`, delete data |
 | `submit-intent` without `submitted` | `deliverableUrl` set | - | journal `submitted` |
 | `submit-intent` without `submitted` | not submitted | - | resubmit the identical deliverable |
@@ -151,17 +164,21 @@ lock file is held.
 `nearbee.yaml` (committed, no secrets):
 
 ```yaml
+state_dir: .nearbee
 apb:
-  base_url: http://127.0.0.1:7788        # the apb dashboard, loopback
-  project: nearbee-market                 # dedicated apb project for market playbooks
+  url: http://127.0.0.1:7322              # Nearbee's own apb instance (scripts/apb-instance.sh)
+  workspace_path: ~/.local/share/nearbee/apb-workspace   # dedicated apb project
+limits:                                   # result manifest limits (S1)
+  markdown_bytes: 262144
+  file_bytes: 26214400
+  files: 20
+  total_bytes: 104857600
 market:
   base_url: https://market.near.ai
 agents:                                   # one entry per market agent (SKU)
   - handle: repo-audit-fast
-    token_env: NEARBEE_TOKEN_REPO_AUDIT_FAST
     listing: playbooks/repo-audit/listing.fast.yaml
   - handle: repo-audit-premium
-    token_env: NEARBEE_TOKEN_REPO_AUDIT_PREMIUM
     listing: playbooks/repo-audit/listing.premium.yaml
 limits:
   concurrent_runs: 2
@@ -172,20 +189,32 @@ owner:
   review_timeout_minutes: 60
 ```
 
-`.env`: `APB_API_KEY` (if the dashboard has keys), `NEARBEE_TOKEN_*`,
-`NEAR_AI_CLOUD_API_KEY` (for the near profiles), and for the demo caller
-`NEAR_CALLER_ACCOUNT_ID`, `NEAR_CALLER_PRIVATE_KEY`.
+S1 ships the `state_dir`, `apb` and `limits` blocks
+(`nearbee.example.yaml`); the other blocks arrive with their stages, and an
+unknown key is refused until then. Relative paths resolve against the file's
+directory; `APB_URL` in the environment overrides `apb.url`. The apb URL
+must be an absolute `http` or `https` URL without userinfo
+(`user:key@host`); the key goes in `APB_API_KEY`.
+
+`.env`: `APB_URL` (optional), `APB_API_KEY` (if the dashboard has keys),
+`NEARAI_API_KEY` (for the `nearbee-near` profile; it reaches the executors
+through the environment of Nearbee's apb instance, not through Nearbee), and for the demo caller
+`NEAR_CALLER_ACCOUNT_ID`, `NEAR_CALLER_PRIVATE_KEY`. Agent tokens are not in
+`.env`: `nearbee agent add <handle>` stores each one in
+`~/.config/nearbee/credentials` (mode 0600), keyed by handle (D-022).
 
 ## Runtime and stack
 
 Rust, one cargo workspace: `crates/nearbee-core` (listing, intake, pricing,
-privacy, deliverable, hire, recovery: no I/O, traits `Market` and `Runner`),
+privacy, deliverable, hire, recovery: no network I/O, traits `Market` and `Runner`),
 `crates/nearbee-market` (the NEAR AI Agent Market client), `crates/nearbee-apb`
 (the apb client), `crates/nearbee` (the CLI binary: `list`, `serve`, `hires`,
 `cleanup`, `config check`, `replay`), `examples/x402-hire` (the demo caller,
 `near-primitives` or `near-api` for the NEP-366 delegate; a `near-api-js`
 script is the fallback if the Rust path is awkward). `reqwest`, `tokio`,
-`serde`, `serde_yaml`, `clap`, `sha2`. Tests with `cargo test`; the core is
+`serde`, `yaml_serde`, `dotenvy`, `clap`, `sha2`, `rust_decimal` (money is
+never `f64`), `uuid` (v7 operation ids), `rustix` (descriptor-relative
+`openat` for result validation without `unsafe`). Tests with `cargo test`; the core is
 tested with in-memory fakes, the clients with recorded responses. The module
 table above maps onto these crates. See `docs/decisions.md` D-003.
 

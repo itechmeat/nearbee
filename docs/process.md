@@ -9,11 +9,44 @@ fixed; the agents that fill them may change.
 | --- | --- | --- |
 | Owner | the project owner | product decisions, accounts and keys (`docs/owner-checklist.md`), every spend, publish and submission |
 | Integrator | the coordinating agent | the OpenSpec artifacts of each stage, the implementer's brief, acceptance of the result against the specs, the quality cycle, the pull request; accountable for what lands on main |
-| Implementer | a separate coding agent (since 2026-11-09: Opus subagents of the integrator, so the cross-family review runs on another family and the final review on a third) | the code and tests of one stage, working through `tasks.md` in its own worktree; runs only the targeted tests of the crates it touches |
+| Implementer | a separate coding agent (S1, 2026-11-09: Claude Opus in a headless session, so the cross-family review runs on GLM and the final review on Codex) | the code and tests of one stage, working through `tasks.md` in its own worktree; runs only the targeted tests of the crates it touches |
 | Reviewers | agents that did not write the artifact under review | findings only, never edits |
 
 The implementer does not commit, push, open pull requests or start nested
 review cycles; the integrator does those after the cycle is clean.
+
+## Implementer rules
+
+Every stage's implementer follows these; the brief only names the change.
+
+1. Work only in the stage worktree, through the change's `tasks.md` in
+   order, ticking each box when done; test first for every behaviour (the
+   test fails on an assertion before the code exists).
+2. Do not commit, push, open pull requests, change git config or start
+   subagents.
+3. English only; no em or en dashes and no exclamation marks in docs and
+   user-facing strings.
+4. Never print, log or copy a secret value; `.env` is read by variable
+   names only.
+5. Build output in `$HOME/.cache/nearbee-<change>-target`
+   (`CARGO_TARGET_DIR`), never under `/tmp`, `/dev/shm` or the worktree.
+   Run the tests of the crate you touch plus `cargo check --workspace`; the
+   full gate only in the change's last task.
+6. apb: only Nearbee's own instance (port 7322, its own `APB_CONFIG_DIR`,
+   `docs/apb.md`); never the operator's everyday apb, its config or the apb
+   source repository. Read apb source at the installed release tag.
+7. Spend only where a task says so, within its cap; on missing credits stop
+   at that task, leave it unticked and report.
+8. Temporary data under `$HOME/.cache/nearbee-<change>/`, removed at the end;
+   stop every process you started (say which ones keep running); delete only
+   paths you created.
+9. Reality beats the artifacts: when an outside system differs, follow it,
+   record the difference in the fitting doc and the report. Take routine
+   decisions yourself; stop only before a destructive action or a spend
+   beyond rule 7. Out of time: stop at a task boundary with honest ticks.
+10. Report to `.reviews/<change>-implementer.md` (ignored by git): tasks done
+    and not done with reasons, dependency versions, decisions, deviations,
+    live-run results, the verbatim tail of each gate command, files changed.
 
 ## OpenSpec
 

@@ -1,0 +1,89 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:43:19Z",
+  "request": {
+    "body": {
+      "budget": {
+        "on_no_estimate": "continue",
+        "usd": 0.5
+      },
+      "instruction": "Synthetic smoke run for the Nearbee fixtures.",
+      "params": {
+        "execution_id": "fixture-exec-737190",
+        "hire_id": "fixture-hire-737190",
+        "topic": "honey bees"
+      },
+      "worktree": "<home>/.local/share/nearbee/apb-workspace/work/smoke-737190"
+    },
+    "method": "POST",
+    "path": "/api/playbooks/smoke-own/run",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": {
+      "budget": {
+        "limit": {
+          "usd": 0.5
+        },
+        "on_no_estimate": "continue",
+        "sets": 1,
+        "source": "run",
+        "usd": {
+          "remaining": 0.5,
+          "spent": 0.0,
+          "unknown_attempts": 0
+        }
+      },
+      "estimate": {
+        "comparable": {
+          "attempts_without_cost": 0,
+          "attempts_without_usage": 0,
+          "key_version": 2,
+          "runs": 2,
+          "runs_without_usage": 0,
+          "succeeded": 0,
+          "window": 50
+        },
+        "cost_usd": null,
+        "execution": "cli",
+        "note": "2 comparable runs: indicative only",
+        "playbook": "smoke-own",
+        "summary": "estimate (2 comparable runs of smoke-own 1.0.1, cli):\n  time    ~2 min (declared expected durations)\n  tokens  unknown: no comparable attempt reported usage\n  cost    unknown: no comparable attempt reported a cost\n  not estimated: write (no history)\n  note: 2 comparable runs: indicative only",
+        "time": {
+          "basis": "declared",
+          "spread": {
+            "high": 130000,
+            "kind": "single",
+            "low": 130000,
+            "n": 0,
+            "p50": 130000
+          }
+        },
+        "tokens": null,
+        "unestimated": [
+          "write"
+        ],
+        "unestimated_cost": [
+          "write"
+        ],
+        "unestimated_tokens": [
+          "write"
+        ],
+        "version": "1.0.1"
+      },
+      "run_id": "smoke-own-1794253399097",
+      "warnings": [
+        "a dollar limit is set, but no comparable attempt reported a cost: the gate cannot weigh dollars, so on_no_estimate decides before each gated node"
+      ]
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

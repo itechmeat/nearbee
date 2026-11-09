@@ -1,0 +1,22 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:41:48Z",
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/api/runs/run-does-not-exist",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": "run `run-does-not-exist` not found",
+    "headers": {
+      "content-type": "text/plain; charset=utf-8"
+    },
+    "status": 404
+  }
+}

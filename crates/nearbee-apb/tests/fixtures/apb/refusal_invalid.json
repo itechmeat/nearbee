@@ -1,0 +1,27 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:41:48Z",
+  "request": {
+    "body": {
+      "instruction": "x",
+      "params": {
+        "topic": 3
+      }
+    },
+    "method": "POST",
+    "path": "/api/playbooks/smoke-own/run",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": "Failed to deserialize the JSON body into the target type: params.topic: invalid type: integer `3`, expected a string at line 1 column 38",
+    "headers": {
+      "content-type": "text/plain; charset=utf-8"
+    },
+    "status": 422
+  }
+}

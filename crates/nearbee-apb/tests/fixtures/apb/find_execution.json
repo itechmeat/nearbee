@@ -1,0 +1,73 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:53:34Z",
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/api/runs",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ],
+      [
+        "playbook",
+        "smoke-own"
+      ],
+      [
+        "field",
+        "execution_id:fixture-exec-737190"
+      ]
+    ]
+  },
+  "response": {
+    "body": {
+      "not_indexed": 0,
+      "runs": [
+        {
+          "duration_ms": 8266,
+          "playbook": "smoke-own",
+          "progress": {
+            "label": null,
+            "pending_question": null,
+            "pending_questions": [],
+            "pending_review": null,
+            "pending_reviews": [],
+            "pending_supervisor": null,
+            "pending_waits": [],
+            "percent": 100,
+            "plan_key": "1.0.1|",
+            "waiting_kind": null,
+            "waiting_on": null
+          },
+          "project": "apb-workspace",
+          "run_id": "smoke-own-1794253399097",
+          "scope": "project",
+          "search": {
+            "fields": [
+              {
+                "name": "hire_id",
+                "state": "value",
+                "value": "fixture-hire-737190"
+              },
+              {
+                "name": "execution_id",
+                "state": "value",
+                "value": "fixture-exec-737190"
+              }
+            ],
+            "state": "indexed"
+          },
+          "started_ts": 1794253399144,
+          "status": "succeeded",
+          "workspace_id": "ws-c0188762df734bf4a1f03f8db22f19d7"
+        }
+      ],
+      "withheld": 0
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

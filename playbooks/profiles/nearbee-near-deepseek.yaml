@@ -1,0 +1,12 @@
+# Smoke-only profile: DeepSeek first, so the smoke-deepseek playbook measures
+# that model. Market playbooks never name it; they use nearbee-near.
+name: nearbee-near-deepseek
+description: Smoke runs on the NEAR AI Cloud DeepSeek TEE model
+executor:
+  agent: opencode
+  model: nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017
+soul: any
+environment: minimal
+process_env:
+  policy: allowlist
+  allow: [NEARAI_API_KEY]

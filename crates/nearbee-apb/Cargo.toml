@@ -1,0 +1,29 @@
+[package]
+name = "nearbee-apb"
+description = "Nearbee runner adapter: drives a local apb dashboard over REST"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nearbee-core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rust_decimal.workspace = true
+
+[dev-dependencies]
+h2.workspace = true
+tracing-subscriber.workspace = true
+wiremock.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net"] }

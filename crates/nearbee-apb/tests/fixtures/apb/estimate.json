@@ -1,0 +1,67 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:41:48Z",
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/api/playbooks/smoke-own/estimate",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": {
+      "comparable": {
+        "attempts_without_cost": 0,
+        "attempts_without_usage": 0,
+        "key_version": 2,
+        "runs": 0,
+        "runs_without_usage": 0,
+        "succeeded": 0,
+        "window": 50
+      },
+      "cost_usd": null,
+      "execution": "cli",
+      "nodes": [
+        {
+          "node": "write",
+          "per_attempt_p50": {},
+          "per_run": {},
+          "per_visit": {},
+          "visits_p50": 0.0
+        }
+      ],
+      "note": "0 comparable runs: indicative only",
+      "playbook": "smoke-own",
+      "summary": "estimate (0 comparable runs of smoke-own 1.0.1, cli):\n  time    ~2 min (declared expected durations)\n  tokens  unknown: no comparable attempt reported usage\n  cost    unknown: no comparable attempt reported a cost\n  not estimated: write (no history)\n  note: 0 comparable runs: indicative only",
+      "time": {
+        "basis": "declared",
+        "spread": {
+          "high": 130000,
+          "kind": "single",
+          "low": 130000,
+          "n": 0,
+          "p50": 130000
+        }
+      },
+      "tokens": null,
+      "unestimated": [
+        "write"
+      ],
+      "unestimated_cost": [
+        "write"
+      ],
+      "unestimated_tokens": [
+        "write"
+      ],
+      "version": "1.0.1"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

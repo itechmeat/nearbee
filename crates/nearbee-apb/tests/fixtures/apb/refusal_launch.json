@@ -1,0 +1,101 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "captured_at": "2026-11-09T19:41:48Z",
+  "request": {
+    "body": {
+      "budget": {
+        "on_no_estimate": "ask",
+        "usd": 0.5
+      },
+      "instruction": "Synthetic fixture capture; never runs.",
+      "params": {
+        "execution_id": "fixture-exec-refused",
+        "hire_id": "fixture-hire-refused",
+        "topic": "honey bees"
+      },
+      "worktree": "<home>/.local/share/nearbee/apb-workspace/work/refusal"
+    },
+    "method": "POST",
+    "path": "/api/playbooks/smoke-qwen/run",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": {
+      "billing": {
+        "billed": "ask",
+        "held": [
+          "opencode: unknown"
+        ],
+        "predicted": [
+          {
+            "agent": "opencode",
+            "basis": "unknown"
+          }
+        ],
+        "sources": [
+          "default"
+        ],
+        "unknown_basis": "ask"
+      },
+      "detail": "this run would start agent work that is billed or of unknown basis (opencode: unknown; default); ask the person whether to start it, then call again with confirm_launch set to the launch_nonce and the same launch_version and launch_choice (CLI: --confirm-launch)",
+      "id": "smoke-qwen",
+      "launch_choice": "current",
+      "launch_kind": "start",
+      "launch_nonce": "launch-sha256:33fc66bc2c50a8fdf317eca73",
+      "launch_policy": "allow",
+      "launch_sources": [
+        "default"
+      ],
+      "launch_version": "1.0.1",
+      "policy": "billing_requires_confirmation",
+      "start_actions": [
+        {
+          "args": [
+            {
+              "name": "confirm_launch",
+              "required": true,
+              "value": {
+                "kind": "given",
+                "value": "launch-sha256:33fc66bc2c50a8fdf317eca73"
+              }
+            },
+            {
+              "name": "launch_version",
+              "required": true,
+              "value": {
+                "kind": "given",
+                "value": "1.0.1"
+              }
+            },
+            {
+              "name": "launch_choice",
+              "required": true,
+              "value": {
+                "kind": "given",
+                "value": "current"
+              }
+            }
+          ],
+          "code": "confirm_launch",
+          "playbook": "smoke-qwen",
+          "principals": [
+            "person",
+            "operator",
+            "host"
+          ],
+          "reason": "playbook `smoke-qwen` would start agent work that is billed or of unknown basis (opencode: unknown); a person confirms this launch",
+          "version": "1.0.1"
+        }
+      ]
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 409
+  }
+}

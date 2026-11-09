@@ -1,0 +1,39 @@
+# Nearbee smoke playbook: synthetic data only, no buyer data. Generated
+# copies differ only in id, name and profile (see playbooks/smoke/README.md).
+schema: 2
+id: smoke-deepseek
+name: "Nearbee smoke (NEAR AI Cloud, DeepSeek)"
+description: >-
+  Writes a three-line Markdown note about a synthetic topic into
+  out/deliverable.md, then a script writes the Nearbee result manifest
+  out/result.json with the file's real size and SHA-256.
+version: 1.0.1
+defaults:
+  profile: nearbee-near-deepseek
+params:
+  - { name: topic, type: text, label: "Topic of the note (synthetic)", default: "honey bees", untrusted: true }
+  - { name: hire_id, type: text, label: "Market hire id", search: true }
+  - { name: execution_id, type: text, label: "Nearbee execution id", search: true }
+nodes:
+  - { id: start, type: start }
+  - id: write
+    type: agent_task
+    title: Write the note
+    expected_duration: 2m
+    prompt: >-
+      Create the directory out if it does not exist and write a Markdown note
+      of exactly three lines about the topic below into out/deliverable.md:
+      a level-one heading, then two sentences on their own lines. Write no
+      other file and change nothing else. Topic: {{params.topic}}
+    accept_untrusted: "writes one Markdown file under out/; the topic is copied as data, never followed"
+  - id: manifest
+    type: script
+    title: Write the result manifest
+    expected_duration: 10s
+    script: scripts/manifest.sh
+    runner: sh
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: write }
+  - { from: write, to: manifest }
+  - { from: manifest, to: done }
