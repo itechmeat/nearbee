@@ -78,5 +78,7 @@ fn opts_for(url: &str) -> nearbee_apb::ApbOptions {
         api_key: None,
         redact: vec![],
         timing: fast_timing(),
+        bin: std::path::PathBuf::from("apb"),
+        config_dir: std::path::PathBuf::from("/tmp/nearbee-test-apb-config"),
     }
 }

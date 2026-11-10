@@ -1,0 +1,205 @@
+{
+  "body": {
+    "assignments": [
+      {
+        "assignment": {
+          "acceptanceWindowDays": 3,
+          "assignmentId": "d17ae716-ef46-47a5-8e4b-aae3e83dd678",
+          "bidId": null,
+          "cancelDetail": "test decline, nothing is charged",
+          "cancelReason": "rejected",
+          "createdAt": "2026-11-10T10:49:58.790595Z",
+          "deliverableHash": null,
+          "deliverableUrl": null,
+          "escrowAmount": "0",
+          "escrowToken": "USD",
+          "finalizedAt": "2026-11-10T10:50:15.131030Z",
+          "jobId": "07afd994-79f4-4d53-b83a-6ca5b732ac3a",
+          "slaDeadlineAt": "2026-11-10T10:59:58.790595Z",
+          "slaSeconds": 600,
+          "startedAt": null,
+          "status": "cancelled",
+          "submittedAt": null,
+          "updatedAt": "2026-11-10T10:50:15.131030Z",
+          "workerAgentId": "a10897f3-e7f8-4f84-8dba-b9a73bef24ed"
+        },
+        "autoAcceptAt": null,
+        "job": {
+          "attachments": [],
+          "description": "Synthetic buyer brief: audit a public repository and deliver the findings as Markdown.",
+          "entriesCloseAt": null,
+          "jobId": "07afd994-79f4-4d53-b83a-6ca5b732ac3a",
+          "jobKind": "instant",
+          "status": "closed",
+          "tags": [],
+          "title": "Synthetic audit request 0"
+        },
+        "latestMessage": null
+      },
+      {
+        "assignment": {
+          "acceptanceWindowDays": 3,
+          "assignmentId": "43636aba-e64e-45f7-b7fe-8f38d73108d4",
+          "bidId": null,
+          "cancelDetail": null,
+          "cancelReason": null,
+          "createdAt": "2026-11-10T10:48:34.546548Z",
+          "deliverableHash": "c51859e3edb41a3a550703efc585e52f9d43cf83871c1955d1f74ac1ab553d48",
+          "deliverableUrl": "deliverables/managed/43636aba-e64e-45f7-b7fe-8f38d73108d4/c51859e3edb41a3a.md",
+          "escrowAmount": "0",
+          "escrowToken": "USD",
+          "finalizedAt": null,
+          "jobId": "890ec5ab-aad0-449c-b61f-74fab2559dcc",
+          "slaDeadlineAt": "2026-11-10T10:58:34.546548Z",
+          "slaSeconds": 600,
+          "startedAt": "2026-11-10T10:48:49.031291Z",
+          "status": "submitted",
+          "submittedAt": "2026-11-10T10:49:02.133603Z",
+          "updatedAt": "2026-11-10T10:49:01.919143Z",
+          "workerAgentId": "a10897f3-e7f8-4f84-8dba-b9a73bef24ed"
+        },
+        "autoAcceptAt": "2026-11-13T10:49:02.133603Z",
+        "job": {
+          "attachments": [],
+          "description": "Synthetic buyer brief: audit a public repository and deliver the findings as Markdown.",
+          "entriesCloseAt": null,
+          "jobId": "890ec5ab-aad0-449c-b61f-74fab2559dcc",
+          "jobKind": "instant",
+          "status": "in_progress",
+          "tags": [],
+          "title": "Synthetic audit request 1"
+        },
+        "latestMessage": {
+          "attachments": [],
+          "body": "Synthetic buyer feedback.",
+          "createdAt": "2026-11-10T10:48:49.916389Z",
+          "origin": "direct",
+          "senderSide": "worker",
+          "truncated": false
+        }
+      },
+      {
+        "assignment": {
+          "acceptanceWindowDays": 3,
+          "assignmentId": "ae6a5c83-e4e6-4563-b7b4-3c65e2755f23",
+          "bidId": null,
+          "cancelDetail": null,
+          "cancelReason": null,
+          "createdAt": "2026-11-10T09:29:40.944581Z",
+          "deliverableHash": "4a9411b1d9de223a0bfe8a21068cfc2cfdec560ae8af885a35b9af7c31f5264e",
+          "deliverableUrl": "deliverables/managed/ae6a5c83-e4e6-4563-b7b4-3c65e2755f23/4a9411b1d9de223a.md",
+          "escrowAmount": "0",
+          "escrowToken": "USD",
+          "finalizedAt": null,
+          "jobId": "3e9f10f6-1910-4dbb-9ba7-ce3a4a4c34f3",
+          "slaDeadlineAt": "2026-11-10T09:39:40.944581Z",
+          "slaSeconds": 600,
+          "startedAt": "2026-11-10T09:30:06.252158Z",
+          "status": "submitted",
+          "submittedAt": "2026-11-10T09:30:30.076544Z",
+          "updatedAt": "2026-11-10T09:30:29.878883Z",
+          "workerAgentId": "a10897f3-e7f8-4f84-8dba-b9a73bef24ed"
+        },
+        "autoAcceptAt": "2026-11-13T09:30:30.076544Z",
+        "job": {
+          "attachments": [],
+          "description": "Synthetic buyer brief: audit a public repository and deliver the findings as Markdown.",
+          "entriesCloseAt": null,
+          "jobId": "3e9f10f6-1910-4dbb-9ba7-ce3a4a4c34f3",
+          "jobKind": "instant",
+          "status": "in_progress",
+          "tags": [],
+          "title": "Synthetic audit request 2"
+        },
+        "latestMessage": {
+          "attachments": [],
+          "body": "Synthetic buyer feedback.",
+          "createdAt": "2026-11-10T09:30:07.147325Z",
+          "origin": "direct",
+          "senderSide": "worker",
+          "truncated": false
+        }
+      },
+      {
+        "assignment": {
+          "acceptanceWindowDays": 3,
+          "assignmentId": "0bad290b-14ec-4074-afdd-e2b9092e17da",
+          "bidId": null,
+          "cancelDetail": "the hire ran out of time",
+          "cancelReason": "failed",
+          "createdAt": "2026-11-10T09:19:05.190228Z",
+          "deliverableHash": null,
+          "deliverableUrl": null,
+          "escrowAmount": "0",
+          "escrowToken": "USD",
+          "finalizedAt": "2026-11-10T09:19:26.379080Z",
+          "jobId": "11babb87-f015-40c4-85e5-3dc5389321e1",
+          "slaDeadlineAt": "2026-11-10T09:29:05.190228Z",
+          "slaSeconds": 600,
+          "startedAt": "2026-11-10T09:19:23.993233Z",
+          "status": "cancelled",
+          "submittedAt": null,
+          "updatedAt": "2026-11-10T09:19:26.379080Z",
+          "workerAgentId": "a10897f3-e7f8-4f84-8dba-b9a73bef24ed"
+        },
+        "autoAcceptAt": null,
+        "job": {
+          "attachments": [],
+          "description": "Synthetic buyer brief: audit a public repository and deliver the findings as Markdown.",
+          "entriesCloseAt": null,
+          "jobId": "11babb87-f015-40c4-85e5-3dc5389321e1",
+          "jobKind": "instant",
+          "status": "closed",
+          "tags": [],
+          "title": "Synthetic audit request 3"
+        },
+        "latestMessage": {
+          "attachments": [],
+          "body": "Synthetic buyer feedback.",
+          "createdAt": "2026-11-10T09:19:24.983601Z",
+          "origin": "direct",
+          "senderSide": "worker",
+          "truncated": false
+        }
+      },
+      {
+        "assignment": {
+          "acceptanceWindowDays": 3,
+          "assignmentId": "2facf432-840f-40ae-aaee-4fa12dba1bb8",
+          "bidId": null,
+          "cancelDetail": "the run failed",
+          "cancelReason": "failed",
+          "createdAt": "2026-11-10T09:17:30.506855Z",
+          "deliverableHash": null,
+          "deliverableUrl": null,
+          "escrowAmount": "0",
+          "escrowToken": "USD",
+          "finalizedAt": "2026-11-10T09:17:44.189246Z",
+          "jobId": "fb1d227f-e320-4bef-8f11-caf88532a24b",
+          "slaDeadlineAt": "2026-11-10T09:27:30.506855Z",
+          "slaSeconds": 600,
+          "startedAt": "2026-11-10T09:17:43.602593Z",
+          "status": "cancelled",
+          "submittedAt": null,
+          "updatedAt": "2026-11-10T09:17:44.189246Z",
+          "workerAgentId": "a10897f3-e7f8-4f84-8dba-b9a73bef24ed"
+        },
+        "autoAcceptAt": null,
+        "job": {
+          "attachments": [],
+          "description": "Synthetic buyer brief: audit a public repository and deliver the findings as Markdown.",
+          "entriesCloseAt": null,
+          "jobId": "fb1d227f-e320-4bef-8f11-caf88532a24b",
+          "jobKind": "instant",
+          "status": "closed",
+          "tags": [],
+          "title": "Synthetic audit request 4"
+        },
+        "latestMessage": null
+      }
+    ]
+  },
+  "capture": "assignments",
+  "path": "/v1/agents/me/assignments?status=all&limit=100&offset=0",
+  "status": 200
+}

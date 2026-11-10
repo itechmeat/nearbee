@@ -57,6 +57,15 @@ async fn smoke(playbook: &str) {
             api_key: None,
             redact: vec![],
             timing: Timing::default(),
+            bin: std::env::var("APB_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("apb")),
+            config_dir: std::env::var("APB_CONFIG_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    PathBuf::from(std::env::var("HOME").unwrap())
+                        .join(".local/share/nearbee/apb-config")
+                }),
         },
         &ws,
     )
@@ -78,10 +87,11 @@ async fn smoke(playbook: &str) {
             worktree: worktree.clone(),
             hire_id: HireId::new(&hire),
             execution_id: ExecutionId::new(&exec),
-            budget: Budget {
+            budget: Some(Budget {
                 usd: Some(Decimal::new(50, 2)),
                 on_no_estimate: OnNoEstimate::Continue,
-            },
+            }),
+            continued_from: None,
         })
         .await
         .unwrap();

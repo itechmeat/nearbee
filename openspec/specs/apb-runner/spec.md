@@ -24,7 +24,7 @@ The runner SHALL send `Authorization: Bearer <key>` when an apb API key is confi
 - **THEN** every request carries the bearer header and the key never appears in logs or errors
 
 ### Requirement: Run start
-The runner SHALL start a run of a playbook with an instruction, string params, an existing worktree and an explicit budget policy, and SHALL always add the params `hire_id` and `execution_id` from the caller. It SHALL never retry a start on its own, at any layer: the HTTP client sends each start request at most once (no transport-level resend, also on an HTTP/2 refused stream or `GOAWAY`).
+The runner SHALL start a run of a playbook with an instruction, string params, an existing worktree, an optional budget (when present it has a dollar limit and an explicit `on_no_estimate`; when absent the request carries no budget object) and an optional `continued_from` run id, and SHALL always add the params `hire_id` and `execution_id` from the caller. It SHALL never retry a start on its own, at any layer: each start request is sent at most once, with no transport-level resend.
 
 #### Scenario: Successful start
 - **WHEN** the dashboard accepts the start
@@ -54,6 +54,14 @@ The runner SHALL start a run of a playbook with an instruction, string params, a
 - **WHEN** the dashboard answers 409 `budget_needs_decision`
 - **THEN** the runner returns a typed refusal with the code and the estimate, and does not adjust the budget
 
+#### Scenario: No budget
+- **WHEN** the caller passes no budget
+- **THEN** the start body has no `budget` key
+
+#### Scenario: Continued run
+- **WHEN** the caller passes `continued_from: run-1`
+- **THEN** the start body carries `continued_from: "run-1"`
+
 ### Requirement: Error classes
 Every failure of a call that reached the dashboard, other than a 404 on a read, SHALL be one of: refused (a known pre-start gate, with HTTP status and machine code), retryable read (transport error or a retryable server status on a read), start outcome unknown (timeout, connection reset, server error, redirect or malformed success on a start), protocol (an answer the runner cannot understand), each with a bounded, redacted detail.
 
@@ -81,7 +89,7 @@ A read answered 404 SHALL fail as not found, distinct from protocol and retryabl
 - **THEN** the result is invalid request and nothing is sent
 
 ### Requirement: Run observation
-The runner SHALL read a run's status, per-node status and outputs, worktree and usage, map `succeeded`, `failed` and `aborted` to terminal states, treat `created`, `running`, `paused` and `interrupted` as not terminal, and treat any unknown status as not terminal and not successful.
+The runner SHALL read a run's status, per-node status and outputs, worktree, version, usage (total `cost_usd`, the split by basis, and the counters `attempts`, `finished_attempts`, `cost_attempts`) and budget pause, map `succeeded`, `failed` and `aborted` to terminal states, treat `created`, `running`, `paused` and `interrupted` as not terminal, and treat any unknown status as not terminal and not successful.
 
 #### Scenario: Unknown status
 - **WHEN** the dashboard reports a status the runner does not know
@@ -90,6 +98,14 @@ The runner SHALL read a run's status, per-node status and outputs, worktree and 
 #### Scenario: Missing cost
 - **WHEN** usage has no cost
 - **THEN** the cost is reported as unknown, not zero
+
+#### Scenario: Partial cost
+- **WHEN** a terminal run reports `cost_usd` with `cost_attempts` 1 and `finished_attempts` 3
+- **THEN** the runner reports the cost as incomplete
+
+#### Scenario: Budget pause
+- **WHEN** the run detail reports `budget.paused`
+- **THEN** the runner reports the run as paused by its budget
 
 ### Requirement: Run lookup
 The runner SHALL find runs by a search field (`hire_id` or `execution_id`) within the pinned workspace and playbook and SHALL return the matching runs together with whether the search was complete (no runs withheld or not indexed).
@@ -112,3 +128,21 @@ The runner SHALL find runs by a search field (`hire_id` or `execution_id`) withi
 #### Scenario: No match, incomplete
 - **WHEN** no run matches but the dashboard reports unindexed runs
 - **THEN** the command prints `complete: no` and exits 2, since absence is not proven
+
+### Requirement: Abort
+The runner SHALL abort a run with `apb stop <run_id>` against Nearbee's own instance (its `APB_CONFIG_DIR`, run from the workspace), never through a drain pause, and SHALL report success only when the command exits 0; the caller confirms the terminal status by observation.
+
+#### Scenario: Abort of a finished run
+- **WHEN** the run is already terminal
+- **THEN** the abort reports success or a known "not running" answer, and the caller observes the terminal status
+
+### Requirement: Decide
+The runner SHALL ask a yes or no question with `apb decide is <question> --criteria <text> --no-run` against Nearbee's own instance, passing each argument directly (no shell), with `APB_RUN_ID` and `APB_NODE_ID` removed from the child's environment and a 60-second timeout, and SHALL return answered yes, answered no, or unanswered with apb's refusal code or the error; a child killed at its limit is a runner error, which the caller maps.
+
+#### Scenario: No provider
+- **WHEN** apb prints `{"answered":false,"refused":"no_provider"}`
+- **THEN** the runner returns unanswered with `no_provider`
+
+#### Scenario: Timeout
+- **WHEN** the command runs longer than 60 seconds
+- **THEN** the child is killed and the runner returns an error naming the limit (`did not finish within`); serve reads that error as unanswered with `timeout` (or `cut_off` when the caller's limit was shorter), so the scope check is skipped

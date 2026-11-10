@@ -64,6 +64,9 @@ pub struct Record {
     pub seq: u64,
     pub timestamp: OffsetDateTime,
     pub hire_id: String,
+    /// The hire generation this record belongs to; every record written
+    /// from this version carries it, a record without one (S2) reads as 1.
+    pub generation: u32,
     pub event: Event,
 }
 
@@ -78,6 +81,11 @@ pub enum Event {
     RunObserved(RunObserved),
     ArtifactInventory(ArtifactInventory),
     Deleted(Deleted),
+    Intake(Intake),
+    GenerationOpened(GenerationOpened),
+    Lifecycle(Lifecycle),
+    Inputs(Inputs),
+    Attention(Attention),
     Unknown {
         event_type: String,
         raw: serde_json::Value,
@@ -94,6 +102,11 @@ impl Event {
             Event::RunObserved(_) => "run_observed",
             Event::ArtifactInventory(_) => "artifact_inventory",
             Event::Deleted(_) => "deleted",
+            Event::Intake(_) => "intake",
+            Event::GenerationOpened(_) => "generation_opened",
+            Event::Lifecycle(_) => "lifecycle",
+            Event::Inputs(_) => "inputs",
+            Event::Attention(_) => "attention",
             Event::Unknown { event_type, .. } => event_type,
         }
     }
@@ -175,6 +188,18 @@ pub struct RunObserved {
     /// finished run whose version is `None` or not the published one.
     #[serde(default)]
     pub playbook_version: Option<String>,
+    /// The run's total cost at its terminal observation, as a decimal
+    /// string; `None` when the engine named none or the run is not
+    /// terminal. The end and its cost land in one record (design 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<String>,
+    /// Whether the reported cost covers every finished attempt (design 8);
+    /// `None` when the engine named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_complete: Option<bool>,
+    /// The per-run budget the run started with, as a decimal string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<String>,
 }
 
 /// The files a run produced, by name, size and digest.
@@ -191,6 +216,70 @@ pub struct Deleted {
     pub reason: String,
 }
 
+/// An intake check's outcome (design 2). The payload never names the
+/// brief, only the check, the outcome and the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Intake {
+    pub check: String,
+    /// `passed`, `declined` or `skipped`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// Whether the decline fell within one hour of the row's `createdAt`.
+    #[serde(default)]
+    pub within_first_hour: bool,
+}
+
+/// A reopened row first seen: a generation of kind `rework` or `redo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationOpened {
+    pub generation: u32,
+    pub kind: String,
+    /// SHA-256 of the row's `slaDeadlineAt`, `deliverableUrl` and
+    /// `submittedAt` (the generation key).
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_bytes: Option<u64>,
+}
+
+/// A new row status seen for the first time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lifecycle {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_at: Option<String>,
+}
+
+/// The verified files of a generation, by attachment id and path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inputs {
+    pub files: Vec<InputFile>,
+}
+
+/// One verified input file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputFile {
+    pub attachment_id: String,
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// The hire needs the operator; cleared by a later `attention` with
+/// `code: none`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attention {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// The wire envelope. `generation` is additive: a record written without
+/// it (S2) reads as generation 1.
 #[derive(Serialize, Deserialize)]
 struct Wire {
     schema_version: u32,
@@ -198,8 +287,14 @@ struct Wire {
     #[serde(with = "time::serde::rfc3339")]
     timestamp: OffsetDateTime,
     hire_id: String,
+    #[serde(default = "default_generation")]
+    generation: u32,
     event_type: String,
     payload: serde_json::Value,
+}
+
+fn default_generation() -> u32 {
+    1
 }
 
 /// A journal read failure.
@@ -228,6 +323,11 @@ impl Record {
             Event::RunObserved(p) => to_value(p),
             Event::ArtifactInventory(p) => to_value(p),
             Event::Deleted(p) => to_value(p),
+            Event::Intake(p) => to_value(p),
+            Event::GenerationOpened(p) => to_value(p),
+            Event::Lifecycle(p) => to_value(p),
+            Event::Inputs(p) => to_value(p),
+            Event::Attention(p) => to_value(p),
             Event::Unknown { raw, .. } => raw.clone(),
         };
         let wire = Wire {
@@ -235,6 +335,7 @@ impl Record {
             seq: self.seq,
             timestamp: self.timestamp,
             hire_id: self.hire_id.clone(),
+            generation: self.generation,
             event_type: self.event.event_type().to_owned(),
             payload,
         };
@@ -265,6 +366,11 @@ impl Record {
             "run_observed" => typed(serde_json::from_value(p).map(Event::RunObserved))?,
             "artifact_inventory" => typed(serde_json::from_value(p).map(Event::ArtifactInventory))?,
             "deleted" => typed(serde_json::from_value(p).map(Event::Deleted))?,
+            "intake" => typed(serde_json::from_value(p).map(Event::Intake))?,
+            "generation_opened" => typed(serde_json::from_value(p).map(Event::GenerationOpened))?,
+            "lifecycle" => typed(serde_json::from_value(p).map(Event::Lifecycle))?,
+            "inputs" => typed(serde_json::from_value(p).map(Event::Inputs))?,
+            "attention" => typed(serde_json::from_value(p).map(Event::Attention))?,
             other => Event::Unknown {
                 event_type: other.to_owned(),
                 raw: p,
@@ -275,6 +381,7 @@ impl Record {
             seq: wire.seq,
             timestamp: wire.timestamp,
             hire_id: wire.hire_id,
+            generation: wire.generation,
             event,
         })
     }
@@ -293,21 +400,68 @@ pub struct JournalRead {
     /// 1-based number of a trailing line without its newline that did not
     /// parse (a write cut short); it is not part of `records`.
     pub truncated_line: Option<usize>,
+    /// Whether any line was written without the generation field (an S2
+    /// journal).
+    pub s2_shaped: bool,
+    /// The seqs of the records whose lines carried no generation field:
+    /// an open intent on one of them predates this version and has no
+    /// snapshot to resend from (`s2_pending`, design Migration Plan).
+    pub s2_seqs: BTreeSet<u64>,
 }
 
 /// Reads journal text. A trailing line without a newline that does not parse
 /// is reported as truncated; any other malformed line is an error, as is a
 /// newer schema version or a `seq` that does not increase by one from 1.
+/// The operations these records settle: every intent with a result, and
+/// a run start the engine definitely refused. S2 left such a run intent
+/// open and wrote a decline whose detail starts with `run start refused`;
+/// nothing runs for it, so it is closed (design, Migration Plan: a decided
+/// S2 journal needs nothing).
+pub fn closed_operations(records: &[Record]) -> BTreeSet<Uuid> {
+    let mut done: BTreeSet<Uuid> = records
+        .iter()
+        .filter_map(|r| match &r.event {
+            Event::Result(res) => Some(res.operation_id),
+            _ => None,
+        })
+        .collect();
+    for (i, r) in records.iter().enumerate() {
+        if let Event::Intent(start) = &r.event
+            && start.kind == "run_start"
+            && records[i + 1..].iter().any(|later| {
+                later.generation == r.generation
+                    && matches!(&later.event, Event::Intent(d)
+                        if d.kind == "market_decline"
+                            && d.refs.get("detail").is_some_and(|t| t.starts_with("run start refused")))
+            })
+        {
+            done.insert(start.operation_id);
+        }
+    }
+    done
+}
+
 pub fn read(text: &str) -> Result<JournalRead, JournalError> {
     let mut records = Vec::new();
     let mut truncated_line = None;
+    let mut s2_shaped = false;
+    let mut s2_seqs: BTreeSet<u64> = BTreeSet::new();
     let ends_with_newline = text.is_empty() || text.ends_with('\n');
     let lines: Vec<&str> = text.split_terminator('\n').collect();
     let last = lines.len();
     for (i, raw) in lines.iter().enumerate() {
         let line = i + 1;
+        let s2_line = serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .is_some_and(|v| v.get("generation").is_none());
+        if s2_line {
+            s2_shaped = true;
+        }
         match Record::parse_line(raw, line) {
             Ok(r) => {
+                if s2_line {
+                    s2_seqs.insert(r.seq);
+                }
                 let previous = records.last().map_or(0, |p: &Record| p.seq);
                 if r.seq != previous + 1 {
                     return Err(JournalError::Sequence {
@@ -324,13 +478,7 @@ pub fn read(text: &str) -> Result<JournalRead, JournalError> {
             Err(e) => return Err(e),
         }
     }
-    let done: BTreeSet<Uuid> = records
-        .iter()
-        .filter_map(|r| match &r.event {
-            Event::Result(res) => Some(res.operation_id),
-            _ => None,
-        })
-        .collect();
+    let done = closed_operations(&records);
     let open_intents = records
         .iter()
         .filter_map(|r| match &r.event {
@@ -342,6 +490,8 @@ pub fn read(text: &str) -> Result<JournalRead, JournalError> {
         records,
         open_intents,
         truncated_line,
+        s2_shaped,
+        s2_seqs,
     })
 }
 
@@ -356,6 +506,7 @@ mod tests {
             seq,
             timestamp: datetime!(2026-11-09 12:00:00 UTC),
             hire_id: "hire-1".into(),
+            generation: 1,
             event,
         }
     }
@@ -436,6 +587,9 @@ mod tests {
                     execution: 1,
                     status: "succeeded".into(),
                     playbook_version: Some("1.0.0".into()),
+                    cost_usd: Some("0.0123".into()),
+                    cost_complete: Some(true),
+                    budget_usd: Some("2.60".into()),
                 }),
             ),
             rec(
@@ -464,6 +618,7 @@ mod tests {
                 "seq",
                 "timestamp",
                 "hire_id",
+                "generation",
                 "event_type",
                 "payload",
             ] {
@@ -476,6 +631,146 @@ mod tests {
         assert_eq!(read.records, all);
         assert!(read.open_intents.is_empty());
         assert_eq!(read.truncated_line, None);
+    }
+
+    /// The new event types of design 2 round-trip, and a terminal
+    /// `run_observed` carries its cost fields.
+    #[test]
+    fn the_new_event_types_round_trip() {
+        let all = vec![
+            rec(
+                1,
+                Event::Intake(Intake {
+                    check: "scope".into(),
+                    outcome: "passed".into(),
+                    reason: String::new(),
+                    within_first_hour: true,
+                }),
+            ),
+            rec(
+                2,
+                Event::GenerationOpened(GenerationOpened {
+                    generation: 2,
+                    kind: "rework".into(),
+                    key: sha256_hex(b"key"),
+                    feedback_sha256: Some(sha256_hex(b"use a table")),
+                    feedback_bytes: Some(11),
+                }),
+            ),
+            rec(
+                3,
+                Event::Lifecycle(Lifecycle {
+                    status: "accepted".into(),
+                    cancel_reason: None,
+                    finalized_at: Some("2026-11-10T12:00:00Z".into()),
+                }),
+            ),
+            rec(
+                4,
+                Event::Inputs(Inputs {
+                    files: vec![InputFile {
+                        attachment_id: "att-1".into(),
+                        path: "inputs/00-a.pdf".into(),
+                        bytes: 3,
+                        sha256: sha256_hex(b"pdf"),
+                    }],
+                }),
+            ),
+            rec(
+                5,
+                Event::Attention(Attention {
+                    code: "start_unresolved".into(),
+                    detail: "the execution lookup found nothing".into(),
+                }),
+            ),
+            rec(
+                6,
+                Event::Attention(Attention {
+                    code: "none".into(),
+                    detail: String::new(),
+                }),
+            ),
+        ];
+        for r in &all {
+            assert_eq!(&Record::parse_line(&r.to_line(), 1).unwrap(), r);
+        }
+        let read = read(&join(&all)).unwrap();
+        assert_eq!(read.records, all);
+    }
+
+    /// The new intent kinds of design 2 round-trip through the existing
+    /// intent record.
+    #[test]
+    fn the_new_intent_kinds_round_trip() {
+        for kind in ["run_abort", "market_progress", "scope_check"] {
+            let mut i = intent(Uuid::now_v7());
+            i.kind = kind.into();
+            let r = rec(1, Event::Intent(i));
+            assert_eq!(Record::parse_line(&r.to_line(), 1).unwrap(), r);
+        }
+    }
+
+    /// Every record written now carries its generation in the envelope;
+    /// a record without one (S2) reads as generation 1.
+    #[test]
+    fn a_record_without_generation_reads_as_generation_one() {
+        let s2_line = r#"{"schema_version":1,"seq":1,"timestamp":"2026-11-09T12:00:00Z","hire_id":"h","event_type":"received","payload":{"brief_sha256":"ab","brief_bytes":2}}"#;
+        let r = Record::parse_line(s2_line, 1).unwrap();
+        assert_eq!(
+            r.generation, 1,
+            "a record without a generation reads as generation 1"
+        );
+        assert!(matches!(r.event, Event::Received(_)));
+        // A record this version writes carries the field.
+        let own = rec(1, Event::Received(Received::from_brief("b")));
+        let v: serde_json::Value = serde_json::from_str(&own.to_line()).unwrap();
+        assert_eq!(v["generation"], 1);
+    }
+
+    /// S2-shaped journals (no generations) read as generation 1, one
+    /// fixture per S2 shape (design, Migration Plan); the open intents of
+    /// the open shapes are reported for serve.
+
+    #[test]
+    fn s2_shaped_journals_read_as_generation_one() {
+        let received = r#"{"schema_version":1,"seq":1,"timestamp":"2026-11-09T12:00:00Z","hire_id":"h","event_type":"received","payload":{"brief_sha256":"ab","brief_bytes":2}}"#;
+        let run_intent = r#"{"schema_version":1,"seq":2,"timestamp":"2026-11-09T12:00:01Z","hire_id":"h","event_type":"intent","payload":{"operation_id":"01900000-0000-7000-8000-000000000001","kind":"run_start","execution":1,"request_digest":"cd","refs":{"execution_id":"x-1"}}}"#;
+        let submit_intent = r#"{"schema_version":1,"seq":2,"timestamp":"2026-11-09T12:00:01Z","hire_id":"h","event_type":"intent","payload":{"operation_id":"01900000-0000-7000-8000-000000000002","kind":"market_submit","execution":1,"request_digest":"ef","refs":{}}}"#;
+        let submit_result = r#"{"schema_version":1,"seq":3,"timestamp":"2026-11-09T12:00:02Z","hire_id":"h","event_type":"result","payload":{"operation_id":"01900000-0000-7000-8000-000000000002","outcome":"submitted","external_ids":{}}}"#;
+        let decision = r#"{"schema_version":1,"seq":4,"timestamp":"2026-11-09T12:00:03Z","hire_id":"h","event_type":"decision","payload":{"decision":"delivered","reason":""}}"#;
+        let running_obs = r#"{"schema_version":1,"seq":3,"timestamp":"2026-11-09T12:00:02Z","hire_id":"h","event_type":"run_observed","payload":{"run_id":"r1","execution":1,"status":"running","playbook_version":null}}"#;
+        let terminal_obs = r#"{"schema_version":1,"seq":2,"timestamp":"2026-11-09T12:00:02Z","hire_id":"h","event_type":"run_observed","payload":{"run_id":"r1","execution":1,"status":"succeeded","playbook_version":"1.0.123"}}"#;
+        let shapes: [(&str, &str, usize); 5] = [
+            (
+                "decided",
+                &[received, submit_intent, submit_result, decision].join("\n"),
+                0,
+            ),
+            (
+                "running",
+                &[received, run_intent, running_obs].join("\n"),
+                1,
+            ),
+            (
+                "terminal undecided",
+                &[received, terminal_obs].join("\n"),
+                0,
+            ),
+            ("open run_start", &[received, run_intent].join("\n"), 1),
+            (
+                "open market_submit",
+                &[received, submit_intent].join("\n"),
+                1,
+            ),
+        ];
+        for (name, text, open) in shapes {
+            let j = read(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                j.records.iter().all(|r| r.generation == 1),
+                "{name}: every record belongs to generation 1"
+            );
+            assert_eq!(j.open_intents.len(), open, "{name}");
+        }
     }
 
     #[test]
@@ -584,6 +879,9 @@ pub struct Writer {
     file: std::fs::File,
     path: PathBuf,
     hire_id: String,
+    /// The generation every appended record carries; 1 until serve sets
+    /// it (design 2).
+    generation: u32,
     next_seq: u64,
     /// Set after a failed write or sync: the seq the failed record got may
     /// have reached the disk partially, so a retry through this writer
@@ -651,7 +949,7 @@ impl Writer {
 
     fn open_inner(path: PathBuf, hire_id: &str) -> Result<Self, WriterError> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|source| WriterError::Io {
+            create_dir_durable(dir).map_err(|source| WriterError::Io {
                 path: path.clone(),
                 source,
             })?;
@@ -715,21 +1013,19 @@ impl Writer {
             // A fresh journal: make the hire directory entry and the new
             // entry in hires/ durable before the first record is announced
             // to anyone.
+            // A failed sync is returned, never ignored (C16).
             if let Some(dir) = path.parent() {
-                if let Ok(d) = std::fs::File::open(dir) {
-                    let _ = d.sync_all();
-                }
-                if let Some(parent) = dir.parent()
-                    && let Ok(d) = std::fs::File::open(parent)
-                {
-                    let _ = d.sync_all();
-                }
+                sync_dir(dir).map_err(|source| WriterError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
             }
         }
         Ok(Self {
             file,
             path,
             hire_id: hire_id.to_owned(),
+            generation: 1,
             next_seq,
             poisoned: false,
         })
@@ -738,6 +1034,22 @@ impl Writer {
     /// The next `seq` a record will get.
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// The hire id this writer appends under.
+    pub fn hire_id(&self) -> &str {
+        &self.hire_id
+    }
+
+    /// The generation appended records carry.
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Sets the generation the following records carry (design 2: the
+    /// records of the opened generation carry its number).
+    pub fn set_generation(&mut self, generation: u32) {
+        self.generation = generation;
     }
 
     /// Appends one record: the line and the fsync happen before the call
@@ -754,6 +1066,7 @@ impl Writer {
             seq: self.next_seq,
             timestamp: time::OffsetDateTime::now_utc(),
             hire_id: self.hire_id.clone(),
+            generation: self.generation,
             event,
         };
         let mut line = record.to_line();
@@ -783,6 +1096,450 @@ impl Writer {
 impl Drop for Writer {
     fn drop(&mut self) {
         release_journal_lock(&self.path);
+    }
+}
+
+/// The generation directory of a hire: `<state_dir>/hires/<safe>/gen-<n>`.
+pub fn gen_dir(state_dir: &Path, hire_id: &str, generation: u32) -> PathBuf {
+    state_dir
+        .join("hires")
+        .join(safe_id(hire_id))
+        .join(format!("gen-{generation}"))
+}
+
+/// The submission snapshot of a generation (`gen-<n>/submission.md`).
+pub const SUBMISSION_SNAPSHOT: &str = "submission.md";
+
+/// The run request snapshot of one execution (`gen-<n>/run-<e>.json`).
+pub fn run_snapshot_name(execution: u32) -> String {
+    format!("run-{execution}.json")
+}
+
+/// A snapshot read failure.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("snapshot {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("snapshot {path}: its SHA-256 is {found}, not the journaled digest")]
+    Mismatch { path: PathBuf, found: String },
+}
+
+/// Whether `name` is a safe snapshot file name (no separators, no leading
+/// dot, plain characters only).
+fn valid_snapshot_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// The path of one snapshot inside a generation directory.
+pub fn snapshot_path(state_dir: &Path, hire_id: &str, generation: u32, name: &str) -> PathBuf {
+    gen_dir(state_dir, hire_id, generation).join(name)
+}
+
+/// Writes one snapshot durably and privately: the bytes go to a temporary
+/// name in the generation directory (created 0700), are flushed to disk,
+/// and the file (mode 0600) is renamed to its final name and the directory
+/// entry made durable, all before the call returns, so the intent that
+/// names the snapshot and the external write that follows it can only
+/// happen after the snapshot is complete on disk (design, On-disk state).
+pub fn write_snapshot(
+    state_dir: &Path,
+    hire_id: &str,
+    generation: u32,
+    name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, SnapshotError> {
+    if !valid_snapshot_name(name) {
+        return Err(SnapshotError::Io {
+            path: PathBuf::from(name),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a safe snapshot name",
+            ),
+        });
+    }
+    let dir = gen_dir(state_dir, hire_id, generation);
+    // Each new directory entry is made durable through its parent before
+    // the snapshot is written, so a durable intent can never name a
+    // snapshot whose directory vanished at a power loss (C16).
+    create_dir_durable(&dir).map_err(|source| SnapshotError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let final_path = dir.join(name);
+    let tmp = dir.join(format!(
+        ".{name}.{}.tmp",
+        &Uuid::now_v7().simple().to_string()[..12]
+    ));
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp).map_err(|source| SnapshotError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        f.write_all(bytes).map_err(|source| SnapshotError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        f.sync_all().map_err(|source| SnapshotError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+    }
+    std::fs::rename(&tmp, &final_path).map_err(|source| SnapshotError::Io {
+        path: final_path.clone(),
+        source,
+    })?;
+    sync_dir(&dir).map_err(|source| SnapshotError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    Ok(final_path)
+}
+
+/// Flushes a directory's entries to disk.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// The directories whose entry this process made durable in their parent
+/// (created and synced, or found and synced again, R4-6).
+fn settled_dirs() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// Re-establishes the parent barrier of directories that already exist
+/// (R4-6): existence alone never proves that the `mkdir` that made them
+/// was followed by its parent's sync, since a crash may have come in
+/// between. Walking up from `dir`, each directory owned by this user
+/// (every directory [`create_dir_durable`] makes is) whose entry this
+/// process has not settled yet gets its parent synced, once per process;
+/// a directory owned by someone else was not made here, and the walk
+/// stops at it.
+fn settle_existing(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let me = rustix::process::geteuid().as_raw();
+        let mut cur = dir;
+        loop {
+            if settled_dirs()
+                .lock()
+                .map(|s| s.contains(cur))
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            if std::fs::symlink_metadata(cur)?.uid() != me {
+                return Ok(());
+            }
+            let Some(parent) = cur.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                return Ok(());
+            };
+            sync_dir(parent)?;
+            if let Ok(mut s) = settled_dirs().lock() {
+                s.insert(cur.to_path_buf());
+            }
+            cur = parent;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// Creates `dir` and every missing ancestor one at a time, each private
+/// (0700), syncing each new entry's parent so the entry itself is
+/// durable (C16). The ancestors that already exist pass the same barrier
+/// once per process (R4-6), so a directory a crash left unsynced is made
+/// durable before anything is written under it. Returns how many
+/// directories it created; any failure is returned, never ignored.
+pub fn create_dir_durable(dir: &Path) -> std::io::Result<usize> {
+    let mut missing = Vec::new();
+    let mut cur = dir;
+    loop {
+        match std::fs::symlink_metadata(cur) {
+            Ok(m) if m.is_dir() => break,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", cur.display()),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(cur.to_path_buf());
+                match cur.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => cur = p,
+                    _ => break,
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let created = missing.len();
+    // `cur` is the deepest ancestor that exists (or the empty root).
+    if !missing.contains(&cur.to_path_buf()) {
+        settle_existing(cur)?;
+    }
+    for d in missing.into_iter().rev() {
+        match std::fs::create_dir(&d) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && d.is_dir() => continue,
+            Err(e) => return Err(e),
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+        }
+        if let Some(parent) = d.parent().filter(|p| !p.as_os_str().is_empty()) {
+            sync_dir(parent)?;
+        }
+        if let Ok(mut s) = settled_dirs().lock() {
+            s.insert(d.clone());
+        }
+    }
+    Ok(created)
+}
+
+/// Reads one snapshot's bytes.
+pub fn read_snapshot(
+    state_dir: &Path,
+    hire_id: &str,
+    generation: u32,
+    name: &str,
+) -> Result<Vec<u8>, SnapshotError> {
+    if !valid_snapshot_name(name) {
+        return Err(SnapshotError::Io {
+            path: PathBuf::from(name),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a safe snapshot name",
+            ),
+        });
+    }
+    let path = snapshot_path(state_dir, hire_id, generation, name);
+    std::fs::read(&path).map_err(|source| SnapshotError::Io { path, source })
+}
+
+/// Reads one snapshot and verifies it against the digest the intent
+/// journaled. A mismatch is an error, never bytes the caller could send
+/// by mistake.
+pub fn verify_snapshot(
+    state_dir: &Path,
+    hire_id: &str,
+    generation: u32,
+    name: &str,
+    digest: &str,
+) -> Result<Vec<u8>, SnapshotError> {
+    let bytes = read_snapshot(state_dir, hire_id, generation, name)?;
+    let found = sha256_hex(&bytes);
+    if found != digest {
+        return Err(SnapshotError::Mismatch {
+            path: snapshot_path(state_dir, hire_id, generation, name),
+            found,
+        });
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn digest(bytes: &[u8]) -> String {
+        sha256_hex(bytes)
+    }
+
+    /// A written snapshot reads back whole and verifies against its
+    /// digest (the ordering against the external call is proven in serve:
+    /// `a_rework_submit_follows_its_snapshot_and_intent`).
+    #[test]
+    fn a_snapshot_round_trips_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"# deliverable".to_vec();
+        let path = write_snapshot(dir.path(), "hire-1", 2, SUBMISSION_SNAPSHOT, &bytes).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // Recovery reads the same bytes back and verifies them.
+        assert_eq!(
+            verify_snapshot(
+                dir.path(),
+                "hire-1",
+                2,
+                SUBMISSION_SNAPSHOT,
+                &digest(&bytes)
+            )
+            .unwrap(),
+            bytes
+        );
+    }
+
+    /// A snapshot whose digest differs from the intent's is refused: the
+    /// caller gets an error instead of bytes it could send (serve maps the
+    /// error to an attention code and sends nothing, design 3).
+    #[test]
+    fn a_mismatching_snapshot_digest_is_reported_and_nothing_can_be_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_snapshot(dir.path(), "hire-1", 1, SUBMISSION_SNAPSHOT, b"# original").unwrap();
+        // The file changed after the intent was written (tampered or a
+        // stale snapshot): the digest does not match.
+        std::fs::write(
+            snapshot_path(dir.path(), "hire-1", 1, SUBMISSION_SNAPSHOT),
+            b"# tampered",
+        )
+        .unwrap();
+        let err = verify_snapshot(
+            dir.path(),
+            "hire-1",
+            1,
+            SUBMISSION_SNAPSHOT,
+            &digest(b"# original"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SnapshotError::Mismatch { .. }), "{err}");
+        assert!(err.to_string().contains("not the journaled digest"));
+    }
+
+    /// The generation directory is 0700, snapshots are 0600, and a write
+    /// leaves no temporary file behind.
+    #[test]
+    fn snapshot_directories_and_files_are_private_and_writes_are_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_snapshot(dir.path(), "hire-1", 1, "run-1.json", b"{}").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dmode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(dmode & 0o777, 0o700, "the generation directory");
+            let fmode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(fmode & 0o777, 0o600, "the snapshot file");
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temporary file stays behind");
+    }
+
+    /// C16: every directory a snapshot needs is created one component at
+    /// a time with its parent synced, private (0700), and a component that
+    /// cannot be a directory fails the write before any intent could
+    /// follow it.
+    #[test]
+    fn snapshot_directories_are_created_durably_and_failures_propagate() {
+        let dir = tempfile::tempdir().unwrap();
+        // The hire directory does not exist yet.
+        write_snapshot(dir.path(), "h1", 2, SUBMISSION_SNAPSHOT, b"x").unwrap();
+        let g = gen_dir(dir.path(), "h1", 2);
+        assert!(g.join(SUBMISSION_SNAPSHOT).is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&g).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        let created = create_dir_durable(&dir.path().join("a/b/c")).unwrap();
+        assert_eq!(created, 3);
+        std::fs::write(dir.path().join("file"), b"").unwrap();
+        assert!(create_dir_durable(&dir.path().join("file/sub")).is_err());
+        assert!(
+            write_snapshot(&dir.path().join("file"), "h1", 1, SUBMISSION_SNAPSHOT, b"x").is_err()
+        );
+    }
+
+    /// A name that could escape the generation directory is refused.
+    #[test]
+    fn an_unsafe_snapshot_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["../evil", "", "..", ".hidden", "a/b", "a\\b"] {
+            assert!(
+                write_snapshot(dir.path(), "hire-1", 1, name, b"x").is_err(),
+                "{name} must be refused"
+            );
+        }
+        // The safe names the adapter uses are accepted.
+        for name in ["submission.md", "run-1.json", "run-12.json"] {
+            assert!(write_snapshot(dir.path(), "hire-1", 1, name, b"x").is_ok());
+        }
+    }
+
+    /// A missing snapshot is a not-found, not bytes.
+    #[test]
+    fn a_missing_snapshot_is_an_io_error_not_empty_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_snapshot(dir.path(), "hire-1", 1, SUBMISSION_SNAPSHOT).unwrap_err();
+        match err {
+            SnapshotError::Io { source, .. } => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("{other}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod durable_dir_tests {
+    use super::*;
+
+    fn chmod(p: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// R4-6: a directory a crash left between its `mkdir` and its
+    /// parent's sync is not taken as durable: the next creation in a new
+    /// process syncs its parent again (here the parent cannot be opened,
+    /// so the barrier fails instead of passing on existence).
+    #[test]
+    fn an_existing_directory_still_passes_its_parent_barrier() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("hires");
+        let hire = parent.join("h1");
+        std::fs::create_dir_all(&hire).unwrap();
+        chmod(&parent, 0o300);
+        let r = create_dir_durable(&hire);
+        chmod(&parent, 0o755);
+        assert!(r.is_err(), "existence was taken as a completed barrier");
+        assert_eq!(create_dir_durable(&hire).unwrap(), 0);
+    }
+
+    /// R4-6: a journal whose hire directory a crash left unsynced is not
+    /// written to before that directory's entry in `hires/` is durable.
+    #[test]
+    fn a_writer_never_appends_under_an_unsynced_hire_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hires").join("h2").join("journal.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let hires = dir.path().join("hires");
+        chmod(&hires, 0o300);
+        let r = Writer::open(path.clone(), "h2");
+        chmod(&hires, 0o755);
+        assert!(r.is_err(), "the writer opened before the barrier");
+        drop(r);
+        let mut w = Writer::open(path, "h2").unwrap();
+        w.append(Event::Received(Received::from_brief("b")))
+            .unwrap();
     }
 }
 

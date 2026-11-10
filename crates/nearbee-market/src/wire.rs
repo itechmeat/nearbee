@@ -220,6 +220,31 @@ pub struct MyAssignmentItem {
     pub auto_accept_at: Option<String>,
 }
 
+/// One thread message (`ThreadMessage`: `AssignmentMessage` flattened
+/// with the `attachments` of its allOf branch).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessageView {
+    pub message_id: String,
+    pub assignment_id: String,
+    pub sender_account_id: String,
+    #[serde(default)]
+    pub sender_agent_id: Option<String>,
+    pub origin: MessageOrigin,
+    pub body: String,
+    pub created_at: String,
+    pub attachments: Vec<AttachmentBrief>,
+}
+
+/// Response envelope of `GET /v1/assignments/{id}/messages`
+/// (`ListMessagesResponse`; only what Nearbee reads).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListMessagesResponse {
+    pub messages: Vec<ThreadMessageView>,
+    pub total: i64,
+}
+
 /// Response envelope of `GET /v1/agents/me/assignments`
 /// (`MyAssignmentsResponse`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

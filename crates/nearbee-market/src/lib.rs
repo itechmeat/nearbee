@@ -28,8 +28,8 @@ pub mod wire;
 
 use nearbee_core::market::{
     AgentPatch, AgentRecord, DeclineOutcome, DeclineReason, DeclineRequest, Market, MarketError,
-    Message, MessageRequest, NewPricingPlan, PricingPlan, ProgressRequest, Row, RowStatus,
-    SubmitRequest, UploadFile, UploadedFile,
+    Message, MessageRequest, NewPricingPlan, PricingPlan, ProgressOutcome, ProgressRequest, Row,
+    RowStatus, SubmitRequest, ThreadMessage, UploadFile, UploadedFile,
 };
 use nearbee_core::redact::{DETAIL_LIMIT, redact_detail, truncate};
 use nearbee_core::secret::{REDACTED, Secret};
@@ -62,6 +62,9 @@ pub struct MarketTiming {
     pub write_resend_delay: Duration,
     /// Ceiling on any wait a server names or a retry takes.
     pub retry_after_ceiling: Duration,
+    /// Total time budget of one read call, retries included (spec
+    /// `market-client`, Read retries: 30 s per call).
+    pub read_budget: Duration,
 }
 
 impl Default for MarketTiming {
@@ -77,6 +80,7 @@ impl Default for MarketTiming {
             ],
             write_resend_delay: Duration::from_millis(200),
             retry_after_ceiling: Duration::from_secs(120),
+            read_budget: Duration::from_secs(30),
         }
     }
 }
@@ -252,6 +256,69 @@ fn is_loopback_host(url: &str) -> bool {
 }
 
 impl NearAgentMarket {
+    /// The absolute URL of an attachment download path: a relative path is
+    /// resolved against the configured origin; an absolute URL must be the
+    /// same origin (scheme, host and port), without userinfo or fragment.
+    fn attachment_url(&self, path: &str) -> Result<String, MarketError> {
+        let base = reqwest::Url::parse(&self.base).map_err(|_| MarketError::Protocol {
+            detail: "the configured market origin does not parse".into(),
+        })?;
+        let url = if path.starts_with("http://") || path.starts_with("https://") {
+            reqwest::Url::parse(path).map_err(|_| MarketError::Protocol {
+                detail: "the download url does not parse".into(),
+            })?
+        } else {
+            if !path.starts_with('/') {
+                return Err(MarketError::Refused {
+                    status: 0,
+                    code: "foreign_origin".into(),
+                    detail: "the download path is neither the origin's url nor a path".into(),
+                });
+            }
+            base.join(path).map_err(|_| MarketError::Protocol {
+                detail: "the download path does not join the origin".into(),
+            })?
+        };
+        let same_origin = url.scheme() == base.scheme()
+            && url.host() == base.host()
+            && url.port_or_known_default() == base.port_or_known_default();
+        let clean =
+            url.username().is_empty() && url.password().is_none() && !url.fragment().is_some();
+        if !same_origin || !clean {
+            return Err(MarketError::Refused {
+                status: 0,
+                code: "foreign_origin".into(),
+                detail: "the download url is not on the market origin, or carries userinfo or a fragment".into(),
+            });
+        }
+        Ok(url.to_string())
+    }
+}
+
+/// Maps a wire `ThreadMessageView` onto Nearbee's message model.
+fn thread_message(m: wire::ThreadMessageView) -> ThreadMessage {
+    ThreadMessage {
+        message_id: m.message_id,
+        body: m.body,
+        sender_agent_id: m.sender_agent_id,
+        attachments: m.attachments.into_iter().map(attachment_from).collect(),
+        created_at: wire::wire_time(&m.created_at),
+    }
+}
+
+/// Maps a wire `AttachmentBrief` onto Nearbee's attachment model.
+fn attachment_from(a: wire::AttachmentBrief) -> nearbee_core::market::Attachment {
+    nearbee_core::market::Attachment {
+        id: a.id,
+        filename: a.filename,
+        content_type: a.content_type,
+        byte_size: a.byte_size,
+        sha256: a.sha256,
+        download_url: a.download_url,
+    }
+}
+
+impl NearAgentMarket {
     pub fn new(opts: MarketOptions) -> Result<Self, MarketError> {
         let mut secrets = opts.redact;
         secrets.push(opts.token.clone());
@@ -340,13 +407,34 @@ impl NearAgentMarket {
     }
 
     /// A `GET` with up to three retries on transport errors and 429, 502,
-    /// 503, 504. A retryable status names the wait: its `Retry-After`
-    /// (`retry_after` body field) when present, else the next fixed delay.
+    /// 503, 504, within the read time budget: a `Retry-After` that would
+    /// pass it ends the call at once as a retryable read (spec
+    /// `market-client`, Read retries).
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, MarketError> {
         let mut delays = self.timing.read_retry_delays.iter().copied();
+        // One absolute deadline for the whole call: every attempt gets at
+        // most the time left, and no wait may pass it (C15).
+        let deadline = std::time::Instant::now() + self.timing.read_budget;
+        let mut last: Option<(String, Option<u64>)> = None;
         loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                let (detail, named) = last.unwrap_or_else(|| {
+                    (format!("GET {path}: the read time budget is spent"), None)
+                });
+                return Err(MarketError::RetryableRead {
+                    detail: truncate(&self.redact(&detail), DETAIL_LIMIT),
+                    retry_after_secs: named,
+                });
+            }
             let outcome = self
-                .attempt(reqwest::Method::GET, path, query, None, self.timing.read)
+                .attempt(
+                    reqwest::Method::GET,
+                    path,
+                    query,
+                    None,
+                    self.timing.read.min(left),
+                )
                 .await?;
             let retryable: Option<(String, Option<u64>)> = match outcome {
                 Err(transport) => Some((format!("GET {path}: {transport}"), None)),
@@ -362,18 +450,40 @@ impl NearAgentMarket {
             let Some((detail, named)) = retryable else {
                 unreachable!()
             };
+            last = Some((detail.clone(), named));
+            let mut named_secs = named;
+            // The budget: a named wait that would pass the total ends the
+            // call now, with the delay for the caller to schedule.
+            if let Some(secs) = named_secs {
+                let wait = Duration::from_secs(secs).min(self.timing.retry_after_ceiling);
+                if std::time::Instant::now() + wait > deadline {
+                    return Err(MarketError::RetryableRead {
+                        detail: truncate(&self.redact(&detail), DETAIL_LIMIT),
+                        retry_after_secs: Some(secs),
+                    });
+                }
+                named_secs = Some(secs);
+            }
             match delays.next() {
                 Some(delay) => {
-                    let wait = named
+                    let wait = named_secs
                         .map(Duration::from_secs)
                         .unwrap_or(delay)
                         .min(self.timing.retry_after_ceiling);
+                    // No retry starts when its wait would pass the budget.
+                    if std::time::Instant::now() + wait > deadline {
+                        return Err(MarketError::RetryableRead {
+                            detail: truncate(&self.redact(&detail), DETAIL_LIMIT),
+                            retry_after_secs: named_secs,
+                        });
+                    }
                     tracing::debug!(detail = %self.redact(&detail), "retrying market read");
                     tokio::time::sleep(wait).await;
                 }
                 None => {
                     return Err(MarketError::RetryableRead {
                         detail: truncate(&self.redact(&detail), DETAIL_LIMIT),
+                        retry_after_secs: named_secs,
                     });
                 }
             }
@@ -480,6 +590,7 @@ impl NearAgentMarket {
         };
         let dt = |s: &str| wire::wire_time(s).ok_or_else(|| protocol(format!("bad timestamp {s}")));
         let a = item.assignment;
+        let secs = |v: i32| u64::try_from(v).ok();
         Ok(Row {
             id: a.assignment_id,
             status: Some(wire::wire_str(&a.status)),
@@ -489,13 +600,28 @@ impl NearAgentMarket {
             sla_deadline_at: Some(dt(&a.sla_deadline_at)?),
             auto_accept_at: item.auto_accept_at.as_deref().map(dt).transpose()?,
             cancel_reason: a.cancel_reason,
+            created_at: dt(&a.created_at).ok(),
+            updated_at: dt(&a.updated_at).ok(),
+            finalized_at: a.finalized_at.as_deref().and_then(|t| dt(t).ok()),
+            sla_seconds: secs(a.sla_seconds),
+            escrow_amount: Some(a.escrow_amount),
+            escrow_token: Some(a.escrow_token),
+            job_id: Some(item.job.job_id),
             title: Some(item.job.title),
             // The buyer's brief: data, never instructions to Nearbee.
             description: Some(item.job.description),
+            job_attachments: item
+                .job
+                .attachments
+                .into_iter()
+                .map(attachment_from)
+                .collect(),
             latest_message: item.latest_message.map(|m| Message {
                 body: m.body,
                 sender_side: Some(m.sender_side),
                 created_at: wire::wire_time(&m.created_at),
+                truncated: m.truncated,
+                attachments: m.attachments.into_iter().map(attachment_from).collect(),
             }),
         })
     }
@@ -656,41 +782,63 @@ impl Market for NearAgentMarket {
         Ok(())
     }
 
-    async fn progress(&self, row_id: &str, req: &ProgressRequest) -> Result<(), MarketError> {
+    async fn progress(
+        &self,
+        row_id: &str,
+        req: &ProgressRequest,
+    ) -> Result<ProgressOutcome, MarketError> {
         let path = format!("/v1/assignments/{}/progress", segment(row_id)?);
         let body = wire_body(wire::ReportProgressRequest {
             message: req.message.clone(),
             // `int32`, 0 to 100.
             percent: req.percent.map(|p| i32::from(p.min(100))),
         })?;
-        // At most one repeat, after the delay the refusal names.
-        let first = self
-            .write_once(reqwest::Method::POST, &path, Some(&body))
-            .await;
-        match first {
-            Err(MarketError::Refused {
-                status,
-                code,
-                detail,
-            }) if status == 409 && code == "progress_report_too_soon" => {
-                let seconds = detail
-                    .rsplit_once("retry_after")
-                    .and_then(|(_, tail)| {
-                        tail.split(|c: char| !c.is_ascii_digit())
-                            .find(|s| !s.is_empty())
-                            .and_then(|s| s.parse::<u64>().ok())
-                    })
-                    .unwrap_or(30);
-                tokio::time::sleep(
-                    Duration::from_secs(seconds).min(self.timing.retry_after_ceiling),
-                )
-                .await;
-                self.write_once(reqwest::Method::POST, &path, Some(&body))
-                    .await
-                    .map(|_| ())
+        // The client never repeats a progress write: a too-soon refusal is
+        // returned at once with its delay, for the caller to schedule
+        // (spec `market-client`, Decline and progress repeats).
+        let outcome = self
+            .attempt(
+                reqwest::Method::POST,
+                &path,
+                &[],
+                Some(&body),
+                self.timing.write,
+            )
+            .await?;
+        let (status, text, retry_after) = match outcome {
+            Err(transport) => {
+                return Err(MarketError::WriteOutcomeUnknown {
+                    detail: self.redact(&format!("POST {path}: {transport}")),
+                });
             }
-            other => other.map(|_| ()),
+            Ok(pair) => pair,
+        };
+        if status == 401 {
+            return Err(MarketError::Unauthorized {
+                detail: self.redact(&format!("POST {path}: {}", text.trim())),
+            });
         }
+        if (200..300).contains(&status) {
+            return Ok(ProgressOutcome::Reported);
+        }
+        if status == 409 && machine_code(status, &text) == "progress_report_too_soon" {
+            let seconds = retry_after
+                .or_else(|| retry_after_from_body(&text))
+                .unwrap_or(30);
+            return Ok(ProgressOutcome::TooSoon {
+                retry_after_secs: seconds,
+            });
+        }
+        if status >= 500 || (300..400).contains(&status) {
+            return Err(MarketError::WriteOutcomeUnknown {
+                detail: self.redact(&format!("POST {path}: unexpected HTTP {status}")),
+            });
+        }
+        Err(MarketError::Refused {
+            status,
+            code: machine_code(status, &text),
+            detail: self.redact(&format!("POST {path}: {}", text.trim())),
+        })
     }
 
     async fn submit(&self, row_id: &str, req: &SubmitRequest) -> Result<(), MarketError> {
@@ -833,6 +981,130 @@ impl Market for NearAgentMarket {
         self.write_with_resend(reqwest::Method::POST, &path, None)
             .await?;
         Ok(())
+    }
+
+    async fn messages(
+        &self,
+        row_id: &str,
+        until: Option<time::OffsetDateTime>,
+    ) -> Result<Vec<ThreadMessage>, MarketError> {
+        let base_path = format!("/v1/assignments/{}/messages", segment(row_id)?);
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        // A ceiling so a server that ignores `offset` cannot loop forever.
+        for _page in 0..100 {
+            let path = base_path.clone();
+            let v = self
+                .get(
+                    &path,
+                    &[
+                        ("limit", &PAGE_LIMIT.to_string()),
+                        ("offset", &offset.to_string()),
+                    ],
+                )
+                .await?;
+            let resp: wire::ListMessagesResponse =
+                serde_json::from_value(v).map_err(|e| MarketError::Protocol {
+                    detail: self.redact(&format!("GET {path}: {e}")),
+                })?;
+            let got = resp.messages.len();
+            for m in resp.messages {
+                let created = wire::wire_time(&m.created_at);
+                if let Some(until) = until
+                    && let Some(t) = created
+                    && t <= until
+                {
+                    // The stop page counts: this message is the last read.
+                    out.push(thread_message(m));
+                    return Ok(out);
+                }
+                out.push(thread_message(m));
+            }
+            if got < PAGE_LIMIT {
+                return Ok(out);
+            }
+            offset += got;
+        }
+        Err(MarketError::Protocol {
+            detail: "GET /v1/assignments/{id}/messages: more than 100 pages".into(),
+        })
+    }
+
+    fn origin(&self) -> String {
+        self.base.clone()
+    }
+
+    async fn download(
+        &self,
+        path: &str,
+        cap: u64,
+        out: &mut (dyn std::io::Write + Send),
+    ) -> Result<u64, MarketError> {
+        // The origin check again in the client (design 9.4): the bearer
+        // never travels anywhere but the configured origin.
+        let url = self.attachment_url(path)?;
+        let resp = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.expose())
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| MarketError::RetryableRead {
+                detail: self.redact(&format!("GET <attachment>: {}", describe(&e))),
+                retry_after_secs: None,
+            })?;
+        let status = resp.status().as_u16();
+        match status {
+            401 => Err(MarketError::Unauthorized {
+                detail: self.redact(&format!("GET <attachment>: HTTP {status}")),
+            }),
+            403 | 404 => Err(MarketError::Refused {
+                status,
+                code: machine_code(status, ""),
+                detail: self.redact(&format!("GET <attachment>: HTTP {status}")),
+            }),
+            s if (300..400).contains(&s) => Err(MarketError::Protocol {
+                detail: format!("GET <attachment>: HTTP {s} to a download is not followed"),
+            }),
+            503 => Err(MarketError::RetryableRead {
+                detail: self.redact(&format!("GET <attachment>: HTTP {status}")),
+                retry_after_secs: resp
+                    .headers()
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok()),
+            }),
+            s if !(200..300).contains(&s) => Err(MarketError::Refused {
+                status: s,
+                code: format!("http_{s}"),
+                detail: self.redact(&format!("GET <attachment>: HTTP {s}")),
+            }),
+            _ => {
+                let mut total: u64 = 0;
+                let mut resp = resp;
+                while let Some(chunk) =
+                    resp.chunk().await.map_err(|e| MarketError::RetryableRead {
+                        detail: self.redact(&format!("GET <attachment>: {}", describe(&e))),
+                        retry_after_secs: None,
+                    })?
+                {
+                    total += chunk.len() as u64;
+                    if total > cap {
+                        return Err(MarketError::Protocol {
+                            detail: format!(
+                                "GET <attachment>: the stream passed its {} byte cap",
+                                cap
+                            ),
+                        });
+                    }
+                    out.write_all(&chunk).map_err(|e| MarketError::Protocol {
+                        detail: format!("writing the attachment: {e}"),
+                    })?;
+                }
+                Ok(total)
+            }
+        }
     }
 
     async fn upload_file(&self, file: &UploadFile) -> Result<UploadedFile, MarketError> {

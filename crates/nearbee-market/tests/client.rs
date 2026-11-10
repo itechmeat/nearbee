@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use nearbee_core::market::{
     AgentPatch, DeclineOutcome, DeclineReason, DeclineRequest, Market, MarketError, MessageRequest,
-    NewPricingPlan, ProgressRequest, RowKind, RowStatus, SubmitRequest, UploadFile,
+    NewPricingPlan, ProgressOutcome, ProgressRequest, RowKind, RowStatus, SubmitRequest,
+    UploadFile,
 };
 use nearbee_core::secret::Secret;
 use nearbee_market::{MarketOptions, MarketTiming, NearAgentMarket};
@@ -30,6 +31,7 @@ fn timing(write_timeout: Duration) -> MarketTiming {
         ],
         write_resend_delay: Duration::from_millis(20),
         retry_after_ceiling: Duration::from_secs(10),
+        read_budget: Duration::from_secs(2),
     }
 }
 
@@ -141,7 +143,7 @@ async fn a_read_is_retried_after_503_honouring_retry_after() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/agents/me/assignments"))
-        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "2"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "1"))
         .up_to_n_times(1)
         .mount(&server)
         .await;
@@ -155,7 +157,7 @@ async fn a_read_is_retried_after_503_honouring_retry_after() {
     let rows = client.assignments().await.unwrap();
     assert!(rows.is_empty());
     assert!(
-        started.elapsed() >= Duration::from_secs(2),
+        started.elapsed() >= Duration::from_secs(1),
         "retry ignored Retry-After: {:?}",
         started.elapsed()
     );
@@ -448,29 +450,25 @@ async fn a_message_resend_keeps_the_same_client_request_id() {
         .unwrap();
 }
 
+/// `409 progress_report_too_soon` returns its delay at once, without
+/// waiting and without repeating (spec `market-client`, Decline and
+/// progress repeats).
 #[tokio::test]
-async fn progress_after_409_waits_the_given_delay_before_its_one_repeat() {
+async fn progress_returns_the_too_soon_delay_at_once_without_repeating() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/assignments/a1/progress"))
         .respond_with(ResponseTemplate::new(409).set_body_json({
             let mut b = fx::refusal("progress_report_too_soon", "too soon");
-            b["retry_after"] = json!(2);
+            b["retry_after"] = json!(12);
             b
         }))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/assignments/a1/progress"))
-        .and(body_partial_json(json!({"message": "working on it"})))
-        .respond_with(ok_json(fx::write_answer("WorkerProgressReport")))
         .expect(1)
         .mount(&server)
         .await;
     let client = client(&server, Duration::from_secs(5)).await;
     let started = Instant::now();
-    client
+    let out = client
         .progress(
             "a1",
             &ProgressRequest {
@@ -480,11 +478,286 @@ async fn progress_after_409_waits_the_given_delay_before_its_one_repeat() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        out,
+        ProgressOutcome::TooSoon {
+            retry_after_secs: 12
+        },
+        "the delay travels to the caller"
+    );
     assert!(
-        started.elapsed() >= Duration::from_secs(2),
-        "progress repeat ignored retry_after: {:?}",
+        started.elapsed() < Duration::from_millis(500),
+        "the call must not wait: {:?}",
         started.elapsed()
     );
+}
+
+/// The read time budget: a `Retry-After` that would pass the 30 s total
+/// ends the call at once as a retryable read (here proven with a 2 s
+/// budget and a 120 s Retry-After).
+#[tokio::test]
+async fn a_retry_after_beyond_the_read_budget_ends_the_call_at_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "120"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let rows = client(&server, Duration::from_secs(5))
+        .await
+        .assignments()
+        .await
+        .unwrap_err();
+    match rows {
+        MarketError::RetryableRead {
+            retry_after_secs, ..
+        } => assert_eq!(retry_after_secs, Some(120)),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// C15: the read budget bounds the whole call, request time included: a
+/// retry after a `Retry-After` inside the budget gets only the time left
+/// (2 s budget, 1 s wait, an answer that would take 4 s).
+#[tokio::test]
+async fn the_read_budget_caps_every_attempt_to_the_time_left() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "1"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(
+            ok_json(fx::assignments(vec![row("a1", "in_progress")]))
+                .set_delay(Duration::from_secs(4)),
+        )
+        .mount(&server)
+        .await;
+    let started = std::time::Instant::now();
+    let err = client(&server, Duration::from_secs(5))
+        .await
+        .assignments()
+        .await
+        .unwrap_err();
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(2800),
+        "the call ran past its read budget: {took:?}"
+    );
+    assert!(matches!(err, MarketError::RetryableRead { .. }), "{err:?}");
+}
+
+/// The messages listing (`GET /v1/assignments/{id}/messages`, newest
+/// first) returns the full body of a truncated latest message, found by
+/// its creation time, and stops paging there (spec `market-client`,
+/// Thread read).
+#[tokio::test]
+async fn the_thread_read_finds_the_truncated_latest_message_and_stops() {
+    let server = MockServer::start().await;
+    // The optional `senderAgentId` stays absent, so a buyer message has
+    // none.
+    let m = |id: &str, body: &str, created: &str| {
+        instance(
+            "ThreadMessage",
+            json!({
+                "messageId": id,
+                "body": body,
+                "createdAt": created,
+            }),
+        )
+    };
+    // Newest first: today's worker message, then the buyer's truncated
+    // one, then an older one the caller stops before.
+    let page1 = instance(
+        "ListMessagesResponse",
+        json!({
+            "messages": [
+                m("m1", "noted", "2026-11-10T09:00:00Z"),
+                m("m2", &"please also check".repeat(600), "2026-11-10T08:00:00Z"),
+                m("m3", "old", "2026-11-09T08:00:00Z"),
+            ],
+            "total": 3,
+        }),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/assignments/a1/messages"))
+        .respond_with(ok_json(page1))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    let until = nearbee_market::wire::wire_time("2026-11-10T08:00:00Z").unwrap();
+    let msgs = client_for(&server)
+        .await
+        .messages("a1", Some(until))
+        .await
+        .unwrap();
+    // The stop page counts: m1 and the full m2, then it stops (m3 never
+    // read).
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0].message_id, "m1");
+    assert_eq!(msgs[1].message_id, "m2");
+    assert_eq!(msgs[1].body.len(), "please also check".len() * 600);
+    assert!(msgs[1].sender_agent_id.is_none(), "a buyer message");
+    // No `until`: the whole page, then it stops (a single page here).
+    let msgs = client_for(&server)
+        .await
+        .messages("a1", None)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 3);
+
+    // Across pages: a full first page whose last item is the stop
+    // message; the next page is never requested.
+    let server = MockServer::start().await;
+    let mut full: Vec<serde_json::Value> = (0..99)
+        .map(|i| m(&format!("n{i}"), "newer", "2026-11-10T09:00:00Z"))
+        .collect();
+    full.push(m("stop", "the change request", "2026-11-10T08:00:00Z"));
+    Mock::given(method("GET"))
+        .and(path("/v1/assignments/a1/messages"))
+        .and(query_param("offset", "0"))
+        .respond_with(ok_json(instance(
+            "ListMessagesResponse",
+            json!({"messages": full, "total": 150}),
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/assignments/a1/messages"))
+        .and(query_param("offset", "100"))
+        .respond_with(ok_json(instance(
+            "ListMessagesResponse",
+            json!({"messages": [m("older", "old", "2026-11-09T08:00:00Z")], "total": 150}),
+        )))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let msgs = client_for(&server)
+        .await
+        .messages("a1", Some(until))
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 100);
+    assert_eq!(msgs[99].message_id, "stop");
+    server.verify().await;
+}
+
+/// The attachment download (spec `market-client`, Attachment download):
+/// streams on 200, does not follow a 302, reports 503 with its delay, 403
+/// refused, and stops at the cap.
+#[tokio::test]
+async fn the_download_streams_refuses_redirects_and_honours_the_cap() {
+    let server = MockServer::start().await;
+    // 200 streamed.
+    Mock::given(method("GET"))
+        .and(path("/v1/attachments/ok/raw"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'a'; 100]))
+        .mount(&server)
+        .await;
+    let mut out = Vec::new();
+    let n = client_for(&server)
+        .await
+        .download("/v1/attachments/ok/raw", 1000, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(n, 100);
+    assert_eq!(out.len(), 100);
+    // 302 not followed: a protocol error.
+    Mock::given(method("GET"))
+        .and(path("/v1/attachments/redir/raw"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/elsewhere", server.uri())),
+        )
+        .mount(&server)
+        .await;
+    let mut out = Vec::new();
+    let err = client_for(&server)
+        .await
+        .download("/v1/attachments/redir/raw", 1000, &mut out)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MarketError::Protocol { .. }), "{err:?}");
+    // 503 with Retry-After: a retryable read with the delay.
+    Mock::given(method("GET"))
+        .and(path("/v1/attachments/scan/raw"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "20"))
+        .mount(&server)
+        .await;
+    let mut out = Vec::new();
+    let err = client_for(&server)
+        .await
+        .download("/v1/attachments/scan/raw", 1000, &mut out)
+        .await
+        .unwrap_err();
+    match err {
+        MarketError::RetryableRead {
+            retry_after_secs, ..
+        } => assert_eq!(retry_after_secs, Some(20)),
+        other => panic!("{other:?}"),
+    }
+    // 403 refused.
+    Mock::given(method("GET"))
+        .and(path("/v1/attachments/quarantine/raw"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    let mut out = Vec::new();
+    let err = client_for(&server)
+        .await
+        .download("/v1/attachments/quarantine/raw", 1000, &mut out)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MarketError::Refused { .. }), "{err:?}");
+    // A body longer than the cap stops reading and errors.
+    Mock::given(method("GET"))
+        .and(path("/v1/attachments/big/raw"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 5000]))
+        .mount(&server)
+        .await;
+    let mut out = Vec::new();
+    let err = client_for(&server)
+        .await
+        .download("/v1/attachments/big/raw", 1000, &mut out)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MarketError::Protocol { .. }), "{err:?}");
+    // A foreign origin (another server, so its request log can be read)
+    // is refused before anything is requested: that server sees nothing.
+    let foreign = MockServer::start().await;
+    let before = server.received_requests().await.unwrap().len();
+    let mut out = Vec::new();
+    let err = client_for(&server)
+        .await
+        .download(&format!("{}/x", foreign.uri()), 1000, &mut out)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MarketError::Refused { .. }), "{err:?}");
+    assert!(
+        foreign.received_requests().await.unwrap().is_empty(),
+        "a request reached the foreign origin"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        before,
+        "the refused download sent a request"
+    );
+    // And the bearer travels only on the origin's own requests: every
+    // request the origin received carries it.
+    let bearer = format!("Bearer {TOKEN}");
+    for r in server.received_requests().await.unwrap() {
+        assert_eq!(
+            r.headers.get("authorization").and_then(|v| v.to_str().ok()),
+            Some(bearer.as_str()),
+            "{}",
+            r.url
+        );
+    }
 }
 
 #[tokio::test]
@@ -654,6 +927,134 @@ async fn an_assignment_item_maps_onto_the_row() {
     let rows = client_for(&server).await.assignments().await.unwrap();
     assert_eq!(rows[0].kind(), RowKind::FirstTime);
     assert!(rows[0].latest_message.is_none());
+}
+
+/// The row fields of the spec (`market-client`, Row fields) reach Nearbee's
+/// row from a schema-built item: timestamps, SLA seconds, escrow, job id,
+/// the job's and the latest message's attachments, and the latest
+/// message's sender side, creation time and truncated flag.
+#[tokio::test]
+async fn the_row_fields_of_the_spec_reach_the_row() {
+    let server = MockServer::start().await;
+    let assignment = instance_with(
+        "JobAssignment",
+        &["startedAt", "finalizedAt"],
+        json!({
+            "assignmentId": "hire-1",
+            "status": "accepted",
+            "createdAt": "2026-11-09T09:00:00Z",
+            "updatedAt": "2026-11-10T09:00:00Z",
+            "finalizedAt": "2026-11-11T09:00:00Z",
+            "slaSeconds": 3600,
+            "escrowAmount": "3.00",
+            "escrowToken": "esc-1",
+            "slaDeadlineAt": "2026-11-09T11:00:00Z",
+        }),
+    );
+    let att = |id: &str, name: &str, ct: &str, size: i64, sha: &str, url: &str| {
+        instance(
+            "AttachmentBrief",
+            json!({"id": id, "filename": name, "contentType": ct, "byteSize": size,
+                "sha256": sha, "downloadUrl": url}),
+        )
+    };
+    let job = instance(
+        "WorkerJobBrief",
+        json!({
+            "jobId": "job-1",
+            "title": "Audit",
+            "description": "Audit the repository.",
+            "attachments": [att("att-job", "spec.md", "text/markdown", 1234, "aa11", "/v1/job/raw")],
+        }),
+    );
+    let latest = instance(
+        "LatestMessageBrief",
+        json!({
+            "senderSide": "buyer",
+            "body": "please also check",
+            "truncated": true,
+            "createdAt": "2026-11-10T08:00:00Z",
+            "attachments": [att("att-msg", "notes.pdf", "application/pdf", 5678, "bb22", "/v1/msg/raw")],
+        }),
+    );
+    let item = instance(
+        "MyAssignmentItem",
+        json!({
+            "assignment": assignment,
+            "job": job,
+            "latestMessage": latest,
+        }),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(ok_json(fx::assignments(vec![item])))
+        .mount(&server)
+        .await;
+    let rows = client_for(&server).await.assignments().await.unwrap();
+    let r = &rows[0];
+    assert_eq!(
+        r.created_at.map(|t| t.unix_timestamp()),
+        nearbee_market::wire::wire_time("2026-11-09T09:00:00Z").map(|t| t.unix_timestamp())
+    );
+    assert_eq!(
+        r.updated_at.map(|t| t.unix_timestamp()),
+        nearbee_market::wire::wire_time("2026-11-10T09:00:00Z").map(|t| t.unix_timestamp())
+    );
+    assert_eq!(
+        r.finalized_at.map(|t| t.unix_timestamp()),
+        nearbee_market::wire::wire_time("2026-11-11T09:00:00Z").map(|t| t.unix_timestamp())
+    );
+    assert_eq!(r.sla_seconds, Some(3600));
+    assert_eq!(r.escrow_amount.as_deref(), Some("3.00"));
+    assert_eq!(r.escrow_token.as_deref(), Some("esc-1"));
+    assert_eq!(r.job_id.as_deref(), Some("job-1"));
+    // Each attachment travels whole, field by field.
+    let expect = |a: &nearbee_core::market::Attachment,
+                  id: &str,
+                  name: &str,
+                  ct: &str,
+                  size: i64,
+                  sha: &str,
+                  url: &str| {
+        assert_eq!(
+            (
+                a.id.as_str(),
+                a.filename.as_str(),
+                a.content_type.as_str(),
+                a.byte_size,
+                a.sha256.as_str(),
+                a.download_url.as_str()
+            ),
+            (id, name, ct, size, sha, url)
+        );
+    };
+    assert_eq!(r.job_attachments.len(), 1);
+    expect(
+        &r.job_attachments[0],
+        "att-job",
+        "spec.md",
+        "text/markdown",
+        1234,
+        "aa11",
+        "/v1/job/raw",
+    );
+    // The latest message: truncated flag, creation time, attachments.
+    let m = r.latest_message.as_ref().unwrap();
+    assert!(m.truncated);
+    assert_eq!(
+        m.created_at.map(|t| t.unix_timestamp()),
+        nearbee_market::wire::wire_time("2026-11-10T08:00:00Z").map(|t| t.unix_timestamp())
+    );
+    assert_eq!(m.attachments.len(), 1);
+    expect(
+        &m.attachments[0],
+        "att-msg",
+        "notes.pdf",
+        "application/pdf",
+        5678,
+        "bb22",
+        "/v1/msg/raw",
+    );
 }
 
 async fn client_for(server: &MockServer) -> NearAgentMarket {

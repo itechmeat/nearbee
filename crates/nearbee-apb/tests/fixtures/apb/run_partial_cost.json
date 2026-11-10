@@ -1,0 +1,55 @@
+{
+  "apb_version": "apb 1.0.0-beta.6",
+  "synthetic": true,
+  "note": "synthetic: hand-built from the apb 1.0.0-beta.6 source types (crates/apb-engine/src/run_view.rs RunUsage, budget/view.rs BudgetStatus), not captured from a live apb",
+  "request": {
+    "body": null,
+    "method": "GET",
+    "path": "/api/runs/smoke-own-1794253400197",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ]
+  },
+  "response": {
+    "body": {
+      "run_id": "smoke-own-1794253400197",
+      "run_status": "succeeded",
+      "playbook": "smoke-own",
+      "version": "1.0.1",
+      "nodes": {
+        "start": "succeeded",
+        "write": "succeeded"
+      },
+      "outputs": {
+        "write": "done"
+      },
+      "params": {
+        "hire_id": "fixture-hire-737192",
+        "execution_id": "fixture-exec-737192"
+      },
+      "usage": {
+        "attempts": 3,
+        "input_tokens": 3000,
+        "output_tokens": 1500,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost_usd": 0.05,
+        "cost_attempts": 1,
+        "cost_by_basis": {
+          "billed_usd": 0.03,
+          "subscription_equivalent_usd": 0.02
+        },
+        "estimated": true,
+        "finished_attempts": 3
+      },
+      "worktree": "<home>/.local/share/nearbee/apb-workspace/work/smoke-737192"
+    },
+    "headers": {
+      "content-type": "application/json"
+    },
+    "status": 200
+  }
+}

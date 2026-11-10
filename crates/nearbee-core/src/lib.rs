@@ -4,13 +4,18 @@
 //! The core depends on no adapter. Adapters (`nearbee-apb`,
 //! `nearbee-market`) implement the traits defined here.
 
+pub mod attachments;
 pub mod config;
+pub mod cost;
 pub mod credentials;
+pub mod intake;
 pub mod journal;
 pub mod listing;
+pub mod lock;
 pub mod manifest;
 pub mod market;
 pub mod redact;
+pub mod retention;
 pub mod runner;
 pub mod secret;
 pub mod serve;

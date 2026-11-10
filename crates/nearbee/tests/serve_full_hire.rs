@@ -46,7 +46,7 @@ fn env_of(vars: &[(&str, String)]) -> (Env<'static>, Vec<u8>) {
 
 /// A deliverable worktree with a valid result manifest.
 fn make_worktree(ws: &Path, row_id: &str) -> String {
-    let wt = ws.join("work").join(journal::safe_id(row_id)).join("1");
+    let wt = ws.join("work").join(journal::safe_id(row_id));
     std::fs::create_dir_all(wt.join("out")).unwrap();
     let md = "# Audit\n\nThe repository looks healthy.\n";
     std::fs::write(wt.join("out").join("deliverable.md"), md).unwrap();
@@ -145,7 +145,8 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         .mount(&apb)
         .await;
     // apb's playbook list names the published version as current, so the
-    // start passes the version check.
+    // start passes the version check. The list is read once per start
+    // gate (a read; the count is not pinned).
     Mock::given(method("GET"))
         .and(path("/api/playbooks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
@@ -189,7 +190,9 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         json!({ "slaDeadlineAt": "2027-11-20T12:00:00Z" }),
         fx::instance(
             "WorkerJobBrief",
-            json!({ "description": "Audit the repository." }),
+            // No attachments: the schema's example download url is not a
+            // market path, which serve rightly refuses to fetch.
+            json!({ "description": "Audit the repository.", "attachments": [] }),
         ),
     );
     Mock::given(method("GET"))
@@ -197,6 +200,8 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         .respond_with(ResponseTemplate::new(200).set_body_json(fx::assignments(vec![row])))
         .mount(&market)
         .await;
+    // Exactly one market start and one submit across all ten rounds (O1):
+    // the machine never repeats a landed write.
     Mock::given(method("POST"))
         .and(path("/v1/assignments/hire-1/start"))
         .respond_with(
@@ -224,11 +229,11 @@ async fn one_full_hire_is_taken_run_and_submitted() {
             file: Some(&cfg_path),
             cwd: dir.path(),
         },
-        |_k| None,
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
     )
     .unwrap();
     let opts = ServeOptions {
-        poll_interval_secs: 45,
+        poll_interval_secs: 0,
         run_poll_interval: std::time::Duration::ZERO,
         progress_every: None,
         reject_handle: None,
@@ -241,17 +246,10 @@ async fn one_full_hire_is_taken_run_and_submitted() {
     // server handle after the move, so build vars first.
     let vars = vec![("MARKET_URL", market.uri())];
     let (env, _ignored) = env_of(&vars);
-    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(1)).await;
-    eprintln!("SERVE LINES: {}", String::from_utf8_lossy(&buf));
-    let jp = journal::journal_path(&state_dir, "hire-1");
-    eprintln!("JOURNAL PATH: {} exists={}", jp.display(), jp.exists());
-    if let Ok(t) = std::fs::read_to_string(&jp) {
-        eprintln!("JOURNAL: {t}");
-    }
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(10)).await;
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&buf));
     // The journal shows the whole hire.
     let text = std::fs::read_to_string(journal::journal_path(&state_dir, "hire-1")).unwrap();
-    eprintln!("JOURNAL: {text}");
     assert!(text.contains("market_start"), "{text}");
     assert!(text.contains("run_start"), "{text}");
     assert!(text.contains("market_submit"), "{text}");
@@ -346,7 +344,7 @@ async fn a_revoked_token_is_polled_once_and_the_other_agent_keeps_serving() {
         .and(path("/v1/agents/me/assignments"))
         .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(fx::assignments(vec![])))
-        .expect(2)
+        .up_to_n_times(10)
         .mount_as_scoped(&market)
         .await;
 
@@ -355,11 +353,11 @@ async fn a_revoked_token_is_polled_once_and_the_other_agent_keeps_serving() {
             file: Some(&cfg_path),
             cwd: dir.path(),
         },
-        |_k| None,
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
     )
     .unwrap();
     let opts = ServeOptions {
-        poll_interval_secs: 45,
+        poll_interval_secs: 0,
         run_poll_interval: std::time::Duration::ZERO,
         progress_every: None,
         reject_handle: None,
@@ -369,7 +367,7 @@ async fn a_revoked_token_is_polled_once_and_the_other_agent_keeps_serving() {
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
     let (env, _) = env_of(&[("MARKET_URL", market.uri())]);
-    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(2)).await;
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(10)).await;
     let text = String::from_utf8_lossy(&buf);
     assert_eq!(code, 0, "{text}");
     assert!(
@@ -461,7 +459,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         .and(path(format!("/api/playbooks/{HANDLE}/run")))
         .and(query_param("workspace", WS))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"run_id": run_id})))
-        .expect(1)
+        .up_to_n_times(10)
         .mount(&apb)
         .await;
     Mock::given(method("GET"))
@@ -495,7 +493,6 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
             ResponseTemplate::new(200).set_body_json(fx::assignments(vec![]))
         })
         .up_to_n_times(1)
-        .expect(1)
         .mount(&market)
         .await;
     // Round two: the next hire arrives.
@@ -505,7 +502,9 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         json!({ "slaDeadlineAt": "2027-11-20T12:00:00Z" }),
         fx::instance(
             "WorkerJobBrief",
-            json!({ "description": "Audit the repository." }),
+            // No attachments: the schema's example download url is not a
+            // market path, which serve rightly refuses to fetch.
+            json!({ "description": "Audit the repository.", "attachments": [] }),
         ),
     );
     Mock::given(method("GET"))
@@ -518,7 +517,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         .respond_with(
             ResponseTemplate::new(200).set_body_json(fx::write_answer("StartAssignmentResponse")),
         )
-        .expect(1)
+        .up_to_n_times(10)
         .mount(&market)
         .await;
     Mock::given(method("POST"))
@@ -537,7 +536,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         .and(path("/v1/assignments/hire-2/submit"))
         .and(body_partial_json(json!({"deliverableMarkdown": markdown})))
         .respond_with(ResponseTemplate::new(200).set_body_json(fx::write_answer("JobAssignment")))
-        .expect(1)
+        .up_to_n_times(10)
         .mount(&market)
         .await;
 
@@ -546,7 +545,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
             file: Some(&cfg_path),
             cwd: dir.path(),
         },
-        |_k| None,
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
     )
     .unwrap();
     let opts = ServeOptions {
@@ -561,7 +560,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
     let (env, _) = env_of(&[("MARKET_URL", market.uri())]);
-    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(2)).await;
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(10)).await;
     let out = String::from_utf8_lossy(&buf);
     assert_eq!(code, 0, "{out}");
     let text = std::fs::read_to_string(journal::journal_path(&state_dir, "hire-2")).unwrap();
@@ -572,4 +571,436 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         "{text}"
     );
     assert!(!text.contains("1.0.0"), "{text}");
+}
+
+/// O3: with apb unreachable the round still runs its journal-driven and
+/// time-based steps: a waiting hire past its wall clock is declined
+/// exactly once, and nothing is started.
+#[tokio::test]
+async fn with_apb_down_a_hire_past_its_deadline_is_still_declined() {
+    let dir = tempfile::tempdir().unwrap();
+    let market = MockServer::start().await;
+    // An apb address nobody answers on.
+    let apb_uri = {
+        let gone = MockServer::start().await;
+        gone.uri()
+    };
+    let ws = dir.path().join("apb-workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let store = Store::at(dir.path().join("nearbee").join("credentials"));
+    store
+        .put(
+            HANDLE,
+            AgentCredentials {
+                agent_id: "ag_123".into(),
+                token: Secret::new(TOKEN),
+            },
+        )
+        .unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(state_dir.join("listings")).unwrap();
+    std::fs::write(
+        state_dir.join("listings").join(format!("{HANDLE}.json")),
+        listing_record("1.0.0", b"playbook"),
+    )
+    .unwrap();
+    let cfg_path = dir.path().join("nearbee.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "state_dir: {}\napb:\n  url: {}\n  workspace_path: {}\n",
+            state_dir.display(),
+            apb_uri,
+            ws.display()
+        ),
+    )
+    .unwrap();
+    // An owner-started hire whose SLA deadline is long past.
+    let row = fx::assignment_item(
+        "hire-3",
+        "in_progress",
+        json!({ "slaDeadlineAt": "2026-01-01T12:00:00Z",
+                "startedAt": "2025-12-31T12:00:00Z" }),
+        fx::instance(
+            "WorkerJobBrief",
+            json!({ "description": "Audit the repository.", "attachments": [] }),
+        ),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fx::assignments(vec![row])))
+        .mount(&market)
+        .await;
+    // The row was started (here by the owner): work counts as started,
+    // so the decline is `failed`, never `rejected` (R2-12).
+    let declined = Mock::given(method("POST"))
+        .and(path("/v1/assignments/hire-3/decline"))
+        .and(body_partial_json(json!({"reason": "failed"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fx::write_answer("JobAssignment")))
+        .expect(1)
+        .mount_as_scoped(&market)
+        .await;
+    let cfg = config::load(
+        LoadOptions {
+            file: Some(&cfg_path),
+            cwd: dir.path(),
+        },
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
+    )
+    .unwrap();
+    let opts = ServeOptions {
+        poll_interval_secs: 0,
+        run_poll_interval: std::time::Duration::ZERO,
+        progress_every: None,
+        reject_handle: None,
+        sla_margin_minutes: 10,
+        forbidden: Vec::new(),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = nearbee::Lines::new(&mut buf);
+    let (env, _) = env_of(&[("MARKET_URL", market.uri())]);
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(3)).await;
+    let out = String::from_utf8_lossy(&buf);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("error: apb"), "{out}");
+    drop(declined);
+    let text = std::fs::read_to_string(journal::journal_path(&state_dir, "hire-3")).unwrap();
+    assert!(!text.contains("run_start"), "{text}");
+}
+
+/// R2-2: with every assignments read failing (the only agent's token is
+/// revoked), the journal pass still runs: a hire with an active run past
+/// its recorded wall clock is observed and stopped, and its `failed`
+/// decline waits in the journal for the row.
+#[tokio::test]
+async fn with_every_read_failing_an_active_run_is_still_stopped_at_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let market = MockServer::start().await;
+    let apb = MockServer::start().await;
+    let ws = dir.path().join("apb-workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let store = Store::at(dir.path().join("nearbee").join("credentials"));
+    store
+        .put(
+            HANDLE,
+            AgentCredentials {
+                agent_id: "ag_123".into(),
+                token: Secret::new(TOKEN),
+            },
+        )
+        .unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(state_dir.join("listings")).unwrap();
+    std::fs::write(
+        state_dir.join("listings").join(format!("{HANDLE}.json")),
+        listing_record("1.0.0", b"playbook"),
+    )
+    .unwrap();
+    let cfg_path = dir.path().join("nearbee.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "state_dir: {}\napb:\n  url: {}\n  workspace_path: {}\n",
+            state_dir.display(),
+            apb.uri(),
+            ws.display()
+        ),
+    )
+    .unwrap();
+    let projects = fixture("projects")["response"]["body"].to_string();
+    let projects: Value = serde_json::from_str(&projects.replace(
+        "<home>/.local/share/nearbee/apb-workspace",
+        &ws.to_string_lossy(),
+    ))
+    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(projects))
+        .mount(&apb)
+        .await;
+    let run_id = "repo-audit-fast-9";
+    let observed = Mock::given(method("GET"))
+        .and(path(format!("/api/runs/{run_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "run_id": run_id,
+            "run_status": "running",
+            "playbook": HANDLE,
+            "version": "1.0.0",
+        })))
+        .expect(1..)
+        .mount_as_scoped(&apb)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/runs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "runs": [], "not_indexed": 0, "withheld": 0
+        })))
+        .mount(&apb)
+        .await;
+    // The only agent's token is revoked: no row is read in any round.
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(fx::refusal("unauthorized", "bad token")),
+        )
+        .mount(&market)
+        .await;
+    // A hire with an active run whose recorded deadline is long past.
+    {
+        let mut w =
+            journal::Writer::open(journal::journal_path(&state_dir, "hire-9"), "hire-9").unwrap();
+        w.set_generation(1);
+        w.append(journal::Event::Received(journal::Received::from_brief(
+            "brief",
+        )))
+        .unwrap();
+        let op = uuid::Uuid::now_v7();
+        w.append(journal::Event::Intent(journal::Intent {
+            operation_id: op,
+            kind: "run_start".into(),
+            execution: 1,
+            request_digest: "x".into(),
+            refs: std::collections::BTreeMap::from([
+                ("execution_id".to_owned(), "hire-9-1".to_owned()),
+                (
+                    "sla_deadline_at".to_owned(),
+                    "2026-01-01T12:00:00Z".to_owned(),
+                ),
+            ]),
+        }))
+        .unwrap();
+        w.append(journal::Event::Result(journal::OpResult {
+            operation_id: op,
+            outcome: "done".into(),
+            external_ids: std::collections::BTreeMap::from([(
+                "run_id".to_owned(),
+                run_id.to_owned(),
+            )]),
+        }))
+        .unwrap();
+        w.append(journal::Event::RunObserved(journal::RunObserved {
+            run_id: run_id.into(),
+            execution: 1,
+            status: "running".into(),
+            playbook_version: Some("1.0.0".into()),
+            cost_usd: None,
+            cost_complete: None,
+            budget_usd: None,
+        }))
+        .unwrap();
+    }
+    let cfg = config::load(
+        LoadOptions {
+            file: Some(&cfg_path),
+            cwd: dir.path(),
+        },
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
+    )
+    .unwrap();
+    let opts = ServeOptions {
+        poll_interval_secs: 0,
+        run_poll_interval: std::time::Duration::ZERO,
+        progress_every: None,
+        reject_handle: None,
+        sla_margin_minutes: 10,
+        forbidden: Vec::new(),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = nearbee::Lines::new(&mut buf);
+    // The abort runs `apb stop`; a binary that does not exist keeps this
+    // test away from any real apb (the call fails, the intent stays).
+    let no_apb = dir.path().join("no-apb");
+    let (env, _) = env_of(&[
+        ("MARKET_URL", market.uri()),
+        ("APB_BIN", no_apb.to_string_lossy().to_string()),
+    ]);
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(2)).await;
+    let out = String::from_utf8_lossy(&buf);
+    assert_eq!(code, 0, "{out}");
+    drop(observed);
+    let j = journal::read(
+        &std::fs::read_to_string(journal::journal_path(&state_dir, "hire-9")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        j.open_intents
+            .iter()
+            .any(|i| i.kind == "run_abort" && i.refs["run_id"] == run_id),
+        "the run was not stopped: {out}\n{:?}",
+        j.records
+    );
+    assert!(
+        j.open_intents
+            .iter()
+            .any(|i| i.kind == "market_decline" && i.refs["reason"] == "failed"),
+        "{:?}",
+        j.open_intents
+    );
+}
+
+/// R4-7: with no loadable listing and no credentials at all, serve still
+/// recovers the journals on disk: an active run past its recorded wall
+/// clock is stopped through a controlled `apb` executable, and serve
+/// exits only once that local work is settled.
+#[tokio::test]
+async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let apb = MockServer::start().await;
+    let ws = dir.path().join("apb-workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let store = Store::at(dir.path().join("nearbee").join("credentials"));
+    let state_dir = dir.path().join("state");
+    let cfg_path = dir.path().join("nearbee.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "state_dir: {}\napb:\n  url: {}\n  workspace_path: {}\n",
+            state_dir.display(),
+            apb.uri(),
+            ws.display()
+        ),
+    )
+    .unwrap();
+    let projects = fixture("projects")["response"]["body"].to_string();
+    let projects: Value = serde_json::from_str(&projects.replace(
+        "<home>/.local/share/nearbee/apb-workspace",
+        &ws.to_string_lossy(),
+    ))
+    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(projects))
+        .mount(&apb)
+        .await;
+    let run_id = "repo-audit-fast-11";
+    // The run reads `running` until the fake `apb stop` has been called,
+    // then `aborted`.
+    Mock::given(method("GET"))
+        .and(path(format!("/api/runs/{run_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "run_id": run_id,
+            "run_status": "running",
+            "playbook": HANDLE,
+            "version": "1.0.0",
+        })))
+        .up_to_n_times(1)
+        .mount(&apb)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/runs/{run_id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "run_id": run_id,
+            "run_status": "aborted",
+            "playbook": HANDLE,
+            "version": "1.0.0",
+        })))
+        .mount(&apb)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/runs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "runs": [], "not_indexed": 0, "withheld": 0
+        })))
+        .mount(&apb)
+        .await;
+    {
+        let mut w =
+            journal::Writer::open(journal::journal_path(&state_dir, "hire-11"), "hire-11").unwrap();
+        w.set_generation(1);
+        w.append(journal::Event::Received(journal::Received::from_brief(
+            "brief",
+        )))
+        .unwrap();
+        let op = uuid::Uuid::now_v7();
+        w.append(journal::Event::Intent(journal::Intent {
+            operation_id: op,
+            kind: "run_start".into(),
+            execution: 1,
+            request_digest: "x".into(),
+            refs: std::collections::BTreeMap::from([
+                ("execution_id".to_owned(), "hire-11-1".to_owned()),
+                (
+                    "sla_deadline_at".to_owned(),
+                    "2026-01-01T12:00:00Z".to_owned(),
+                ),
+            ]),
+        }))
+        .unwrap();
+        w.append(journal::Event::Result(journal::OpResult {
+            operation_id: op,
+            outcome: "done".into(),
+            external_ids: std::collections::BTreeMap::from([(
+                "run_id".to_owned(),
+                run_id.to_owned(),
+            )]),
+        }))
+        .unwrap();
+        w.append(journal::Event::RunObserved(journal::RunObserved {
+            run_id: run_id.into(),
+            execution: 1,
+            status: "running".into(),
+            playbook_version: Some("1.0.0".into()),
+            cost_usd: None,
+            cost_complete: None,
+            budget_usd: None,
+        }))
+        .unwrap();
+    }
+    // A controlled `apb`: it records its arguments and succeeds.
+    let calls = dir.path().join("apb-calls.txt");
+    let fake = dir.path().join("fake-apb");
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n", calls.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = config::load(
+        LoadOptions {
+            file: Some(&cfg_path),
+            cwd: dir.path(),
+        },
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
+    )
+    .unwrap();
+    let opts = ServeOptions {
+        poll_interval_secs: 0,
+        run_poll_interval: std::time::Duration::ZERO,
+        progress_every: None,
+        reject_handle: None,
+        sla_margin_minutes: 10,
+        forbidden: Vec::new(),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = nearbee::Lines::new(&mut buf);
+    let (env, _) = env_of(&[
+        ("MARKET_URL", "http://127.0.0.1:9".to_owned()),
+        ("APB_BIN", fake.to_string_lossy().to_string()),
+    ]);
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(6)).await;
+    let out = String::from_utf8_lossy(&buf);
+    let stops = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert!(
+        stops.contains(&format!("stop {run_id}")),
+        "the run was never stopped: {out}\n{stops}"
+    );
+    let j = journal::read(
+        &std::fs::read_to_string(journal::journal_path(&state_dir, "hire-11")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !j.open_intents.iter().any(|i| i.kind == "run_abort"),
+        "the abort was never confirmed: {:?}",
+        j.records
+    );
+    assert!(
+        j.open_intents
+            .iter()
+            .any(|i| i.kind == "market_decline" && i.refs["reason"] == "failed"),
+        "{:?}",
+        j.open_intents
+    );
+    assert!(out.contains("nothing to serve"), "{out}");
+    assert_eq!(code, 1, "{out}");
 }

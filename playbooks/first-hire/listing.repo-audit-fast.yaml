@@ -1,5 +1,5 @@
 # The S2 example listing: repo-audit-fast. Publish with
-# `nearbee publish list playbooks/first-hire/listing.repo-audit-fast.yaml`
+# `nearbee list playbooks/first-hire/listing.repo-audit-fast.yaml`
 # after `nearbee agent add repo-audit-fast`. Publishing never changes
 # listing_status: the listing stays a draft until the owner publishes it.
 handle: repo-audit-fast

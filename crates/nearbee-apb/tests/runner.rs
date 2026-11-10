@@ -104,6 +104,92 @@ async fn start_sends_hire_and_execution_ids_and_returns_the_run_id() {
     }
 }
 
+/// The start body: no `budget` key when the caller passes none, and
+/// `continued_from` when a continued run is requested (spec `apb-runner`,
+/// Run start, scenarios "No budget" and "Continued run").
+#[tokio::test]
+async fn start_without_budget_omits_the_key_and_continued_from_travels() {
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    let f = fixture("start");
+    // Without a budget: the body carries no `budget` key at all.
+    let (mut req, mut body, _dir) = start_request(&f, "smoke-own");
+    req.budget = None;
+    body.as_object_mut().unwrap().remove("budget");
+    builder(&f, false)
+        .and(body_json(body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"run_id": "smoke-own-nb"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let id = runner.start(req).await.unwrap();
+    assert_eq!(id.as_str(), "smoke-own-nb");
+    // A continued run names the run it continues.
+    let (mut req2, mut body2, _dir2) = start_request(&f, "smoke-own");
+    req2.continued_from = Some(RunId::new("run-prev"));
+    body2["continued_from"] = json!("run-prev");
+    builder(&f, false)
+        .and(body_json(body2))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"run_id": "smoke-own-cf"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let id = runner.start(req2).await.unwrap();
+    assert_eq!(id.as_str(), "smoke-own-cf");
+}
+
+/// A partial cost is incomplete, the split by basis travels, and a
+/// budget pause is reported (spec `apb-runner`, Run observation; missing
+/// cost is `missing_cost_is_unknown_not_zero`). The two fixtures are
+/// synthetic, built from the apb source types.
+#[tokio::test]
+async fn usage_is_parsed_from_the_apb_answer_shapes() {
+    // A terminal run with a cost of one of three finished attempts: the
+    // cost is incomplete, and the split by basis travels.
+    let f = fixture("run_partial_cost");
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&f, true).mount(&server).await;
+    let d = runner
+        .run(&RunId::new(
+            f["response"]["body"]["run_id"].as_str().unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        d.usage.cost_usd,
+        Some(Decimal::from_str_exact("0.05").unwrap())
+    );
+    assert_eq!(d.usage.cost_complete(), Some(false));
+    let basis = d.usage.cost_by_basis.expect("the split travels");
+    assert_eq!(
+        basis.billed_usd,
+        Some(Decimal::from_str_exact("0.03").unwrap())
+    );
+    assert_eq!(
+        basis.subscription_equivalent_usd,
+        Some(Decimal::from_str_exact("0.02").unwrap())
+    );
+    assert_eq!(basis.unknown_basis_usd, None);
+    assert_eq!(d.usage.attempts, Some(3));
+    assert_eq!(d.usage.finished_attempts, Some(3));
+    assert_eq!(d.usage.cost_attempts, Some(1));
+
+    // A run the budget gate holds reads as paused by its budget.
+    let f = fixture("run_budget_paused");
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&f, true).mount(&server).await;
+    let d = runner
+        .run(&RunId::new(
+            f["response"]["body"]["run_id"].as_str().unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(d.budget_paused, "the budget pause is reported");
+    assert_eq!(d.status, RunStatus::Paused);
+}
+
 #[tokio::test]
 async fn reserved_param_is_refused_before_sending() {
     let server = MockServer::start().await;

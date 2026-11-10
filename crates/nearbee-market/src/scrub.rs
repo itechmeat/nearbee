@@ -2,8 +2,7 @@
 //! link segment and presigned query is replaced before a recorded market
 //! answer is written to disk, so the fixtures carry no live credential.
 
-use nearbee_core::redact::redact_detail;
-use nearbee_core::secret::Secret;
+use nearbee_core::secret::{REDACTED, Secret};
 
 /// Replaces every `aat_`-shaped token with `<redacted>`.
 pub fn scrub_tokens(text: &str) -> String {
@@ -78,9 +77,21 @@ pub fn scrub_url_queries(text: &str) -> String {
 }
 
 /// Scrubs a recorded answer with every rule, plus the caller's secrets.
+/// The body is never length-cut: a fixture must stay valid JSON for the
+/// replay tests (the redaction of error details truncates; this does not).
 pub fn scrub_fixture(text: &str, secrets: &[Secret]) -> String {
     let scrubbed = scrub_url_queries(&scrub_capability_links(&scrub_tokens(text)));
-    redact_detail(&scrubbed, secrets)
+    let mut values: Vec<&str> = secrets
+        .iter()
+        .map(Secret::expose)
+        .filter(|v| !v.is_empty())
+        .collect();
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let mut out = scrubbed;
+    for v in values {
+        out = out.replace(v, REDACTED);
+    }
+    out
 }
 
 /// One transcript entry of the file-trio capture, built with serde_json so
@@ -131,6 +142,19 @@ mod tests {
             scrub_url_queries(r#"{"uploadUrl":"https://up.example/f?X-Amz-Signature=abc&x=1"}"#);
         assert!(!out.contains("Signature"));
         assert!(out.contains("https://up.example/f?<redacted>"));
+    }
+
+    /// A long body keeps its full length: the fixture must stay valid
+    /// JSON (the 2 KiB detail bound is for errors, not for fixtures).
+    #[test]
+    fn scrub_fixture_never_cuts_the_body() {
+        let secret = Secret::new("super-secret-api-key-value");
+        let pad = "x".repeat(5000);
+        let text = format!(r#"{{"note":"{pad}","token":"aat_0123456789abcdef0123456789abcdef"}}"#);
+        let out = scrub_fixture(&text, &[secret]);
+        assert!(out.len() > 5000, "{} bytes", out.len());
+        assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
+        assert!(out.contains("<redacted>"));
     }
 
     #[test]

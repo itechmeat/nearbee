@@ -116,6 +116,34 @@ from fixtures captured from apb 1.0.0-beta.6 on 2026-11-09
 | Stats | `GET /api/stats`, `apb stats --json` | per playbook version and node: outcome rate, retries, **median** durations and tokens, cost; estimates give medians and p25 to p75 ranges, never a p90, and cost is reported only where the executor reported usage |
 | Connectors | `GET /api/connectors`, `/api/connectors/{name}` | which connectors a playbook can reach: the subprocessor list |
 
+### CLI calls Nearbee makes (apb 1.0.0-beta.6)
+
+| Call | Wording and exits (recorded at the tag) |
+| --- | --- |
+| Abort a run: `apb stop <run_id>` | `stopping <id>: abort sent to the running driver` (exit 0, a live driver gets the abort); `stopped <id>: no driver was running, the run is now aborted` (exit 0, a driverless run is finalized as aborted); `<id> had already finished, so no run was stopped` (exit 0, also covers a run that reached a terminal state while the stop was in flight); `stop failed: ...` on stderr (exit 2). Nearbee runs it from the workspace with its instance's `APB_CONFIG_DIR`, 30 s timeout, and repeats it each round until an observation reads terminal: the stop is idempotent on a finished run. `POST /api/runs/{id}/pause` is a drain pause and no longer used by serve |
+| Ask a decision: `apb decide is <question> --criteria <text> --no-run` | one JSON line on stdout; exit 0 when answered, 1 when refused or failed, 2 on a malformed request. Answered: `{"kind":"is","answer":"yes"|"no","p":<probability of yes>,...,"answered":true}`. Refused: `{"answered":false,"refused":"<code>","reason":"..."}` (measured on Nearbee's instance 2026-11-10: `{"answered":false,"refused":"no_provider","reason":"no decision provider is configured"}`). Failed: `{"answered":false,"error":"<...>","reason":"..."}`. `--no-run` asks outside any run even when `APB_RUN_ID` is set; Nearbee also removes `APB_RUN_ID` and `APB_NODE_ID` from the child's environment (a provider call may cost money, and apb keeps no replay cache for decisions outside a run). Each argument is passed directly, no shell |
+
+### Facts about starts and runs (recorded 2026-11-10)
+
+- `continued_from: "<run_id>"` in the start body continues an earlier run of
+  the same playbook (a rework or a redo); the start answer is shaped as any
+  start's.
+- The first `GET /api/runs/{id}` of a freshly started run can carry
+  `"version": null` even though every later detail names the version: the
+  provenance event is not in the answer yet (measured on Nearbee's instance,
+  2026-11-10). A version check therefore allows a pending first observation
+  for a short time and only judges a terminal run or one observed without a
+  version for more than 60 seconds.
+- `usage` carries the counters `attempts` (attempts whose output reported
+  usage), `finished_attempts` (every attempt the run finished, with or
+  without usage) and `cost_attempts` (how many of `attempts` reported a
+  cost), so a partial sum reads as one; `cost_usd` is the mixed sum and
+  `cost_by_basis` splits it. A run's cost is complete only when it is
+  terminal and `cost_attempts == finished_attempts`.
+- There is no route to delete a run or its artifacts at the tag (no
+  `DELETE /api/runs/{id}`): apb run directories of finished hires stay on
+  disk and are listed as not covered by `nearbee cleanup`.
+
 ### Current version and candidates
 
 A start without a version does not always run `current` (apb 1.0.0-beta.6
@@ -312,7 +340,10 @@ and `nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017` (with the provider's whole
 catalog; outside the workspace it lists no `nearai/` model). apb's own model
 probe runs `opencode models` outside every workspace on purpose, so `apb
 validate` reports `model_not_available` for these models: a warning, not a
-refusal. An executor runs in the run's worktree inside the workspace and
+refusal. `apb validate [NAME]` at the tag checks installed playbooks of the
+project in the working directory by id, not a source file: run it in the
+workspace with Nearbee's `APB_CONFIG_DIR` after `nearbee list` (measured
+2026-11-10: `apb validate repo-audit-fast` answers `repo-audit-fast: OK`). An executor runs in the run's worktree inside the workspace and
 finds the project's `opencode.json`.
 
 ### Billed work

@@ -67,6 +67,8 @@ pub fn fast_timing() -> Timing {
         read: Duration::from_secs(2),
         estimate: Duration::from_secs(2),
         start: Duration::from_millis(500),
+        abort: Duration::from_secs(5),
+        decide: Duration::from_secs(5),
         read_retry_delays: vec![Duration::ZERO; 3],
     }
 }
@@ -77,6 +79,8 @@ pub fn opts(server: &MockServer) -> ApbOptions {
         api_key: None,
         redact: vec![],
         timing: fast_timing(),
+        bin: PathBuf::from("apb"),
+        config_dir: PathBuf::from("/tmp/nearbee-test-apb-config"),
     }
 }
 
@@ -117,10 +121,11 @@ pub fn start_request(f: &Value, playbook: &str) -> (StartRequest, Value, tempfil
         worktree: PathBuf::from(&wt),
         hire_id: HireId::new(hire),
         execution_id: ExecutionId::new(exec),
-        budget: Budget {
+        budget: usd.map(|_| Budget {
             usd,
             on_no_estimate,
-        },
+        }),
+        continued_from: None,
     };
     (req, body, dir)
 }
@@ -218,5 +223,7 @@ pub fn raw_opts(server: &RawServer) -> ApbOptions {
         api_key: None,
         redact: vec![],
         timing: fast_timing(),
+        bin: PathBuf::from("apb"),
+        config_dir: PathBuf::from("/tmp/nearbee-test-apb-config"),
     }
 }

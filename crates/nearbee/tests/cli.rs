@@ -82,6 +82,8 @@ async fn run(args: &[&str], cwd: &Path, vars: &[(&str, &str)]) -> (i32, String) 
             read: Duration::from_secs(2),
             estimate: Duration::from_secs(2),
             start: Duration::from_secs(2),
+            abort: Duration::from_secs(5),
+            decide: Duration::from_secs(5),
             read_retry_delays: vec![Duration::ZERO; 3],
         },
     };
@@ -409,4 +411,39 @@ fn runs_find_rejects_empty_or_blank_ids() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn serve_exits_4_naming_the_lock_while_another_process_holds_it() {
+    // A recording apb: the held lock is found before any call to it.
+    let server = MockServer::start().await;
+    let url = server.uri();
+    let s = Setup::new(&url);
+    let state = s.dir.path().join("state");
+    std::fs::write(
+        s.config(),
+        format!(
+            "state_dir: {}\napb:\n  url: {url}\n  workspace_path: {}\n",
+            state.display(),
+            s.workspace.display()
+        ),
+    )
+    .unwrap();
+    let _held = nearbee_core::lock::acquire(&state).unwrap();
+    let cfg = s.config();
+    let creds = s.dir.path().join("credentials.json");
+    let (code, out) = run(
+        &["--config", cfg.to_str().unwrap(), "serve"],
+        Path::new("/"),
+        &[("NEARBEE_CREDENTIALS", creds.to_str().unwrap())],
+    )
+    .await;
+    assert_eq!(code, 4, "{out}");
+    // The message wording is owned by `lock.rs`; the CLI names the path.
+    let lock = nearbee_core::lock::lock_path(&state);
+    assert!(out.contains(&lock.display().to_string()), "{out}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "apb was called before the lock check"
+    );
 }

@@ -18,6 +18,9 @@ pub const DEFAULT_CONFIG_FILE: &str = "nearbee.yaml";
 pub const DEFAULT_APB_URL: &str = "http://127.0.0.1:7322";
 /// Default dedicated apb workspace directory.
 pub const DEFAULT_WORKSPACE_PATH: &str = "~/.local/share/nearbee/apb-workspace";
+/// Default `APB_CONFIG_DIR` of Nearbee's own apb instance, used by the apb
+/// CLI calls (abort, decide).
+pub const DEFAULT_APB_CONFIG_DIR: &str = "~/.local/share/nearbee/apb-config";
 /// Default state directory.
 pub const DEFAULT_STATE_DIR: &str = ".nearbee";
 
@@ -52,7 +55,7 @@ pub const VARIABLES: &[VarSpec] = &[
     },
 ];
 
-/// Size limits of a result manifest.
+/// Size limits of a result manifest, and the serve loss limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Limits {
@@ -60,6 +63,53 @@ pub struct Limits {
     pub file_bytes: u64,
     pub files: usize,
     pub total_bytes: u64,
+    /// The daily loss limit in USD (spec `nearbee-config`): a decimal
+    /// string, at least zero, default `"20"`.
+    #[serde(deserialize_with = "decimal_string")]
+    pub daily_loss_usd: rust_decimal::Decimal,
+}
+
+/// Retention of finished hires (spec `nearbee-config`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Retention {
+    /// Days after acceptance before `cleanup` deletes a hire's files; at
+    /// least 1, default 7.
+    pub after_acceptance_days: u32,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            after_acceptance_days: 7,
+        }
+    }
+}
+
+/// A decimal given as a YAML string (never a float), at least zero.
+fn decimal_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<rust_decimal::Decimal, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Str(String),
+        /// A number or anything else: refused by name (never a float).
+        Other(#[allow(dead_code)] serde_json::Value),
+    }
+    let Raw::Str(text) = Raw::deserialize(d)? else {
+        return Err(D::Error::custom(
+            "daily_loss_usd must be a decimal string in quotes (like \"20\")",
+        ));
+    };
+    let v: rust_decimal::Decimal = text.trim().parse().map_err(|_| {
+        D::Error::custom("daily_loss_usd must be a decimal string in quotes (like \"20\")")
+    })?;
+    if v < rust_decimal::Decimal::ZERO {
+        return Err(D::Error::custom("daily_loss_usd must be at least zero"));
+    }
+    Ok(v)
 }
 
 impl Default for Limits {
@@ -69,6 +119,7 @@ impl Default for Limits {
             file_bytes: 25 * 1024 * 1024,
             files: 20,
             total_bytes: 100 * 1024 * 1024,
+            daily_loss_usd: rust_decimal::Decimal::new(20, 0),
         }
     }
 }
@@ -79,6 +130,9 @@ pub struct ApbConfig {
     pub url: String,
     /// Absolute path of the apb project Nearbee's playbooks live in.
     pub workspace_path: PathBuf,
+    /// The `APB_CONFIG_DIR` of Nearbee's own apb instance, for the apb CLI
+    /// calls (abort, decide). Never the operator's everyday instance.
+    pub config_dir: PathBuf,
     pub api_key: Option<Secret>,
 }
 
@@ -90,6 +144,7 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub apb: ApbConfig,
     pub limits: Limits,
+    pub retention: Retention,
     pub nearai_api_key: Option<Secret>,
     /// Which known variables are set (by name; values are never kept here).
     pub present: BTreeMap<&'static str, bool>,
@@ -113,6 +168,7 @@ struct FileConfig {
     state_dir: Option<PathBuf>,
     apb: Option<FileApb>,
     limits: Option<Limits>,
+    retention: Option<Retention>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,6 +176,7 @@ struct FileConfig {
 struct FileApb {
     url: Option<String>,
     workspace_path: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
 }
 
 /// A configuration loading failure.
@@ -150,6 +207,15 @@ pub enum ConfigError {
         "config file {path} holds an agent token; tokens belong in the credentials store (`nearbee agent add`), not the config"
     )]
     TokenInFile { path: PathBuf },
+    /// `apb.config_dir` names the operator's default apb config directory;
+    /// Nearbee must use its own instance (rule 6).
+    #[error(
+        "{origin} is the operator's default apb config directory; Nearbee needs its own apb instance (see {default})"
+    )]
+    EverydayConfigDir {
+        origin: String,
+        default: &'static str,
+    },
 }
 
 /// Where to read the configuration from.
@@ -231,12 +297,34 @@ pub fn load(
         &base_dir,
         home.as_deref(),
     )?;
+    let config_dir = resolve_path(
+        file_apb
+            .config_dir
+            .as_deref()
+            .unwrap_or(Path::new(DEFAULT_APB_CONFIG_DIR)),
+        &base_dir,
+        home.as_deref(),
+    )?;
+    // The operator's everyday apb instance is never Nearbee's (rule 6).
+    if config_dir == resolve_path(Path::new("~/.config/apb"), &base_dir, home.as_deref())? {
+        return Err(ConfigError::EverydayConfigDir {
+            origin: "apb.config_dir".to_owned(),
+            default: DEFAULT_APB_CONFIG_DIR,
+        });
+    }
     let url = match (var("APB_URL"), file_apb.url) {
         (Some(u), _) => checked_url(u, || "APB_URL".to_owned())?,
         (None, Some(u)) => checked_url(u, || format!("apb.url in {}", file_path.display()))?,
         (None, None) => DEFAULT_APB_URL.to_owned(),
     };
 
+    let retention = file_cfg.retention.unwrap_or_default();
+    if retention.after_acceptance_days < 1 {
+        return Err(ConfigError::Parse {
+            path: file_path.clone(),
+            message: "retention.after_acceptance_days must be at least 1".into(),
+        });
+    }
     let present = VARIABLES
         .iter()
         .map(|v| (v.name, var(v.name).is_some()))
@@ -248,9 +336,11 @@ pub fn load(
         apb: ApbConfig {
             url,
             workspace_path,
+            config_dir,
             api_key: var("APB_API_KEY").map(Secret::new),
         },
         limits: file_cfg.limits.unwrap_or_default(),
+        retention,
         nearai_api_key: var("NEARAI_API_KEY").map(Secret::new),
         present,
     })
@@ -712,6 +802,142 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn the_apb_config_dir_defaults_expands_and_refuses_the_everyday_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        // Default: Nearbee's own instance, `~` expanded.
+        let cfg = load(
+            LoadOptions {
+                file: None,
+                cwd: dir.path(),
+            },
+            env_of(&[("HOME", "/home/u")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.apb.config_dir,
+            PathBuf::from("/home/u/.local/share/nearbee/apb-config")
+        );
+        // A file value resolves `~` and relative paths against the file.
+        let sub = dir.path().join("srv");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = write(&sub, "nearbee.yaml", "apb:\n  config_dir: ../apb-config\n");
+        let cfg = load(
+            LoadOptions {
+                file: Some(&file),
+                cwd: Path::new("/"),
+            },
+            env_of(&[("HOME", "/home/u")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.apb.config_dir, dir.path().join("apb-config"));
+        // The operator's everyday instance is refused, named without any
+        // path games.
+        let file = write(
+            dir.path(),
+            "top.yaml",
+            "apb:\n  config_dir: ~/.config/apb\n",
+        );
+        let err = load(
+            LoadOptions {
+                file: Some(&file),
+                cwd: dir.path(),
+            },
+            env_of(&[("HOME", "/home/u")]),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("own apb instance"), "{msg}");
+        assert!(msg.contains("apb.config_dir"), "{msg}");
+        // A path that merely starts the same is fine.
+        let file = write(
+            dir.path(),
+            "top.yaml",
+            "apb:\n  config_dir: ~/.config/apb-nearbee\n",
+        );
+        let cfg = load(
+            LoadOptions {
+                file: Some(&file),
+                cwd: dir.path(),
+            },
+            env_of(&[("HOME", "/home/u")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.apb.config_dir,
+            PathBuf::from("/home/u/.config/apb-nearbee")
+        );
+    }
+
+    #[test]
+    fn the_daily_loss_limit_and_the_retention_default_parse_and_refuse_bad_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load(
+            LoadOptions {
+                file: None,
+                cwd: dir.path(),
+            },
+            env_of(&[("HOME", "/home/u")]),
+        )
+        .unwrap();
+        assert_eq!(cfg.limits.daily_loss_usd, rust_decimal::Decimal::new(20, 0));
+        assert_eq!(cfg.retention.after_acceptance_days, 7);
+        let file = write(
+            dir.path(),
+            "set.yaml",
+            "limits:\n  daily_loss_usd: \"7.50\"\nretention:\n  after_acceptance_days: 30\n",
+        );
+        let cfg = load(
+            LoadOptions {
+                file: Some(&file),
+                cwd: dir.path(),
+            },
+            env_of(&[("HOME", "/home/u")]),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.limits.daily_loss_usd,
+            rust_decimal::Decimal::new(750, 2)
+        );
+        assert_eq!(cfg.retention.after_acceptance_days, 30);
+        // The other manifest limits keep their defaults.
+        assert_eq!(cfg.limits.files, Limits::default().files);
+        for (name, text, key) in [
+            (
+                "neg.yaml",
+                "limits:\n  daily_loss_usd: \"-1\"\n",
+                "daily_loss_usd",
+            ),
+            (
+                "num.yaml",
+                "limits:\n  daily_loss_usd: 5\n",
+                "daily_loss_usd",
+            ),
+            (
+                "zero.yaml",
+                "retention:\n  after_acceptance_days: 0\n",
+                "after_acceptance_days",
+            ),
+            (
+                "unk.yaml",
+                "retention:\n  keep_forever: true\n",
+                "keep_forever",
+            ),
+        ] {
+            let file = write(dir.path(), name, text);
+            let err = load(
+                LoadOptions {
+                    file: Some(&file),
+                    cwd: dir.path(),
+                },
+                env_of(&[("HOME", "/home/u")]),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(key), "{name}: {err}");
+        }
     }
 
     #[test]

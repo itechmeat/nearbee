@@ -148,8 +148,8 @@ impl ApbCli {
 
 /// Builds the materialised playbook text: `id: <handle>`, profile names
 /// unchanged, `supervisor.policy.trial_candidates: off` set, version
-/// derived from the digest of the result.
-pub fn materialise(source: &str, handle: &str) -> Result<String, InstallError> {
+/// derived from the digest of the whole bundle (text and scripts).
+pub fn materialise(source: &str, handle: &str, scripts: &[Script]) -> Result<String, InstallError> {
     if !handle
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
@@ -244,7 +244,7 @@ pub fn materialise(source: &str, handle: &str) -> Result<String, InstallError> {
             .unwrap_or(0);
         text.insert_str(after, "__NEARBEE_VERSION__\n");
     }
-    let version = derived_version(&text);
+    let version = derived_version(&text, scripts);
     let mut text = text.replace("__NEARBEE_VERSION__", &format!("version: {version}"));
     if !supervisor_written {
         // Append the supervisor block before the first `nodes:` line if it
@@ -278,12 +278,27 @@ fn version_in(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The version derived from the materialised text: `1.0.<8 hex>` of the
-/// SHA-256 of the text without its `version:` line, so an unchanged source
-/// keeps its version and any change gets a new one.
-pub fn derived_version(text_without_version: &str) -> String {
-    let hex = nearbee_core::journal::sha256_hex(text_without_version.as_bytes());
-    format!("1.0.{}", &hex[..8])
+/// The version derived from the whole bundle: `1.0.<n>` where `n` is the
+/// first 32 bits of the SHA-256 over the materialised text (its version
+/// slot still holds the placeholder) and, length-prefixed so no
+/// concatenation is ambiguous, every script's name, bytes and executable
+/// flag (apb accepts only numeric `major.minor.patch`, each a `u32`), so
+/// an unchanged bundle keeps its version and any change to it gets a new
+/// one.
+pub fn derived_version(text_without_version: &str, scripts: &[Script]) -> String {
+    let mut h: Vec<u8> = Vec::with_capacity(text_without_version.len() + 64);
+    h.extend_from_slice(&(text_without_version.len() as u64).to_le_bytes());
+    h.extend_from_slice(text_without_version.as_bytes());
+    for s in scripts {
+        h.extend_from_slice(s.name.as_bytes());
+        h.push(0);
+        h.extend_from_slice(&(s.bytes.len() as u64).to_le_bytes());
+        h.extend_from_slice(&s.bytes);
+        h.push(u8::from(s.executable));
+    }
+    let hex = nearbee_core::journal::sha256_hex(&h);
+    let patch = u32::from_str_radix(&hex[..8], 16).expect("sha256 hex digits");
+    format!("1.0.{patch}")
 }
 
 fn bundle_id_and_version(text: &str) -> Option<(String, String)> {
@@ -340,14 +355,19 @@ fn base64_encode(bytes: &[u8]) -> String {
 const UNCHANGED_PREFIX: &str = "unchanged: the current version already holds this bundle";
 
 fn extract_digest(output: &str) -> Option<String> {
-    output
-        .lines()
-        .find_map(|l| {
-            let i = l.find("--accept sha256:")?;
-            let rest = &l[i + "--accept ".len()..];
-            let digest = rest.split_whitespace().next()?;
+    // apb 1.0.0-beta.6 names the digest after `--accept` (import) or
+    // `--digest` (trust approve), e.g. "then approve it with --digest sha256:...".
+    let after = |flag: &str| {
+        output.lines().find_map(|l| {
+            let i = l.find(flag)?;
+            let digest = l[i + flag.len() - "sha256:".len()..]
+                .split_whitespace()
+                .next()?;
             digest.starts_with("sha256:").then(|| digest.to_owned())
         })
+    };
+    after("--accept sha256:")
+        .or_else(|| after("--digest sha256:"))
         .or_else(|| {
             output.lines().find_map(|l| {
                 l.trim()
@@ -525,7 +545,7 @@ pub fn read_back_export(cli: &ApbCli, id: &str) -> Result<ReadBack, InstallError
             detail: e.to_string(),
         })?;
     let out_arg = out.path().display().to_string();
-    cli.run("export", &["export", id, &out_arg])?;
+    cli.run("export", &["export", id, "--out", &out_arg])?;
     let text = std::fs::read_to_string(out.path()).map_err(|e| InstallError {
         step: "read back",
         detail: format!("{}: {e}", out.path().display()),
@@ -548,13 +568,65 @@ pub fn install_source(
     handle: &str,
     scripts: &[Script],
 ) -> Result<Installed, InstallError> {
-    let materialised = materialise(source, handle)?;
+    let materialised = materialise(source, handle, scripts)?;
     install_playbook(cli, &materialised, scripts)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_derived_version_is_numeric_semver_and_stable() {
+        let scripts = scripts();
+        let v = derived_version("id: x\n", &scripts);
+        let parts: Vec<&str> = v.split('.').collect();
+        assert_eq!(parts.len(), 3, "{v}");
+        assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()), "{v}");
+        assert_eq!(v, derived_version("id: x\n", &scripts));
+        assert_ne!(v, derived_version("id: y\n", &scripts));
+    }
+
+    /// The version covers the whole bundle: a script-only change (bytes or
+    /// the executable flag) gives a new version, an unchanged bundle the
+    /// same one (spec `listing-publish`, Materialisation).
+    #[test]
+    fn a_script_only_change_gives_a_new_version_and_an_unchanged_bundle_the_same_one() {
+        let src = read_source();
+        let bytes_a = Script {
+            name: "manifest.sh".into(),
+            bytes: b"echo hi\n".to_vec(),
+            executable: true,
+        };
+        let bytes_b = Script {
+            name: "manifest.sh".into(),
+            bytes: b"echo bye\n".to_vec(),
+            executable: true,
+        };
+        let flag_c = Script {
+            name: "manifest.sh".into(),
+            bytes: b"echo hi\n".to_vec(),
+            executable: false,
+        };
+        let m_a = materialise(&src, "repo-audit-fast", std::slice::from_ref(&bytes_a)).unwrap();
+        assert_eq!(
+            materialise(&src, "repo-audit-fast", std::slice::from_ref(&bytes_a)).unwrap(),
+            m_a,
+            "an unchanged bundle keeps its version"
+        );
+        let m_b = materialise(&src, "repo-audit-fast", &[bytes_b]).unwrap();
+        assert_ne!(
+            version_in(&m_a).unwrap(),
+            version_in(&m_b).unwrap(),
+            "a script byte change must give a new version"
+        );
+        let m_c = materialise(&src, "repo-audit-fast", &[flag_c]).unwrap();
+        assert_ne!(
+            version_in(&m_a).unwrap(),
+            version_in(&m_c).unwrap(),
+            "a script executable-flag change must give a new version"
+        );
+    }
 
     use nearbee_core::journal::sha256_hex;
 
@@ -567,7 +639,7 @@ mod tests {
     #[test]
     fn materialise_rewrites_the_id_and_sets_trial_off() {
         let src = read_source();
-        let m = materialise(&src, "repo-audit-fast").unwrap();
+        let m = materialise(&src, "repo-audit-fast", &scripts()).unwrap();
         assert!(m.contains("id: repo-audit-fast\n"));
         assert!(
             !m.contains("version: 1.0.0"),
@@ -580,11 +652,15 @@ mod tests {
         );
         assert!(m.contains("nodes:\n"), "the rest of the playbook is kept");
         // The version derivation is stable for the same source...
-        assert_eq!(materialise(&src, "repo-audit-fast").unwrap(), m);
+        assert_eq!(materialise(&src, "repo-audit-fast", &scripts()).unwrap(), m);
         let v = version_in(&m).unwrap();
         // ...and a changed source gets a different version.
-        let other =
-            materialise(&src.replace("nodes:", "nodes_changed:"), "repo-audit-fast").unwrap();
+        let other = materialise(
+            &src.replace("nodes:", "nodes_changed:"),
+            "repo-audit-fast",
+            &scripts(),
+        )
+        .unwrap();
         assert_ne!(version_in(&other).unwrap(), v);
     }
 
@@ -594,25 +670,25 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: auto\ndefaults:",
         );
-        let err = materialise(&src, "x").unwrap_err();
+        let err = materialise(&src, "x", &scripts()).unwrap_err();
         assert!(err.detail.contains("trial_candidates"), "{err}");
         // `off` explicitly is fine.
         let src = read_source().replace(
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: off\ndefaults:",
         );
-        let m = materialise(&src, "x").unwrap();
+        let m = materialise(&src, "x", &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
         // The structural check is not fooled by a comment or flow style.
         let tricky = read_source().replace(
             "defaults:",
             "supervisor:\n  policy: {trial_candidates: auto}\ndefaults:",
         );
-        assert!(materialise(&tricky, "x").is_err());
+        assert!(materialise(&tricky, "x", &scripts()).is_err());
         let commented =
             read_source().replace("defaults:", "defaults:\n  # trial_candidates: off\n");
         assert!(
-            materialise(&commented, "x").is_ok(),
+            materialise(&commented, "x", &scripts()).is_ok(),
             "a comment is not a setting"
         );
     }
@@ -620,8 +696,8 @@ mod tests {
     #[test]
     fn materialise_rejects_an_unsafe_id() {
         let src = read_source();
-        assert!(materialise(&src, "../evil").is_err());
-        assert!(materialise(&src, "").is_err());
+        assert!(materialise(&src, "../evil", &scripts()).is_err());
+        assert!(materialise(&src, "", &scripts()).is_err());
     }
 
     /// O-13: a source `policy:` block in the supervisor is dropped whole,
@@ -632,7 +708,7 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: off\n    log_level: debug\ndefaults:",
         );
-        let m = materialise(&src, "x").unwrap();
+        let m = materialise(&src, "x", &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
         assert!(
             !m.contains("log_level"),
@@ -643,7 +719,7 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: off\n      nested: keep_or_drop\ndefaults:",
         );
-        let m = materialise(&src, "x").unwrap();
+        let m = materialise(&src, "x", &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
         assert!(!m.contains("nested"), "{m}");
     }
@@ -657,7 +733,7 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    max_retries: 2\n\n    # a comment\n    budget: 3\n  keep_me: 1\ndefaults:",
         );
-        let m = materialise(&src, "x").unwrap();
+        let m = materialise(&src, "x", &scripts()).unwrap();
         assert!(
             !m.contains("budget"),
             "a child after the blank line survived: {m}"
@@ -702,7 +778,7 @@ mod tests {
         // A playbook with the key only in another block installs fine and
         // carries exactly the adapter's own trial setting.
         let src = read_source().replace("defaults:", "trial_candidates: auto\ndefaults:");
-        let m = materialise(&src, "x").unwrap();
+        let m = materialise(&src, "x", &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
     }
 
@@ -732,8 +808,13 @@ case "$1" in
       echo "bundle $id @ $ver is new"
       exit 1
     fi
-    # accept: record the accepted digest for the test to compare.
+    want="sha256:$(sha256sum "$bundle" | cut -d' ' -f1)"
+    # accept: only the digest of this bundle, as apb names it.
     if [ "$3" = "--accept" ]; then
+      if [ "$4" != "$want" ]; then
+        echo "digest mismatch: this bundle is $want" >&2
+        exit 2
+      fi
       echo "$4" > "$STATE/accepted-digest.txt"
       touch "$STATE/holds"
       echo imported
@@ -745,7 +826,7 @@ case "$1" in
     fi
     echo "bundle $id @ $ver is new"
     echo "the imported version carries scripts: it runs only after an approval that names its digest"
-    echo "--accept sha256:deadbeef"
+    echo "--accept $want"
     exit 3
     ;;
   trust)
@@ -761,9 +842,11 @@ case "$1" in
         exit 2
       fi
       want="$(sha256sum "$STATE/playbook.txt" | cut -d' ' -f1)"
-      echo "approve with the trust digest:"
-      echo "sha256:$want"
-      exit 3
+      # The wording of apb 1.0.0-beta.6 (`apb trust approve` without --digest).
+      echo "this version was imported with scripts: review them, then approve it with --digest sha256:$want" >&2
+      echo "SCRIPT       SHA256                                                                   BYTES" >&2
+      echo "manifest.sh  sha256:0000000000000000000000000000000000000000000000000000000000000000  547" >&2
+      exit 2
     fi
     if [ "$2" = revoke ]; then
       rm -f "$STATE/approved"
@@ -774,7 +857,9 @@ case "$1" in
     exit 2
     ;;
   export)
-    # export <id> <out>
+    # export <id> --out <file> (apb 1.0.0-beta.6)
+    [ "$3" = "--out" ] || { echo "error: unexpected argument '$3' found" >&2; exit 2; }
+    set -- "$1" "$2" "$4"
     version="$(cat "$STATE/version.txt" 2>/dev/null || echo 1.0.0)"
     playbook="$(cat "$STATE/playbook.txt" 2>/dev/null || echo "id: x")"
     escaped="$(printf '%s\n' "$playbook" | sed 's/\\/\\\\/g; s/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')"
@@ -824,7 +909,7 @@ esac
     }
 
     fn materialised_for(handle: &str) -> String {
-        materialise(&read_source(), handle).unwrap()
+        materialise(&read_source(), handle, &scripts()).unwrap()
     }
 
     /// Puts the materialised text into the fake's export state, so the

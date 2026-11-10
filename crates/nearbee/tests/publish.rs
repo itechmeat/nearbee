@@ -1,6 +1,6 @@
 //! CLI tests of `nearbee list` against a wiremock market and a fake apb
-//! CLI: the market update scenarios. Publishing never touches
-//! `listing_status`.
+//! CLI: the no-market-writes rule and the web-app settings report.
+//! Publishing never touches `listing_status` and never writes.
 
 use nearbee::publish::{PublishEnv, publish};
 use nearbee::{Cli, Command, Env, ListArgs};
@@ -37,7 +37,8 @@ case "$1" in
   export)
     version="$(cat "$STATE/installed-version.txt" 2>/dev/null || echo 1.0.0)"
     playbook="$(sed -n 's/.*"playbook": *"\(.*\)"}/\1/p' "$STATE/readback.json" 2>/dev/null)"
-    printf '{"apb_bundle":2,"id":"%s","version":"%s","playbook":"%s"}\n' "$2" "$version" "$playbook" > "$3"
+    [ "$3" = "--out" ] || { echo "error: unexpected argument '$3' found" >&2; exit 2; }
+    printf '{"apb_bundle":2,"id":"%s","version":"%s","playbook":"%s"}\n' "$2" "$version" "$playbook" > "$4"
     exit 0 ;;
   *) echo "fake: $*"; exit 2 ;;
 esac
@@ -152,165 +153,153 @@ fn old_default_plan(price: &str, sla: u64) -> Value {
     )])
 }
 
+/// The one market call `nearbee list` still makes: the plans read. No
+/// PATCH, no plan POST, no make-default: a write would 403 with the agent
+/// token anyway, and the mock would hang the request log with it.
 async fn mount_market(server: &MockServer, plans: Value) {
-    Mock::given(method("PATCH"))
-        .and(path(format!("/v1/agents/{AGENT_ID}")))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(fx::owner_agent_view(AGENT_ID, HANDLE, "draft")),
-        )
-        .mount(server)
-        .await;
     Mock::given(method("GET"))
         .and(path(format!("/v1/agents/{AGENT_ID}/pricing-plans")))
         .respond_with(ResponseTemplate::new(200).set_body_json(plans))
         .mount(server)
         .await;
-    Mock::given(method("POST"))
-        .and(path(format!("/v1/agents/{AGENT_ID}/pricing-plans")))
-        .respond_with(ResponseTemplate::new(201).set_body_json(fx::pricing_plan(
-            "plan_new",
-            AGENT_ID,
-            "0.50",
-            Some(86400),
-            false,
-        )))
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/pricing-plans/plan_new/make-default"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(fx::pricing_plan(
-            "plan_new",
-            AGENT_ID,
-            "0.50",
-            Some(86400),
-            true,
-        )))
-        .mount(server)
-        .await;
 }
 
+/// Every request the server saw was a GET: the market received only reads.
+async fn only_reads(server: &MockServer) {
+    let bodies = server.received_requests().await.unwrap();
+    assert!(
+        bodies.iter().all(|req| req.method.as_str() == "GET"),
+        "a market write was sent: {:?}",
+        bodies.iter().map(|r| r.method.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// `nearbee list` writes nothing: the market receives only the plans
+/// read, the record holds the new keys, and a price mismatch is reported,
+/// not failed.
 #[tokio::test]
-async fn publish_patches_and_creates_a_plan_when_price_changed() {
+async fn publish_makes_no_market_write_and_reports_the_settings() {
     let s = Setup::new().await;
     let plans = old_default_plan("1.00", 3600);
     mount_market(&s.server, plans).await;
-    let r = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
+    let (r, rows) = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
         .await
         .unwrap();
     assert_eq!(r.handle, HANDLE);
     assert_eq!(r.agent_id, AGENT_ID);
     // The installed version read back equals the derived version of the
-    // materialised playbook.
+    // materialised playbook, numeric `1.0.<n>`.
     assert!(
-        r.playbook_version.starts_with("1.0."),
+        r.playbook_version.starts_with("1.0.")
+            && r.playbook_version["1.0.".len()..].parse::<u32>().is_ok(),
         "{}",
         r.playbook_version
     );
-    assert_eq!(r.playbook_version.len(), "1.0.".len() + 8);
     assert_eq!(r.price_usd, "0.50");
-    // The resolved listing is on disk.
-    assert!(
+    // The resolved listing is on disk and carries the new keys.
+    let text = std::fs::read_to_string(
         s.state_dir()
             .join("listings")
-            .join(format!("{HANDLE}.json"))
-            .exists()
-    );
-    // The patch never carries listing_status.
+            .join(format!("{HANDLE}.json")),
+    )
+    .unwrap();
+    let rec: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(rec["protection"], "on", "protection is recorded");
+    // The market received only reads, and only the plans call.
     let bodies = s.server.received_requests().await.unwrap();
-    let patch = bodies
-        .iter()
-        .find(|req| req.url.path() == format!("/v1/agents/{AGENT_ID}"))
-        .unwrap();
-    let body: Value = serde_json::from_slice(&patch.body).unwrap();
-    assert!(body.get("listing_status").is_none(), "{body}");
-    assert_eq!(body["category"], "dev_tools");
-    assert_eq!(body["sla_seconds"], 86400);
-    // A plan was created and made default.
-    let plans_path = format!("/v1/agents/{AGENT_ID}/pricing-plans");
-    assert!(
-        bodies
-            .iter()
-            .any(|req| req.url.path() == plans_path.as_str() && req.method.as_str() == "POST")
+    assert_eq!(bodies.len(), 1, "{:?}", bodies.len());
+    assert_eq!(
+        bodies[0].url.path(),
+        format!("/v1/agents/{AGENT_ID}/pricing-plans")
     );
-    assert!(
-        bodies
-            .iter()
-            .any(|req| req.url.path() == "/v1/pricing-plans/plan_new/make-default")
+    only_reads(&s.server).await;
+    // The report: the owner sets the texts in the web app; the price and
+    // the SLA are compared with the default plan.
+    let fields: Vec<&str> = rows.iter().map(|r| r.field).collect();
+    assert_eq!(
+        fields,
+        [
+            "name",
+            "description",
+            "bio",
+            "category",
+            "tags",
+            "SLA",
+            "price"
+        ]
     );
+    for r in rows.iter().take(5) {
+        assert_eq!(
+            r.market_value, "not readable with the agent token",
+            "{}",
+            r.field
+        );
+        assert_eq!(r.status, "set in web app", "{}", r.field);
+    }
+    let sla = row(&rows, "SLA");
+    assert_eq!(sla.market_value, "3600", "{:?}", sla.market_value);
+    assert_eq!(sla.status, "mismatch");
+    let price = row(&rows, "price");
+    assert_eq!(price.market_value, "1.00");
+    assert_eq!(price.status, "mismatch");
 }
 
+/// The report row of one field.
+fn row<'a>(
+    rows: &'a [nearbee::publish::SettingRow],
+    field: &str,
+) -> &'a nearbee::publish::SettingRow {
+    rows.iter()
+        .find(|r| r.field == field)
+        .unwrap_or_else(|| panic!("no {field} row in {rows:?}"))
+}
+
+/// A default plan whose model, price and SLA match reads as ok on both
+/// rows, and still nothing is written.
 #[tokio::test]
-async fn an_unchanged_price_creates_no_new_plan() {
+async fn a_matching_plan_reads_as_ok() {
     let s = Setup::new().await;
     let plans = old_default_plan("0.50", 86400);
     mount_market(&s.server, plans).await;
-    let r = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
+    let (_, rows) = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
         .await
         .unwrap();
-    assert_eq!(r.handle, HANDLE);
-    let bodies = s.server.received_requests().await.unwrap();
-    let plans_path = format!("/v1/agents/{AGENT_ID}/pricing-plans");
-    assert!(
-        !bodies
-            .iter()
-            .any(|req| req.url.path() == plans_path.as_str() && req.method.as_str() == "POST"),
-        "a plan was created although the default already matched"
-    );
-    assert!(
-        !bodies
-            .iter()
-            .any(|req| req.url.path().ends_with("make-default")),
-        "make-default was called although the default already matched"
-    );
+    assert_eq!(row(&rows, "SLA").status, "ok", "{rows:?}");
+    assert_eq!(row(&rows, "price").status, "ok", "{rows:?}");
+    only_reads(&s.server).await;
 }
 
+/// No plan at all: publishing succeeds, says the price is not set in the
+/// web app yet, and a null plan SLA reads as unverified.
 #[tokio::test]
-async fn a_pricing_plan_409_names_the_cap_and_changes_nothing() {
+async fn no_plan_reads_as_not_set_and_a_null_sla_as_unverified() {
     let s = Setup::new().await;
-    Mock::given(method("PATCH"))
-        .and(path(format!("/v1/agents/{AGENT_ID}")))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(fx::owner_agent_view(AGENT_ID, HANDLE, "draft")),
-        )
-        .mount(&s.server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/agents/{AGENT_ID}/pricing-plans")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(old_default_plan("1.00", 3600)))
-        .mount(&s.server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("/v1/agents/{AGENT_ID}/pricing-plans")))
-        .respond_with(ResponseTemplate::new(409).set_body_json(fx::refusal(
-            "pricing_plan_cap",
-            "maximum number of plans reached",
-        )))
-        .mount(&s.server)
-        .await;
-    let err = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
+    mount_market(&s.server, json!([])).await;
+    let (_, rows) = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
         .await
-        .unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("pricing_plan_cap"), "{msg}");
-    assert!(msg.contains("remove an unused plan"), "{msg}");
-    // No plan was deleted or patched and no make-default happened.
-    let bodies = s.server.received_requests().await.unwrap();
-    assert!(
-        !bodies.iter().any(|req| {
-            (req.url.path().contains("/pricing-plans"))
-                && matches!(req.method.as_str(), "DELETE" | "PATCH" | "PUT")
-        }),
-        "a plan was deleted or patched"
+        .unwrap();
+    assert_eq!(row(&rows, "SLA").status, "set in web app", "{rows:?}");
+    assert_eq!(row(&rows, "SLA").market_value, "not set in the web app yet");
+    assert_eq!(
+        row(&rows, "price").market_value,
+        "not set in the web app yet"
     );
-    let bodies = s.server.received_requests().await.unwrap();
-    assert!(
-        !bodies
-            .iter()
-            .any(|req| req.url.path().ends_with("make-default")),
-        "make-default was called after the cap refusal"
-    );
+    // A null plan SLA inherits the agent default, which the token cannot
+    // read: unverified, not a mismatch.
+    let s2 = Setup::new().await;
+    let plan = fx::pricing_plan("plan_old", AGENT_ID, "0.50", None, true);
+    mount_market(&s2.server, json!([plan])).await;
+    let (_, rows) = publish(
+        &s2.listing(),
+        &s2.env,
+        &s2.store,
+        &s2.state_dir(),
+        s2.secrets(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(row(&rows, "SLA").status, "unverified", "{rows:?}");
+    assert_eq!(row(&rows, "price").status, "ok", "{rows:?}");
 }
 
 #[tokio::test]
@@ -346,44 +335,12 @@ async fn publishing_stops_before_any_market_call_when_the_playbook_cannot_be_ins
         "a market call was made: {}",
         bodies.len()
     );
-
-    // An installed current version that reads back without the trial
-    // setting refuses before any market call too.
-    std::fs::write(
-        s.apb_state().join("readback.json"),
-        json!({
-            "apb_bundle": 2,
-            "id": HANDLE,
-            "playbook": "id: repo-audit-fast\nname: x\n"
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let err = publish(&s.listing(), &s.env, &s.store, &s.state_dir(), s.secrets())
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("trial_candidates"), "{err}");
-    let bodies = s.server.received_requests().await.unwrap();
-    assert!(
-        bodies.is_empty(),
-        "a market call was made after a bad read back: {}",
-        bodies.len()
-    );
-    // Restore the good read back for the later tests.
-    std::fs::write(
-        s.apb_state().join("readback.json"),
-        json!({
-            "apb_bundle": 2,
-            "id": HANDLE,
-            "playbook": "id: repo-audit-fast\nname: x\nsupervisor:\n  policy:\n    trial_candidates: off\n"
-        })
-        .to_string(),
-    )
-    .unwrap();
 }
 
 /// The CLI command `nearbee list` drives the same publish through
 /// the config file and environment: it prints the summary and exits 0.
+/// The apb config directory is the config's `apb.config_dir` (no
+/// `APB_CONFIG_DIR` is set), the one serve uses too.
 #[tokio::test]
 async fn the_cli_publish_list_command_prints_the_summary() {
     let s = Setup::new().await;
@@ -393,9 +350,10 @@ async fn the_cli_publish_list_command_prints_the_summary() {
     std::fs::write(
         &cfg,
         format!(
-            "state_dir: {state}\napb:\n  workspace_path: {ws}\n",
+            "state_dir: {state}\napb:\n  workspace_path: {ws}\n  config_dir: {cd}\n",
             state = s.state_dir().display(),
-            ws = s.env.apb_workspace.display()
+            ws = s.env.apb_workspace.display(),
+            cd = s.env.apb_config_dir.display()
         ),
     )
     .unwrap();
@@ -403,10 +361,6 @@ async fn the_cli_publish_list_command_prints_the_summary() {
         ("HOME".to_string(), s.dir.path().display().to_string()),
         ("MARKET_URL".to_string(), s.env.market_url.clone()),
         ("APB_BIN".to_string(), s.env.apb_bin.display().to_string()),
-        (
-            "APB_CONFIG_DIR".to_string(),
-            s.env.apb_config_dir.display().to_string(),
-        ),
         (
             "NEARBEE_CREDENTIALS".to_string(),
             s.dir
@@ -437,23 +391,21 @@ async fn the_cli_publish_list_command_prints_the_summary() {
     assert_eq!(code, 0);
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.contains(&format!("published {HANDLE} ({AGENT_ID}")),
+        text.contains(&format!("installed {HANDLE} ({AGENT_ID}")),
         "{text}"
     );
     assert!(text.contains("0.50"), "{text}");
-    // The market was patched and the resolved listing is on disk.
-    let bodies = s.server.received_requests().await.unwrap();
-    assert!(
-        bodies
-            .iter()
-            .any(|req| req.url.path() == format!("/v1/agents/{AGENT_ID}"))
-    );
+    assert!(text.contains("set these in the market web app"), "{text}");
+    assert!(text.contains("price"), "{text}");
+    assert!(text.contains("mismatch"), "{text}");
+    // The resolved listing is on disk and the market only read.
     assert!(
         s.state_dir()
             .join("listings")
             .join(format!("{HANDLE}.json"))
             .exists()
     );
+    only_reads(&s.server).await;
 }
 
 /// An installed version whose read back lacks `trial_candidates: off`
@@ -505,6 +457,9 @@ async fn a_market_failure_after_the_install_leaves_the_record_on_the_installed_v
             playbook_sha256: "old".into(),
             price_usd: "1.00".into(),
             sla_seconds: 3600,
+            scope: None,
+            protection: None,
+            limits: None,
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         },
     )
