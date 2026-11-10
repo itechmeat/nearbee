@@ -51,7 +51,8 @@ Generated, never typed. For a listing it lists, from apb's data:
    with the market under its own policy; a file once used by a job cannot be
    deleted there, and its link works for anyone holding it.
 5. Local retention: "deleted N days after the market reports acceptance;
-   deletion is journaled", with the inventory below.
+   deletion is journaled", with the inventory below (what Nearbee deletes and
+   what it cannot).
 
 The statement goes into the listing's `bio_markdown` under "Data handling" and
 into every deliverable's footer.
@@ -70,32 +71,65 @@ into every deliverable's footer.
 - Journal hashes: `.nearbee/hires/<id>/journal.jsonl` holds hashes of every
   input, output and deletion with timestamps. Anchoring on NEAR is a stretch.
 
-## Deletion inventory
+## Deletion inventory (as built in S3)
 
-After the market reports acceptance (explicit or deemed) plus the configured
-retention window (default 7 days), `nearbee cleanup` removes, for that hire:
+`nearbee hires` lists every journaled hire (read only, no lock): hire id,
+agent handle, state, latest run, spent cost, deadline and an attention code;
+never the brief text, a token or a capability link (`--json` for the same as
+JSON).
 
-1. the worktree (inputs, conversions, `out/`);
-2. downloaded attachments and any temporary copies;
-3. the apb run's snapshot, journal, node outputs and CLI transcripts for that
-   run (apb keeps them under its data directory; the runner deletes by run id);
-4. local deliverable copies and manifests;
-5. caches the executors wrote (listed per executor; unknown caches are reported
-   as not covered).
+`nearbee cleanup` takes the serve lock (`<state_dir>/serve.lock`, exit 4 while
+a serve or another cleanup holds it) and deletes, for each eligible hire, only
+the paths Nearbee owns:
 
-It keeps the hire journal (hashes, timestamps, states) and writes `deleted`
-with the list of what was removed and what could not be. Declined-before-start
-hires delete at once. Market playbooks run on Nearbee's own apb instance
-(separate config and data directory, `docs/apb.md`), so nothing they produce
-reaches the operator's everyday apb. apb itself learns from every run today
-with no switch to turn it off (S1 finding); apb's `near-ai-cloud-models`
-change adds an `external_data` run flag that excludes a run from every
-learning and reuse path (corrections, known problems, stats and estimates,
-judge examples, scenario capture, run memory) and keeps it visible on the run
-(D-023). Nearbee sets that flag on every market run once apb ships it and
-checks it on the run detail; until then only the owner's own test hires run.
-The flag does not cover an agent CLI's own memory and session files: those
-are executor caches in item 5 above, removed per executor.
+1. the hire's worktree under `<workspace>/work/` (the buyer's `inputs/`, the
+   run's `out/`, anything else the run wrote there): every worktree the hire's
+   run intents journaled (an S2 hire's per-execution path included) and the
+   per-hire default;
+2. the hire's snapshot directories `<state_dir>/hires/<hire>/gen-*` (frozen
+   submissions, run request bodies, the previous generations' `out/`).
+
+A journaled worktree outside `<workspace>/work/` after canonicalisation is
+never touched and is reported as refused. The hire journal stays (hashes,
+timestamps, states) and gets a `deleted` record listing every path removed,
+already absent, failed or refused, and what is not covered. A path counts
+as removed or absent only once the directory that held it is synced, and
+snapshot directories that cannot be listed are a failure, never an empty
+list. A hire with a failed path stays eligible and the next cleanup retries
+it.
+
+Eligibility (`retention.after_acceptance_days`, default 7):
+
+1. closed `accepted`: that many days after `finalizedAt` (else after the
+   acceptance was first observed); acceptance is never inferred from
+   `autoAcceptAt`;
+2. closed `cancelled` with no delivery, a decline at intake included: at once;
+3. closed `cancelled` after a delivery, or `dispute_resolved`: that many days
+   after the closing was first observed;
+4. never: a frozen (disputed) hire, a hire with an open intent, a hire still
+   open or delivered and not yet closed.
+
+`nearbee cleanup --dry-run` prints the same plan, takes no lock and changes
+nothing.
+
+Not covered, listed by name in every `deleted` record and in the dry run:
+
+1. apb's run directories of the hire's run ids (apb `1.0.0-beta.6` has no run
+   deletion, `docs/apb.md`);
+2. apb's `.apb/decisions.jsonl` entries of the scope check (digests and
+   metadata of the question, never deleted by Nearbee);
+3. caches the executors wrote (agent CLI memory and session files).
+
+Market playbooks run on Nearbee's own apb instance (separate config and data
+directory, `docs/apb.md`), so nothing they produce reaches the operator's
+everyday apb. apb itself learns from every run today with no switch to turn it
+off (S1 finding); apb's `near-ai-cloud-models` change adds an `external_data`
+run flag that excludes a run from every learning and reuse path (corrections,
+known problems, stats and estimates, judge examples, scenario capture, run
+memory) and keeps it visible on the run (D-023). Nearbee sets that flag on
+every market run once apb ships it and checks it on the run detail; until then
+only the owner's own test hires run. The flag does not cover an agent CLI's
+own memory and session files: those are the executor caches above.
 
 ## What is honestly not guaranteed
 

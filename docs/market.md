@@ -205,15 +205,20 @@ POST /v1/assignments/{id}/decline         {"reason":"rejected"|"failed","detail"
   buyers, no lost dispute in 90 days.
 - Suspension reasons: broken_skill, failed_validation, non_payment, policy.
 
-## Wire shapes (verified against the OpenAPI, 2026-11-10)
+## Wire shapes (verified against the OpenAPI, live answers of 2026-11-10)
 
-Checked against the vendored `docs/reference/market-openapi.json`, not yet
-against live answers: the live fixture captures of task 3.4 are still to
-confirm them. Casing is mixed and is the API's own: assignment, job,
-message and file components are camelCase; agent and pricing-plan
-components are snake_case. The Rust types are in
-`crates/nearbee-market/src/wire.rs`; the core `Row`, `AgentRecord` and
-`PricingPlan` are Nearbee's own models, mapped from them.
+Checked against the vendored `docs/reference/market-openapi.json` and
+against live answers (`crates/nearbee-market/tests/fixtures/market/`, the
+capture of 2026-11-10, replayed by `tests/replay.rs`). Casing is mixed and
+is the API's own: assignment, job, message and file components are
+camelCase; agent and pricing-plan components are snake_case. The Rust
+types are in `crates/nearbee-market/src/wire.rs`; the core `Row`,
+`AgentRecord` and `PricingPlan` are Nearbee's own models, mapped from
+them.
+
+Reads carry a time budget: the client retries within 30 seconds per call
+from the first attempt; a `Retry-After` that would pass the total ends the
+call at once as a retryable read, with the delay for the caller.
 
 | Call | Request body | Answer |
 | --- | --- | --- |
@@ -270,9 +275,37 @@ a fresh read, `progress_report_too_soon` with `retry_after`,
 (PUT with the exact bytes and no extra headers). Before fix round 5 the
 mocks were written to the code (a flat row array, camelCase agent and plan
 fields) and did not match the API; they are now built from the OpenAPI.
-The live fixture captures of task 3.4 and the hires of task 7 are
-owner-gated and still pending; any difference the captures show will be
-recorded here.
+The live captures ran on 2026-11-10 (task 3.4 of S3, no hire); what they
+showed is recorded under "Live captures" below.
+
+## Live captures (2026-11-10, agent token of the draft `repo-audit-fast`)
+
+Recorded by `cargo run -p nearbee-market --example capture --
+repo-audit-fast` into `crates/nearbee-market/tests/fixtures/market/`
+(scrubbed of tokens, capability links, presigned queries and buyer text;
+buyer text replaced with synthetic text) and replayed by
+`crates/nearbee-market/tests/replay.rs`:
+
+1. Agent writes with an agent token: `PATCH /v1/agents/{id}` and
+   `POST /v1/agents/{id}/pricing-plans` answer `403
+   agent_token_scope_forbidden` (measured 2026-11-10). Nearbee makes no
+   market writes with the agent token (D-024); the client methods stay for
+   a later owner sign-in.
+2. An owner test run ("Test run" in the web app) awards the hire with
+   `escrowAmount` `"0"` and a 600 s SLA: no money is held, the SLA window
+   is ten minutes.
+3. The recorded public agent read of a draft answers 404: a draft listing
+   is not readable by handle.
+4. `GET /v1/agents/me/assignments?status=all` answers the documented
+   envelope with the five hires of 2026-11-10 (statuses `cancelled` and
+   `submitted`, worker-side latest messages); no difference from the
+   OpenAPI shapes.
+5. The pricing-plans read answers `[]`: the agent had no plan yet.
+6. The file trio against the live API: reserve 201 (`filename`,
+   `byteSize`, `link`, the answer carries `fileUrl`), PUT of the exact
+   bytes 201, complete of the unbound file 409, `DELETE /v1/files/{id}`
+   204. The OpenAPI documents the complete as the last step of a bound
+   upload; for an unbound file the delete is the working cleanup.
 
 ## Not yet checked (to verify before relying on it)
 
@@ -280,6 +313,6 @@ recorded here.
    live (the docs describe none beyond the email confirmation).
 2. Rate limits on worker REST calls beyond the x402 60/min per IP.
 3. Whether `input_schema` is shown to web buyers as a form or only to callers.
-4. The `files` upload sequence against the live API (the payloads above are
-   from the OpenAPI) and size limits.
+4. Size limits of the file upload (the reserve/PUT/complete/delete trio
+   itself is confirmed live, 2026-11-10).
 5. `verifiableOffered` on bids.

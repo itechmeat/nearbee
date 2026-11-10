@@ -12,6 +12,7 @@
 //! and system proxies are not used. Every error detail is cut to 2 KiB and
 //! has configured secret values and bearer tokens removed.
 
+pub mod cli;
 pub mod install;
 
 use std::collections::BTreeMap;
@@ -21,8 +22,9 @@ use std::time::Duration;
 use nearbee_core::Secret;
 use nearbee_core::redact::redact_detail;
 use nearbee_core::runner::{
-    Estimate, NodeState, PlaybookId, PlaybookSummary, RESERVED_PARAMS, RunDetail, RunId, RunLookup,
-    RunQuery, RunStatus, RunSummary, Runner, RunnerError, StartRequest, Usage, WorkspaceId,
+    CostByBasis, DecideOutcome, Estimate, NodeState, PlaybookId, PlaybookSummary, RESERVED_PARAMS,
+    RunDetail, RunId, RunLookup, RunQuery, RunStatus, RunSummary, Runner, RunnerError,
+    StartRequest, Usage, WorkspaceId,
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
@@ -35,6 +37,10 @@ pub struct Timing {
     pub read: Duration,
     pub estimate: Duration,
     pub start: Duration,
+    /// How long one `apb stop` may take before the child is killed.
+    pub abort: Duration,
+    /// How long one `apb decide` may take before the child is killed.
+    pub decide: Duration,
     /// Delay before each retry of a read; its length is the number of retries.
     pub read_retry_delays: Vec<Duration>,
 }
@@ -46,6 +52,8 @@ impl Default for Timing {
             read: Duration::from_secs(10),
             estimate: Duration::from_secs(30),
             start: Duration::from_secs(30),
+            abort: nearbee_core::runner::CLI_ABORT_TIMEOUT,
+            decide: nearbee_core::runner::CLI_DECIDE_TIMEOUT,
             read_retry_delays: vec![
                 Duration::from_millis(500),
                 Duration::from_secs(1),
@@ -64,6 +72,11 @@ pub struct ApbOptions {
     /// automatically).
     pub redact: Vec<Secret>,
     pub timing: Timing,
+    /// The apb CLI binary, for the CLI calls (abort, decide).
+    pub bin: PathBuf,
+    /// The `APB_CONFIG_DIR` of Nearbee's own apb instance, for the CLI
+    /// calls. Never the operator's everyday instance.
+    pub config_dir: PathBuf,
 }
 
 /// One apb project as listed by the dashboard.
@@ -319,6 +332,11 @@ fn decimal(v: &Value) -> Option<Decimal> {
 pub struct ApbRunner {
     client: ApbClient,
     workspace: WorkspaceId,
+    /// The workspace path: the working directory of the CLI calls.
+    workspace_path: PathBuf,
+    /// The CLI binary and the instance's config directory.
+    cli_bin: PathBuf,
+    cli_config_dir: PathBuf,
 }
 
 /// Why [`ApbRunner::connect`] failed.
@@ -334,10 +352,47 @@ impl ApbRunner {
     /// Reads apb's project list once and pins the runner to the project at
     /// `workspace_path`.
     pub async fn connect(opts: ApbOptions, workspace_path: &Path) -> Result<Self, ConnectError> {
+        let cli_bin = opts.bin.clone();
+        let cli_config_dir = opts.config_dir.clone();
         let client = ApbClient::new(opts)?;
         let projects = client.projects().await?;
         let workspace = resolve_workspace(&projects, workspace_path)?;
-        Ok(Self { client, workspace })
+        Ok(Self {
+            client,
+            workspace,
+            workspace_path: workspace_path.to_path_buf(),
+            cli_bin,
+            cli_config_dir,
+        })
+    }
+
+    /// Runs the CLI on the blocking thread pool: a child process must not
+    /// stall the async runtime.
+    async fn cli(
+        &self,
+        step: &'static str,
+        args: Vec<String>,
+        remove: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<cli::CliRun, RunnerError> {
+        let bin = self.cli_bin.clone();
+        let workspace = self.workspace_path.clone();
+        let config_dir = self.cli_config_dir.clone();
+        let owned: Vec<String> = args;
+        let remove_owned: Vec<String> = remove.iter().map(|s| (*s).to_owned()).collect();
+        tokio::task::spawn_blocking(move || {
+            let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+            let removed: Vec<&str> = remove_owned.iter().map(String::as_str).collect();
+            cli::run(&bin, &borrowed, &workspace, &config_dir, &removed, timeout).map_err(|e| {
+                RunnerError::Protocol {
+                    detail: format!("apb {step}: {e}"),
+                }
+            })
+        })
+        .await
+        .map_err(|e| RunnerError::Protocol {
+            detail: format!("apb {step}: the cli task failed: {e}"),
+        })?
     }
 
     fn ws(&self) -> [(&str, &str); 1] {
@@ -370,28 +425,52 @@ impl ApbRunner {
                 detail: format!("worktree {}: {e}", req.worktree.display()),
             })?;
         let params = sent_params(req);
-        let mut budget = serde_json::Map::new();
-        if let Some(usd) = req.budget.usd {
-            // apb takes dollars as a JSON float: the only place Decimal
-            // becomes a float.
-            let f = usd
-                .to_f64()
-                .filter(|f| f.is_finite() && *f > 0.0)
-                .ok_or_else(|| RunnerError::Invalid {
-                    detail: format!("budget usd must be a positive amount, got {usd}"),
-                })?;
-            budget.insert("usd".into(), Value::from(f));
-        }
-        budget.insert(
-            "on_no_estimate".into(),
-            Value::from(req.budget.on_no_estimate.as_str()),
+        // No budget, no budget key: the engine then runs unprotected
+        // (spec `apb-runner`, Run start, scenario "No budget").
+        let budget = match req.budget.as_ref() {
+            Some(b) => {
+                let mut budget = serde_json::Map::new();
+                if let Some(usd) = b.usd {
+                    // apb takes dollars as a JSON float: the only place
+                    // Decimal becomes a float.
+                    let f = usd
+                        .to_f64()
+                        .filter(|f| f.is_finite() && *f > 0.0)
+                        .ok_or_else(|| RunnerError::Invalid {
+                            detail: format!("budget usd must be a positive amount, got {usd}"),
+                        })?;
+                    budget.insert("usd".into(), Value::from(f));
+                }
+                budget.insert(
+                    "on_no_estimate".into(),
+                    Value::from(b.on_no_estimate.as_str()),
+                );
+                Some(Value::Object(budget))
+            }
+            None => None,
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("instruction".into(), Value::from(req.instruction.clone()));
+        body.insert(
+            "params".into(),
+            Value::Object(
+                params
+                    .into_iter()
+                    .map(|(k, v)| (k, Value::from(v)))
+                    .collect(),
+            ),
         );
-        Ok(serde_json::json!({
-            "instruction": req.instruction,
-            "params": params,
-            "worktree": worktree.to_string_lossy(),
-            "budget": budget,
-        }))
+        body.insert(
+            "worktree".into(),
+            Value::from(worktree.to_string_lossy().to_string()),
+        );
+        if let Some(b) = budget {
+            body.insert("budget".into(), b);
+        }
+        if let Some(from) = &req.continued_from {
+            body.insert("continued_from".into(), Value::from(from.as_str()));
+        }
+        Ok(Value::Object(body))
     }
 }
 
@@ -477,7 +556,34 @@ pub fn parse_run_detail(v: &Value) -> Result<RunDetail, String> {
         input_tokens: u.get("input_tokens").and_then(Value::as_u64),
         output_tokens: u.get("output_tokens").and_then(Value::as_u64),
         cost_usd: u.get("cost_usd").and_then(decimal),
+        cost_by_basis: u
+            .get("cost_by_basis")
+            .filter(|c| c.is_object())
+            .map(|c| CostByBasis {
+                billed_usd: c.get("billed_usd").and_then(decimal),
+                subscription_equivalent_usd: c.get("subscription_equivalent_usd").and_then(decimal),
+                unknown_basis_usd: c.get("unknown_basis_usd").and_then(decimal),
+            }),
+        attempts: u
+            .get("attempts")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        finished_attempts: u
+            .get("finished_attempts")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
+        cost_attempts: u
+            .get("cost_attempts")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok()),
     });
+    // The budget gate pause: `budget.paused` holds the run before a node
+    // (apb's BudgetStatus at the tag).
+    let budget_paused = v
+        .get("budget")
+        .filter(|b| b.is_object())
+        .and_then(|b| b.get("paused"))
+        .is_some_and(|p| p.is_object());
     Ok(RunDetail {
         id: RunId::new(id),
         playbook: PlaybookId::new(playbook),
@@ -487,6 +593,7 @@ pub fn parse_run_detail(v: &Value) -> Result<RunDetail, String> {
         worktree: str_field(v, "worktree").map(PathBuf::from),
         params,
         usage: usage.unwrap_or_default(),
+        budget_paused,
     })
 }
 
@@ -673,6 +780,93 @@ impl Runner for ApbRunner {
             detail: self.client.redact(&text),
             estimate: None,
         })
+    }
+
+    /// `apb stop <run_id>`: posts the abort the driving process picks up
+    /// (or finalizes a driverless run itself). Exit 0 is success, also for
+    /// an already terminal run ("had already finished"); exit 2 names the
+    /// failure. No retry inside the call; serve repeats it each round
+    /// until the observation reads terminal.
+    async fn abort(&self, id: &RunId) -> Result<(), RunnerError> {
+        let run_id = path_segment(id.as_str())?.to_owned();
+        let out = self
+            .cli(
+                "stop",
+                vec!["stop".into(), run_id],
+                &[],
+                self.client.timing.abort,
+            )
+            .await?;
+        if out.status == Some(0) {
+            return Ok(());
+        }
+        Err(RunnerError::Refused {
+            status: 0,
+            code: "stop_failed".into(),
+            detail: format!("apb stop: {}", [out.stdout, out.stderr].join(" ").trim()),
+            estimate: None,
+        })
+    }
+
+    /// `apb decide is <question> --criteria <criteria> --no-run`: one JSON
+    /// line on stdout, exit 0 answered, 1 refused or failed, 2 malformed.
+    /// The brief travels as one argv element; the child carries no
+    /// `APB_RUN_ID` or `APB_NODE_ID`, so the decision is journaled outside
+    /// any run.
+    async fn decide(
+        &self,
+        question: &str,
+        criteria: &str,
+        limit: std::time::Duration,
+    ) -> Result<DecideOutcome, RunnerError> {
+        let out = self
+            .cli(
+                "decide",
+                vec![
+                    "decide".into(),
+                    "is".into(),
+                    question.to_owned(),
+                    "--criteria".into(),
+                    criteria.to_owned(),
+                    "--no-run".into(),
+                ],
+                &["APB_RUN_ID", "APB_NODE_ID"],
+                // The caller's cutoff kills the child too (R3-9).
+                self.client.timing.decide.min(limit),
+            )
+            .await?;
+        let line = out.stdout.lines().next().unwrap_or_default().trim();
+        let v: Value = serde_json::from_str(line).map_err(|_| RunnerError::Protocol {
+            detail: format!(
+                "apb decide: exit {:?} with a body that is not one JSON line",
+                out.status
+            ),
+        })?;
+        let answered = v.get("answered").and_then(Value::as_bool);
+        match (answered, out.status) {
+            (Some(true), _) => {
+                let yes = v.get("answer").and_then(Value::as_str) == Some("yes");
+                let p = v.get("p").and_then(decimal);
+                Ok(DecideOutcome::Answered { yes, p })
+            }
+            (Some(false), Some(1)) => {
+                if let Some(code) = v.get("refused").and_then(Value::as_str) {
+                    return Ok(DecideOutcome::Unanswered {
+                        reason: code.to_owned(),
+                    });
+                }
+                if v.get("error").is_some() {
+                    return Ok(DecideOutcome::Unanswered {
+                        reason: "error".into(),
+                    });
+                }
+                Err(self.client.protocol("apb decide: no answer, no refusal"))
+            }
+            _ => Err(self.client.protocol(&format!(
+                "apb decide: exit {:?} with answered={answered:?}",
+                out.status
+            ))),
+        }
     }
 
     async fn find(&self, q: RunQuery) -> Result<RunLookup, RunnerError> {

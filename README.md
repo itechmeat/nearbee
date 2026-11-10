@@ -84,20 +84,34 @@ What works today, with Rust stable and `apb` 1.0.0-beta.6 installed:
    store file (an operator override, honoured by `agent`, `list` and
    `serve`); the default stays under `XDG_CONFIG_HOME`.
 7. `nearbee list playbooks/first-hire/listing.repo-audit-fast.yaml`
-   installs the listing's playbook into the apb workspace, patches the
-   market agent and sets the pricing plan. Publishing never changes
-   `listing_status`: the listing stays a draft until you publish it in the
-   web app.
+   installs the listing's playbook into the apb workspace, records the
+   installed version and prints a table of the values you set in the
+   market web app (name, description, bio, category, tags, SLA, price),
+   each with whether the market already matches: an agent token cannot
+   change the market agent (it answers `403
+   agent_token_scope_forbidden`), so `nearbee list` sends no market
+   write. The listing stays a draft until you publish it in the web app.
 8. `nearbee serve` watches the market for your draft agent's hires and
-   turns each one into an apb run and a submitted deliverable; every step
-   is journaled under `.nearbee/hires/` and resumed after a restart.
-   `nearbee serve --reject <handle>` declines every new first-time hire of
-   that agent with `rejected` before any work (the no-spend x402 proof).
-9. `cd examples/x402-hire && npm install && node index.mjs <handle> "<task>"
-   --dry-run` reads an agent's 402 challenge, signs the NEP-366 delegate
-   with `near-api-js` v7, verifies it locally and stops without sending
-   (needs `NEAR_CALLER_ACCOUNT_ID` and `NEAR_CALLER_PRIVATE_KEY` in
-   `examples/x402-hire/.env`; the key is never printed).
+   turns each one into an apb run and a submitted deliverable: intake
+   (daily loss limit, the listing's hard limits, the cost ceiling, a scope
+   check), the buyer's attached files, the run with a budget, and later a
+   rework or a dispute redo as a continued run with the buyer's feedback.
+   Every step is journaled under `.nearbee/hires/` and resumed after a
+   restart; one run is active at a time and one `serve` holds
+   `.nearbee/serve.lock`. `nearbee serve --reject <handle>` declines every
+   new first-time hire of that agent with `rejected` before any work (the
+   no-spend x402 proof).
+9. `nearbee hires` lists the journaled hires (state, latest run, spent
+   cost, deadline, an attention code when one needs you; `--json` for
+   JSON), read only. `nearbee cleanup --dry-run` prints which hires'
+   files would be deleted and what Nearbee cannot delete; `nearbee
+   cleanup` deletes them under the serve lock and journals what it removed
+   (`docs/privacy.md`).
+10. `cd examples/x402-hire && npm install && node index.mjs <handle> "<task>"
+    --dry-run` reads an agent's 402 challenge, signs the NEP-366 delegate
+    with `near-api-js` v7, verifies it locally and stops without sending
+    (needs `NEAR_CALLER_ACCOUNT_ID` and `NEAR_CALLER_PRIVATE_KEY` in
+    `examples/x402-hire/.env`; the key is never printed).
 
 The live round trip (a real hire on the draft agent, and the paid x402
 decline proof) needs the owner's accounts and is exercised in the demo;

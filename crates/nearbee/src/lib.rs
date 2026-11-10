@@ -58,6 +58,25 @@ pub enum Command {
     List(ListArgs),
     /// Serve hires for the published listings.
     Serve(ServeArgs),
+    /// List the journaled hires (read only, no lock).
+    Hires(HiresArgs),
+    /// Delete the files of hires past their retention (takes the serve
+    /// lock).
+    Cleanup(CleanupArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HiresArgs {
+    /// Print JSON instead of lines.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CleanupArgs {
+    /// Print what would be deleted and change nothing (no lock).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,6 +178,8 @@ fn apb_options(cfg: &Config, env: &Env<'_>) -> ApbOptions {
         api_key: cfg.apb.api_key.clone(),
         redact: cfg.secrets(),
         timing: env.timing.clone(),
+        bin: apb_bin(env),
+        config_dir: cfg.apb.config_dir.clone(),
     }
 }
 
@@ -199,6 +220,8 @@ pub async fn run(cli: Cli, env: &Env<'_>, out: &mut dyn Write) -> i32 {
         } => agent_list(env, out),
         Command::List(args) => publish_list(cli.config.as_deref(), args, env, out).await,
         Command::Serve(args) => serve(cli.config.as_deref(), args, env, out).await,
+        Command::Hires(args) => hires(cli.config.as_deref(), args, env, out),
+        Command::Cleanup(args) => cleanup(cli.config.as_deref(), args, env, out),
     }
 }
 
@@ -513,22 +536,6 @@ fn apb_bin(env: &Env<'_>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("apb"))
 }
 
-/// The apb instance's config directory: `APB_CONFIG_DIR`, default the
-/// Nearbee instance's directory (as `scripts/apb-instance.sh` creates it).
-fn apb_config_dir(env: &Env<'_>) -> Result<PathBuf, String> {
-    if let Some(p) = (env.var)("APB_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(p));
-    }
-    let home = (env.var)("HOME").filter(|v| !v.is_empty()).ok_or_else(|| {
-        "cannot find the apb config directory (set APB_CONFIG_DIR or HOME)".to_string()
-    })?;
-    Ok(Path::new(&home)
-        .join(".local")
-        .join("share")
-        .join("nearbee")
-        .join("apb-config"))
-}
-
 /// `nearbee list <listing.yaml>`: materialise the playbook, patch
 /// the agent, set the pricing plan; see [`publish::publish`].
 pub async fn publish_list(
@@ -550,17 +557,12 @@ pub async fn publish_list(
         lines.line("error: cannot find a credentials directory (HOME is unset)");
         return EXIT_ERROR;
     };
-    let config_dir = match apb_config_dir(env) {
-        Ok(p) => p,
-        Err(e) => {
-            lines.line(&format!("error: {e}"));
-            return EXIT_ERROR;
-        }
-    };
+    // The config's `apb.config_dir`, as serve uses it: the loader has
+    // already refused the operator's everyday instance.
     let pub_env = publish::PublishEnv {
         market_url: market_url(env),
         apb_bin: apb_bin(env),
-        apb_config_dir: config_dir,
+        apb_config_dir: cfg.apb.config_dir.clone(),
         apb_workspace: cfg.apb.workspace_path.clone(),
     };
     // The publish writes plain lines; they go through a buffer so every
@@ -602,6 +604,19 @@ pub async fn serve(
         out.line("error: cannot find a credentials directory (HOME is unset)");
         return EXIT_ERROR;
     };
+    // One serve (or cleanup) per state directory: the lock is held for
+    // the life of this process (design 12).
+    let _lock = match nearbee_core::lock::acquire(&cfg.state_dir) {
+        Ok(l) => l,
+        Err(e @ nearbee_core::lock::LockError::Held { .. }) => {
+            out.line(&format!("error: {e}"));
+            return nearbee_core::lock::EXIT_LOCKED;
+        }
+        Err(e) => {
+            out.line(&format!("error: {e}"));
+            return EXIT_ERROR;
+        }
+    };
     let poll = (env.var)("NEARBEE_POLL_SECS")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(nearbee_core::serve::POLL_INTERVAL_MIN_SECS);
@@ -642,22 +657,13 @@ pub async fn serve_loop(
     out: &mut Lines<'_>,
     rounds: Option<u32>,
 ) -> i32 {
-    use nearbee_core::runner::{Budget, OnNoEstimate};
     // The resolved listing records are read again at the start of every
     // round, so a listing republished while serve runs is taken for the
     // next new hire without a restart. A hire already started keeps the
-    // version its journal recorded (round 6, codex 2).
-    let load = || {
-        nearbee_core::serve::load_contexts(
-            &cfg.state_dir,
-            store,
-            &cfg.apb.workspace_path,
-            Budget {
-                usd: None,
-                on_no_estimate: OnNoEstimate::Continue,
-            },
-        )
-    };
+    // version its journal recorded (round 6, codex 2). The per-run budget
+    // is computed per hire from its ceiling (design 8), not fixed here.
+    let load =
+        || nearbee_core::serve::load_contexts(&cfg.state_dir, store, &cfg.apb.workspace_path);
     let (mut contexts, warnings) = match load() {
         Ok(pair) => pair,
         Err(e) => {
@@ -668,9 +674,19 @@ pub async fn serve_loop(
     for w in &warnings {
         out.line(&format!("warning: {w}"));
     }
+    // No listing with credentials loads: the journals on disk may still
+    // owe local work (an active run to stop at its wall clock), which
+    // needs neither a listing nor a token (R4-7). The rounds run until
+    // that work is settled; only then does serve exit.
+    let nothing_to_serve = "no published listing with credentials; nothing to serve";
     if contexts.is_empty() {
-        out.line("no published listing with credentials; nothing to serve");
-        return 1;
+        if !nearbee_core::serve::local_work_outstanding(&cfg.state_dir) {
+            out.line(nothing_to_serve);
+            return 1;
+        }
+        out.line(
+            "no published listing with credentials; serving the local work of the journaled hires until it settles",
+        );
     }
     // Warnings are printed when they change, not on every round.
     let mut last_warnings = warnings;
@@ -678,7 +694,13 @@ pub async fn serve_loop(
     // the operator is told once.
     let mut stopped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut round: u32 = 0;
+    let mut round_state = nearbee_core::serve::RoundState::default();
+    let clock = nearbee_core::serve::Clock::real();
+    let interval = std::time::Duration::from_secs(opts.poll_interval_secs);
     loop {
+        // The cadence is counted from each round's start (spec
+        // `hire-serving`, Polling; C14).
+        let round_started = std::time::Instant::now();
         if round > 0 {
             match load() {
                 Ok((fresh, warnings)) => {
@@ -699,81 +721,366 @@ pub async fn serve_loop(
                 }
             }
         }
-        for (handle, ctx) in &contexts {
-            if stopped.contains(handle) {
-                continue;
+        // One round over every served agent's rows (design 1): the reads
+        // happen per agent here, the machine runs once for all of them.
+        // Every agent keeps its own market client: its hires' writes go
+        // out with its own token.
+        let mut reads: Vec<(
+            nearbee_core::serve::ListingContext,
+            Vec<nearbee_core::market::Row>,
+            NearAgentMarket,
+        )> = Vec::new();
+        // apb down never skips the round: the machine still runs its
+        // journal-driven and time-based steps over a runner whose every
+        // call fails, and asks nothing and starts nothing (O3).
+        let runner = match ApbRunner::connect(apb_options(cfg, env), &cfg.apb.workspace_path).await
+        {
+            Ok(r) => RoundRunner::Up(Box::new(r)),
+            Err(ConnectError::Runner(e)) => {
+                out.line(&format!("error: apb: {e}"));
+                RoundRunner::down(e.to_string())
             }
-            let creds = match store.get(handle) {
-                Ok(Some(c)) => c,
-                Ok(None) => continue,
-                Err(e) => {
-                    // A failed credentials read is reported, not skipped
-                    // silently: the mode or the file needs an operator.
-                    out.line(&format!("warning: {handle}: credentials: {e}"));
+            Err(ConnectError::Workspace(e)) => {
+                out.line(&format!("error: apb workspace: {e}"));
+                RoundRunner::down(e.to_string())
+            }
+        };
+        round_state.runner_unavailable = matches!(runner, RoundRunner::Down { .. });
+        {
+            for (handle, ctx) in &contexts {
+                if stopped.contains(handle) {
                     continue;
                 }
-            };
-            let market = match NearAgentMarket::new(market_options(
-                market_url(env),
-                creds.token.clone(),
-                cfg.secrets(),
-            )) {
-                Ok(c) => c,
-                Err(e) => {
-                    out.line(&format!("error: market for {handle}: {e}"));
-                    continue;
-                }
-            };
-            let runner =
-                match ApbRunner::connect(apb_options(cfg, env), &cfg.apb.workspace_path).await {
-                    Ok(r) => r,
-                    Err(ConnectError::Runner(e)) => {
-                        out.line(&format!("error: apb for {handle}: {e}"));
-                        continue;
-                    }
-                    Err(ConnectError::Workspace(e)) => {
-                        // One broken workspace must not stop the other
-                        // agents; it is reported and the round goes on.
-                        out.line(&format!("error: apb workspace: {e}"));
+                let creds = match store.get(handle) {
+                    Ok(Some(c)) => c,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        out.line(&format!("warning: {handle}: credentials: {e}"));
                         continue;
                     }
                 };
-            match nearbee_core::serve::poll_agent(
-                &market,
-                &runner,
-                ctx,
-                opts,
-                &cfg.state_dir,
-                &cfg.limits,
-            )
-            .await
-            {
-                Ok(outcomes) => {
-                    for o in outcomes {
-                        out.line(&format!("{handle} {}: {o:?}", o.row_id()));
+                let market = match NearAgentMarket::new(market_options(
+                    market_url(env),
+                    creds.token.clone(),
+                    cfg.secrets(),
+                )) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        out.line(&format!("error: market for {handle}: {e}"));
+                        continue;
+                    }
+                };
+                match market.assignments().await {
+                    Ok(rows) => reads.push((ctx.clone(), rows, market)),
+                    Err(nearbee_core::market::MarketError::Unauthorized { .. }) => {
+                        stopped.insert(handle.clone());
+                        out.line(&format!(
+                            "unauthorized: the token of {handle} was revoked; {handle} is no longer polled, the others keep serving"
+                        ));
+                    }
+                    Err(e) => {
+                        out.line(&format!("error: {handle}: {e}"));
                     }
                 }
-                Err(nearbee_core::serve::ServeError::Market(
-                    nearbee_core::market::MarketError::Unauthorized { .. },
-                )) => {
-                    // Revoked token: stop polling this agent only and tell
-                    // the operator once.
-                    stopped.insert(handle.clone());
-                    out.line(&format!(
-                        "unauthorized: the token of {handle} was revoked; {handle} is no longer polled, the others keep serving"
-                    ));
-                }
-                Err(e) => {
-                    out.line(&format!("error: {handle}: {e}"));
+            }
+            // The machine runs even when no read succeeded this round (every
+            // agent's read failed or every token is revoked): the hires on
+            // disk are then judged from their journals alone, so an active
+            // run is still observed and stopped at its wall clock (R2-2).
+            {
+                let agents: Vec<nearbee_core::serve::Agent<'_, NearAgentMarket>> = reads
+                    .iter()
+                    .map(|(ctx, rows, market)| nearbee_core::serve::Agent {
+                        ctx: ctx.clone(),
+                        rows: rows.clone(),
+                        market,
+                    })
+                    .collect();
+                match nearbee_core::serve::round(
+                    &runner,
+                    &agents,
+                    &mut round_state,
+                    opts,
+                    &cfg.state_dir,
+                    &cfg.limits,
+                    &clock,
+                )
+                .await
+                {
+                    Ok(outcomes) => {
+                        for o in outcomes {
+                            out.line(&format!("{}: {o:?}", o.row_id()));
+                        }
+                    }
+                    Err(e) => {
+                        out.line(&format!("error: the round failed: {e}"));
+                    }
                 }
             }
         }
         round += 1;
+        if contexts.is_empty() && !nearbee_core::serve::local_work_outstanding(&cfg.state_dir) {
+            out.line(&format!("{nothing_to_serve}: the local work is settled"));
+            return 1;
+        }
         if rounds.is_some_and(|r| round >= r) {
             return 0;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(opts.poll_interval_secs)).await;
+        tokio::time::sleep(time_to_next_round(interval, round_started.elapsed())).await;
     }
+}
+
+/// How long to wait before the next round: the rest of the interval
+/// counted from this round's start; a round that took longer than the
+/// interval is followed at once (C14).
+fn time_to_next_round(
+    interval: std::time::Duration,
+    elapsed: std::time::Duration,
+) -> std::time::Duration {
+    interval.saturating_sub(elapsed)
+}
+
+/// The runner of one serve round: apb, or (when apb cannot be reached
+/// this round) a stand-in whose every call fails, so the round still runs
+/// without it (O3).
+enum RoundRunner {
+    Up(Box<ApbRunner>),
+    Down {
+        workspace: nearbee_core::runner::WorkspaceId,
+        why: String,
+    },
+}
+
+impl RoundRunner {
+    fn down(why: String) -> Self {
+        RoundRunner::Down {
+            workspace: nearbee_core::runner::WorkspaceId::new(""),
+            why,
+        }
+    }
+
+    fn unavailable(&self) -> nearbee_core::runner::RunnerError {
+        let why = match self {
+            RoundRunner::Down { why, .. } => why.clone(),
+            RoundRunner::Up(_) => String::new(),
+        };
+        nearbee_core::runner::RunnerError::RetryableRead {
+            detail: format!("apb cannot be reached this round: {why}"),
+        }
+    }
+}
+
+impl Runner for RoundRunner {
+    fn workspace(&self) -> &nearbee_core::runner::WorkspaceId {
+        match self {
+            RoundRunner::Up(r) => r.workspace(),
+            RoundRunner::Down { workspace, .. } => workspace,
+        }
+    }
+    async fn playbooks(
+        &self,
+    ) -> Result<Vec<nearbee_core::runner::PlaybookSummary>, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.playbooks().await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn estimate(
+        &self,
+        id: &PlaybookId,
+    ) -> Result<nearbee_core::runner::Estimate, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.estimate(id).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn start(
+        &self,
+        req: nearbee_core::runner::StartRequest,
+    ) -> Result<nearbee_core::runner::RunId, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.start(req).await,
+            // Never reached: no start is admitted while apb is down.
+            RoundRunner::Down { .. } => Err(nearbee_core::runner::RunnerError::Refused {
+                status: 503,
+                code: "apb_unavailable".into(),
+                detail: "apb cannot be reached this round".into(),
+                estimate: None,
+            }),
+        }
+    }
+    async fn run(
+        &self,
+        id: &nearbee_core::runner::RunId,
+    ) -> Result<nearbee_core::runner::RunDetail, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.run(id).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn stop(
+        &self,
+        id: &nearbee_core::runner::RunId,
+    ) -> Result<(), nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.stop(id).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn abort(
+        &self,
+        id: &nearbee_core::runner::RunId,
+    ) -> Result<(), nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.abort(id).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn decide(
+        &self,
+        question: &str,
+        criteria: &str,
+        limit: std::time::Duration,
+    ) -> Result<nearbee_core::runner::DecideOutcome, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.decide(question, criteria, limit).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn find(
+        &self,
+        q: RunQuery,
+    ) -> Result<nearbee_core::runner::RunLookup, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.find(q).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+}
+
+/// `nearbee hires [--json]`: one line per journaled hire, read only and
+/// without the lock (spec `hire-retention`). No brief text, token or
+/// capability link is printed.
+pub fn hires(file: Option<&Path>, args: HiresArgs, env: &Env<'_>, out: &mut dyn Write) -> i32 {
+    let mut out = Lines::new(out);
+    let cfg = match load(file, env) {
+        Ok(c) => c,
+        Err(e) => {
+            out.line(&format!("error: config: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    out.secrets = cfg.secrets();
+    let all = nearbee_core::retention::summaries(&cfg.state_dir);
+    if args.json {
+        out.line(&serde_json::to_string_pretty(&all).expect("summaries serialize"));
+        return 0;
+    }
+    if all.is_empty() {
+        out.line(&format!(
+            "no journaled hires in {}",
+            cfg.state_dir.join("hires").display()
+        ));
+        return 0;
+    }
+    out.line("hire	agent	state	latest run	spent USD	deadline	attention");
+    for s in &all {
+        let dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+        let attention = match (&s.problem, &s.attention) {
+            (Some(p), _) => format!("unreadable: {p}"),
+            (None, a) => dash(a),
+        };
+        out.line(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            s.hire_id,
+            dash(&s.handle),
+            s.state,
+            dash(&s.latest_run),
+            s.spent_usd,
+            dash(&s.deadline),
+            attention
+        ));
+    }
+    0
+}
+
+/// `nearbee cleanup [--dry-run]`: deletes the files of eligible hires
+/// (their worktrees and snapshot directories) under the serve lock and
+/// journals what was removed; reports what Nearbee cannot delete.
+pub fn cleanup(file: Option<&Path>, args: CleanupArgs, env: &Env<'_>, out: &mut dyn Write) -> i32 {
+    let mut out = Lines::new(out);
+    let cfg = match load(file, env) {
+        Ok(c) => c,
+        Err(e) => {
+            out.line(&format!("error: config: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    out.secrets = cfg.secrets();
+    // The dry run takes no lock and changes nothing.
+    let _lock = if args.dry_run {
+        None
+    } else {
+        match nearbee_core::lock::acquire(&cfg.state_dir) {
+            Ok(l) => Some(l),
+            Err(e @ nearbee_core::lock::LockError::Held { .. }) => {
+                out.line(&format!("error: {e}"));
+                return nearbee_core::lock::EXIT_LOCKED;
+            }
+            Err(e) => {
+                out.line(&format!("error: {e}"));
+                return EXIT_ERROR;
+            }
+        }
+    };
+    let plans = nearbee_core::retention::plan(
+        &cfg.state_dir,
+        &cfg.apb.workspace_path,
+        cfg.retention.after_acceptance_days,
+        time::OffsetDateTime::now_utc(),
+    );
+    let mut failed = false;
+    for p in &plans {
+        if !p.eligible {
+            out.line(&format!("keep {}: {}", p.hire_id, p.why));
+            continue;
+        }
+        if args.dry_run {
+            out.line(&format!("would delete {} ({})", p.hire_id, p.why));
+            for d in &p.delete {
+                out.line(&format!("  delete {}", d.display()));
+            }
+            for r in &p.refused {
+                out.line(&format!(
+                    "  refused {} (outside the workspace's work directory)",
+                    r.display()
+                ));
+            }
+            for n in &p.not_covered {
+                out.line(&format!("  not covered: {n}"));
+            }
+            for u in &p.unlisted {
+                out.line(&format!("  {u}"));
+            }
+            continue;
+        }
+        match nearbee_core::retention::execute(p) {
+            Ok(lines) => {
+                out.line(&format!("deleted {} ({})", p.hire_id, p.why));
+                for l in lines {
+                    if l.starts_with("failed ") {
+                        failed = true;
+                    }
+                    out.line(&format!("  {l}"));
+                }
+            }
+            Err(e) => {
+                failed = true;
+                out.line(&format!("error: {}: {e}", p.hire_id));
+            }
+        }
+    }
+    i32::from(failed)
 }
 
 /// `nearbee agent list`: handles only, tokens masked.

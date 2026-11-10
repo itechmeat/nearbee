@@ -36,5 +36,5 @@ time = { version = "0.3.55", features = ["serde", "formatting", "parsing", "macr
 wiremock = "0.6.5"
 h2 = "0.4.20"
 tempfile = "3.27.0"
-rustix = { version = "1.1.6", features = ["fs"] }
+rustix = { version = "1.1.6", features = ["fs", "process"] }
 url = "2.5.8"

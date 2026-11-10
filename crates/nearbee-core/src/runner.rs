@@ -114,7 +114,12 @@ pub struct StartRequest {
     pub worktree: PathBuf,
     pub hire_id: HireId,
     pub execution_id: ExecutionId,
-    pub budget: Budget,
+    /// The run's budget; `None` sends no budget object at all (the engine
+    /// then runs unprotected).
+    pub budget: Option<Budget>,
+    /// The run this one continues (a rework or a redo); the engine sees
+    /// the earlier run's context.
+    pub continued_from: Option<RunId>,
 }
 
 /// A run's status. Unknown statuses are kept and are neither terminal nor
@@ -184,12 +189,46 @@ pub struct NodeState {
     pub outputs: Option<serde_json::Value>,
 }
 
-/// Usage of a run. A missing cost is `None` (unknown), never zero.
+/// Reported costs split by their basis: each amount is `None` when no
+/// attempt reported a figure on that basis (apb's `CostByBasis`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CostByBasis {
+    /// Money billed.
+    pub billed_usd: Option<Decimal>,
+    /// The list price of work a subscription covers; nobody is billed it.
+    pub subscription_equivalent_usd: Option<Decimal>,
+    /// Figures whose basis is not known.
+    pub unknown_basis_usd: Option<Decimal>,
+}
+
+/// Usage of a run. A missing cost is `None` (unknown), never zero. The
+/// counters are `None` when the engine named none.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cost_usd: Option<Decimal>,
+    /// The cost split by basis, when the engine reports one.
+    pub cost_by_basis: Option<CostByBasis>,
+    /// Attempts whose output reported usage.
+    pub attempts: Option<u32>,
+    /// Every attempt the run finished, with or without usage.
+    pub finished_attempts: Option<u32>,
+    /// How many of `attempts` reported a cost.
+    pub cost_attempts: Option<u32>,
+}
+
+impl Usage {
+    /// Whether the reported cost covers every finished attempt: `None`
+    /// when no cost is reported or the counters are missing, `Some(false)`
+    /// when fewer attempts reported a cost than the run finished.
+    pub fn cost_complete(&self) -> Option<bool> {
+        self.cost_usd?;
+        match (self.cost_attempts, self.finished_attempts) {
+            (Some(a), Some(f)) => Some(a == f),
+            _ => None,
+        }
+    }
 }
 
 /// A run as observed.
@@ -203,6 +242,8 @@ pub struct RunDetail {
     pub worktree: Option<PathBuf>,
     pub params: BTreeMap<String, String>,
     pub usage: Usage,
+    /// The run's budget gate holds it (it is paused for its budget).
+    pub budget_paused: bool,
 }
 
 /// A run lookup by search field.
@@ -285,6 +326,21 @@ pub enum RunnerError {
     NotFound { detail: String },
 }
 
+/// A yes or no decision from the engine's decision provider, asked
+/// outside any run (the intake scope check).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecideOutcome {
+    /// Answered: `is` answers yes or no, with the probability of yes.
+    Answered { yes: bool, p: Option<Decimal> },
+    /// No answer: apb's refusal code (`no_provider`, ...), `error` for a
+    /// provider failure, or `timeout`.
+    Unanswered { reason: String },
+}
+
+/// How long an abort or a decide may take before the child is killed.
+pub const CLI_ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub const CLI_DECIDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// What Nearbee needs from a playbook engine pinned to one workspace.
 pub trait Runner: Send + Sync {
     fn workspace(&self) -> &WorkspaceId;
@@ -298,6 +354,22 @@ pub trait Runner: Send + Sync {
     /// Stops a running run (apb's pause: a predictive stop before agent
     /// nodes). Best effort; serve ignores a failure and reports the hire.
     fn stop(&self, id: &RunId) -> impl Future<Output = Result<(), RunnerError>> + Send;
+    /// Aborts a run: no further node starts, in-flight agent work is
+    /// killed. Success means the command exited 0; the caller confirms the
+    /// terminal status by observation (an abort of an already terminal run
+    /// is a success or a known "not running" answer).
+    fn abort(&self, id: &RunId) -> impl Future<Output = Result<(), RunnerError>> + Send;
+    /// Asks a yes or no question outside any run (no shell; the child
+    /// carries no run or node environment). Answered, refused, or an error.
+    /// `limit` is the longest the caller can wait: the engine's own child
+    /// is killed and reaped by then (the smaller of `limit` and its own
+    /// timeout), so a cut-off question leaves nothing running (R3-9).
+    fn decide(
+        &self,
+        question: &str,
+        criteria: &str,
+        limit: std::time::Duration,
+    ) -> impl Future<Output = Result<DecideOutcome, RunnerError>> + Send;
     fn find(&self, q: RunQuery) -> impl Future<Output = Result<RunLookup, RunnerError>> + Send;
 }
 
@@ -322,6 +394,34 @@ mod tests {
             assert_eq!(st.is_success(), success, "{s}");
             assert_eq!(st.as_str(), s);
         }
+    }
+
+    /// Cost completeness: missing cost stays unknown, a partial cost is
+    /// incomplete, a full cost complete (spec `apb-runner`, Run
+    /// observation).
+    #[test]
+    fn cost_completeness_follows_the_counters() {
+        let full = Usage {
+            cost_usd: Some(Decimal::new(5, 2)),
+            cost_attempts: Some(3),
+            finished_attempts: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(full.cost_complete(), Some(true));
+        let partial = Usage {
+            cost_usd: Some(Decimal::new(5, 2)),
+            cost_attempts: Some(1),
+            finished_attempts: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(partial.cost_complete(), Some(false));
+        let missing = Usage::default();
+        assert_eq!(missing.cost_complete(), None, "no cost: unknown");
+        let uncounted = Usage {
+            cost_usd: Some(Decimal::new(5, 2)),
+            ..Default::default()
+        };
+        assert_eq!(uncounted.cost_complete(), None, "no counters: unknown");
     }
 
     #[test]

@@ -7,13 +7,18 @@
 //! presigned queries before it is written to
 //! `crates/nearbee-market/tests/fixtures/market/<name>.json`.
 //!
-//! Captures (no hire needed):
-//! - `agent`        the public agent record of the handle (404 for a draft
-//!   agent: the id comes from the operator, see `agent add --agent-id`)
+//! Captures (no hire needed), each recording its HTTP status and written
+//! only after the answer arrived (design 15):
+//! - `agent`        the public agent record of the handle (a draft agent
+//!   answers 404: that is the recorded fact, not a failure)
 //! - `assignments`  `GET /v1/agents/me/assignments?status=all` (first page)
-//! - `pricing-plans` the agent's pricing plans
-//! - `file-trio`    the file reserve/PUT/complete trio with a delete of
-//!   the unbound file
+//! - `pricing-plans` the agent's pricing plans, by the stored agent id
+//! - `file-trio`    the file reserve (`filename`, `byteSize`, `link`),
+//!   PUT, complete trio, ending with `DELETE /v1/files/{id}` of the
+//!   unbound file
+//!
+//! A capture that must answer 2xx but does not (assignments, pricing
+//! plans, any file-trio step) is a failure and the run exits non-zero.
 //!
 //! The integrator runs this; nothing here is exercised by CI. The scrubber
 //! is unit-tested offline (`src/scrub.rs`).
@@ -73,7 +78,14 @@ fn main() {
         .join("market");
     std::fs::create_dir_all(&out_dir).expect("fixtures dir");
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let failures = runtime.block_on(capture_all(&base, token, &redact, &out_dir, &handle));
+    let failures = runtime.block_on(capture_all(
+        &base,
+        token,
+        &redact,
+        &out_dir,
+        &handle,
+        &creds.agent_id,
+    ));
     if failures.is_empty() {
         println!("captured into {}", out_dir.display());
     } else {
@@ -84,17 +96,13 @@ fn main() {
     }
 }
 
-/// Scrubs and writes one fixture file.
-fn record(
-    name: &str,
-    body: &str,
-    redact: &[Secret],
-    out_dir: &std::path::Path,
-) -> Result<(), String> {
+/// Writes one fixture file. `body` must already be scrubbed: the rules
+/// run exactly once, on the raw response text, before any JSON wrapping
+/// escapes its quotes.
+fn record(name: &str, body: &str, out_dir: &std::path::Path) -> Result<(), String> {
     let path = out_dir.join(format!("{name}.json"));
-    let scrubbed = scrub_fixture(body, redact);
     let mut f = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    f.write_all(scrubbed.as_bytes())
+    f.write_all(body.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))?;
     println!("wrote {}", path.display());
     Ok(())
@@ -106,6 +114,7 @@ async fn capture_all(
     redact: &[Secret],
     out_dir: &std::path::Path,
     handle: &str,
+    creds_agent_id: &str,
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let client = match reqwest::Client::builder()
@@ -117,13 +126,15 @@ async fn capture_all(
         Ok(c) => c,
         Err(e) => return vec![format!("http client: {e}")],
     };
+    // The pricing plans live under the agent id (the token's agent), not
+    // under the handle (design 15).
     let agent_path = format!("/v1/agents/{handle}");
     let assignments_path = "/v1/agents/me/assignments?status=all&limit=100&offset=0";
-    let plans_path = format!("/v1/agents/{handle}/pricing-plans");
-    for (name, path) in [
-        ("agent", agent_path.as_str()),
-        ("assignments", assignments_path),
-        ("pricing-plans", plans_path.as_str()),
+    let plans_path = format!("/v1/agents/{}/pricing-plans", creds_agent_id);
+    for (name, path, must_succeed) in [
+        ("agent", agent_path.as_str(), false),
+        ("assignments", assignments_path, true),
+        ("pricing-plans", plans_path.as_str(), true),
     ] {
         match client
             .get(format!("{}{}", base.trim_end_matches('/'), path))
@@ -132,14 +143,29 @@ async fn capture_all(
             .send()
             .await
         {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => {
-                    if let Err(e) = record(name, &text, redact, out_dir) {
-                        failures.push(e);
-                    }
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                // Scrub the raw text first; the wrapped record is written
+                // as it stands.
+                let scrubbed = scrub_fixture(&text, redact);
+                // The status is recorded with the body; a capture that must
+                // succeed but did not is a failure.
+                let wrapped = serde_json::json!({
+                    "capture": name,
+                    "path": path,
+                    "status": status,
+                    "body": serde_json::from_str::<serde_json::Value>(&scrubbed)
+                        .unwrap_or_else(|_| serde_json::Value::String(scrubbed.clone())),
+                })
+                .to_string();
+                if let Err(e) = record(name, &wrapped, out_dir) {
+                    failures.push(e);
                 }
-                Err(e) => failures.push(format!("{name}: {e}")),
-            },
+                if must_succeed && !(200..300).contains(&status) {
+                    failures.push(format!("{name}: HTTP {status}"));
+                }
+            }
             Err(e) => failures.push(format!("{name}: {e}")),
         }
     }
@@ -166,7 +192,11 @@ async fn capture_file_trio(
     let reserve = client
         .post(format!("{origin}/v1/files"))
         .bearer_auth(token)
-        .json(&json!({"name": "nearbee-capture.txt", "link": true}))
+        .json(&json!({
+            "filename": "nearbee-capture.txt",
+            "byteSize": b"nearbee capture\n".len(),
+            "link": true,
+        }))
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await;
@@ -176,11 +206,11 @@ async fn capture_file_trio(
     };
     let status = reserve.status();
     let body = reserve.text().await.unwrap_or_default();
-    transcript.push(transcript_entry(
-        "reserve",
-        status.as_u16(),
-        &serde_json::to_string(&body).unwrap_or_default(),
-    ));
+    // The body is scrubbed as the raw response text, before it is wrapped
+    // into a transcript entry: the URL rules must see the body's own
+    // quotes, not JSON escapes.
+    let scrubbed = scrub_fixture(&body, redact);
+    transcript.push(transcript_entry("reserve", status.as_u16(), &scrubbed));
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     let upload_url = v
         .get("uploadUrl")
@@ -218,12 +248,8 @@ async fn capture_file_trio(
     {
         Ok(r) => {
             let st = r.status();
-            let b = r.text().await.unwrap_or_default();
-            transcript.push(transcript_entry(
-                "complete",
-                st.as_u16(),
-                &serde_json::to_string(&b).unwrap_or_default(),
-            ));
+            let b = scrub_fixture(&r.text().await.unwrap_or_default(), redact);
+            transcript.push(transcript_entry("complete", st.as_u16(), &b));
         }
         Err(e) => return vec![format!("file-trio complete: {e}")],
     }
@@ -236,16 +262,12 @@ async fn capture_file_trio(
     {
         Ok(r) => {
             let st = r.status();
-            let b = r.text().await.unwrap_or_default();
-            transcript.push(transcript_entry(
-                "delete",
-                st.as_u16(),
-                &serde_json::to_string(&b).unwrap_or_default(),
-            ));
+            let b = scrub_fixture(&r.text().await.unwrap_or_default(), redact);
+            transcript.push(transcript_entry("delete", st.as_u16(), &b));
         }
         Err(e) => return vec![format!("file-trio delete: {e}")],
     }
-    match record("file-trio", &transcript_json(&transcript), redact, out_dir) {
+    match record("file-trio", &transcript_json(&transcript), out_dir) {
         Ok(()) => Vec::new(),
         Err(e) => vec![e],
     }

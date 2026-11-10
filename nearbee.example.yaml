@@ -10,8 +10,18 @@ apb:
   url: http://127.0.0.1:7322
   # The dedicated apb project that holds Nearbee's market playbooks.
   workspace_path: ~/.local/share/nearbee/apb-workspace
+  # APB_CONFIG_DIR of that instance, for the apb CLI calls (abort, the
+  # scope check, and the import and approval of `nearbee list`). Never
+  # ~/.config/apb, the everyday instance.
+  config_dir: ~/.local/share/nearbee/apb-config
 limits:
   markdown_bytes: 262144
   file_bytes: 26214400
   files: 20
   total_bytes: 104857600
+  # Stop taking new hires for the UTC day once the runs that ended without a
+  # delivery cost this much (USD, decimal string).
+  daily_loss_usd: "20"
+retention:
+  # Days after acceptance before `nearbee cleanup` deletes a hire's files.
+  after_acceptance_days: 7

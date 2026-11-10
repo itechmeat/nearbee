@@ -134,6 +134,27 @@ resumes a live draft hire without a duplicate write.
 
 Out of scope: listings beyond the draft, tiers, evidence.
 
+**As built (2026-11-10).** S2 task 3.4 is closed: the live fixtures are
+recorded (`crates/nearbee-market/tests/fixtures/market/`, replay tests) and
+the token lives in the credentials store only. The round machine of design 1
+to 6 (`nearbee-core::serve::round`: reconcile, short steps, one long step,
+admit), generations, lifecycle records, the one slot (D-025), abort through
+`apb stop`, unresolved starts and strays; the lock file
+(`nearbee-core::lock`); intake (`nearbee-core::intake`), cost and the daily
+loss limit (`nearbee-core::cost`); attachments (`nearbee-core::attachments`);
+rework and redo as continued runs with `feedback` and `inputs`;
+`nearbee hires` and `nearbee cleanup` (`nearbee-core::retention`);
+`nearbee list` without market writes (D-024). The global limit is
+`limits.daily_loss_usd` only: with one active run there is no
+`concurrent_runs`. Buyer messages and progress text beyond "working on it"
+are not built.
+
+Carried to the owner at the end of S3: the live checks 10.1 and 10.2 (a
+killed `serve` resuming a live draft hire, a rework with feedback and a
+file) and 10.3 after them; S2's x402 proof 8.2 and 8.3 (O-5, O-6) and the
+billed Cloud smokes 9.1 (O-3). O-7 (notify channel) stays open: operator
+notices go to serve's output.
+
 ## S4. `repo-audit-and-tiers`
 
 Delivers: example agent A, the `repo-audit` playbook with `premium` (owner's

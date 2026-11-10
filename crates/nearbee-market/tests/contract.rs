@@ -176,7 +176,13 @@ fn the_assignments_envelope_parses_minimal_and_with_the_optionals_nearbee_reads(
     // With the optional properties the mapping reads.
     let assignment = instance_with(
         "JobAssignment",
-        &["startedAt", "submittedAt", "deliverableUrl", "cancelReason"],
+        &[
+            "startedAt",
+            "submittedAt",
+            "deliverableUrl",
+            "cancelReason",
+            "finalizedAt",
+        ],
         json!({ "status": "cancelled" }),
     );
     let item = instance_with(
@@ -190,10 +196,37 @@ fn the_assignments_envelope_parses_minimal_and_with_the_optionals_nearbee_reads(
     assert_eq!(i.assignment.status, wire::AssignmentStatus::Cancelled);
     assert!(i.assignment.started_at.is_some());
     assert!(i.assignment.deliverable_url.is_some());
+    assert!(i.assignment.finalized_at.is_some(), "finalizedAt parses");
+    assert!(
+        !i.assignment.escrow_amount.is_empty(),
+        "escrowAmount is required and parses as its decimal string"
+    );
     assert!(i.latest_message.is_some());
     assert!(i.auto_accept_at.is_some());
     // The nested latest message and job carry attachments.
     assert_eq!(i.job.attachments.len(), 1);
+    assert_eq!(
+        i.latest_message.as_ref().unwrap().attachments.len(),
+        1,
+        "LatestMessageBrief carries its attachments"
+    );
+    // `AttachmentBrief` parses with every field Nearbee keeps.
+    let a: wire::AttachmentBrief =
+        parse("AttachmentBrief", instance("AttachmentBrief", Value::Null));
+    assert!(!a.id.is_empty());
+    assert!(!a.filename.is_empty());
+    assert!(!a.content_type.is_empty());
+    assert_eq!(a.byte_size, 0);
+    assert!(!a.sha256.is_empty());
+    assert!(!a.download_url.is_empty());
+    // `LatestMessageBrief` keeps truncated and the timestamps.
+    let l: wire::LatestMessageBrief = parse(
+        "LatestMessageBrief",
+        instance_with("LatestMessageBrief", &["attachments"], Value::Null),
+    );
+    assert!(!l.truncated);
+    assert!(!l.created_at.is_empty());
+    assert_eq!(l.attachments.len(), 1);
 
     // An explicit null in a nullable field parses too.
     let mut nulls = instance("MyAssignmentItem", Value::Null);

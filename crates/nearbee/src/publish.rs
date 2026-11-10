@@ -1,6 +1,10 @@
-//! `nearbee list <listing.yaml>`: materialise the listing's
-//! playbook into Nearbee's apb instance, patch the market agent, and set
-//! the pricing plan. Publishing never changes `listing_status`: the owner
+//! `nearbee list <listing.yaml>`: materialise the listing's playbook
+//! into Nearbee's apb instance, record the listing, read the pricing
+//! plans and print what the owner sets in the market web app. Publishing
+//! sends no market write: an agent token cannot change the agent (403
+//! `agent_token_scope_forbidden`, measured 2026-11-10), so the owner sets
+//! name, description, bio, category, tags, SLA and price in the web app
+//! (D-024). Publishing never changes `listing_status`: the owner
 //! publishes a draft, and drafts stay drafts.
 
 use std::io::Write;
@@ -9,7 +13,7 @@ use std::path::{Path, PathBuf};
 use nearbee_apb::install::{self, ApbCli, Script};
 use nearbee_core::credentials::Store;
 use nearbee_core::listing::{self, Listing, ResolvedListing};
-use nearbee_core::market::{AgentPatch, Market as _, MarketError, NewPricingPlan};
+use nearbee_core::market::{Market as _, MarketError};
 use nearbee_core::secret::Secret;
 use nearbee_market::NearAgentMarket;
 
@@ -20,7 +24,7 @@ pub struct PublishEnv {
     pub market_url: String,
     /// The apb binary (APB_BIN or `apb`).
     pub apb_bin: PathBuf,
-    /// The apb instance's config directory (APB_CONFIG_DIR).
+    /// The apb instance's config directory (the config's `apb.config_dir`).
     pub apb_config_dir: PathBuf,
     /// The apb project Nearbee's playbooks live in.
     pub apb_workspace: PathBuf,
@@ -31,12 +35,24 @@ pub struct PublishEnv {
 pub enum PublishError {
     #[error("{0}")]
     Other(String),
-    /// The agent already holds the maximum number of pricing plans.
-    #[error(
-        "the market refused a new pricing plan (409 {code}): the agent holds the maximum number of pricing plans; remove an unused plan on the market and retry. No plan was deleted or patched."
-    )]
-    PlanCap { code: String },
 }
+
+/// One row of the web-app settings report (design 13): what the file says,
+/// what the market shows (a draft agent is not readable with the agent
+/// token), and whether the value still has to be set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingRow {
+    pub field: &'static str,
+    pub file_value: String,
+    pub market_value: String,
+    /// `ok`, `set in web app`, `mismatch` or `unverified`.
+    pub status: &'static str,
+}
+
+/// The market value shown when the token cannot read it.
+const NOT_READABLE: &str = "not readable with the agent token";
+/// The market value shown when no default plan exists yet.
+const NOT_SET: &str = "not set in the web app yet";
 
 /// Reads the source playbook and its scripts directory (sibling `scripts/`).
 /// The source stays inside the listing file's directory tree: an absolute
@@ -115,7 +131,7 @@ pub async fn publish(
     store: &Store,
     state_dir: &Path,
     secrets: Vec<Secret>,
-) -> Result<ResolvedListing, PublishError> {
+) -> Result<(ResolvedListing, Vec<SettingRow>), PublishError> {
     let text = std::fs::read_to_string(listing_file)
         .map_err(|e| PublishError::Other(format!("{}: {e}", listing_file.display())))?;
     let l: Listing =
@@ -162,13 +178,10 @@ pub async fn publish(
     })
     .map_err(|e| PublishError::Other(e.to_string()))?;
 
-    // The resolved record is written before the market calls (round 5,
-    // codex 4). Chosen over rolling back the approval because it is the
-    // simpler of the two: the record always names the version apb now
-    // runs, so a market call that fails after a successful install can
-    // never leave the record pointing at the previous (already replaced)
-    // version while apb runs the new one. The owner re-runs `nearbee
-    // list`; the record's `published_at` is when this install happened.
+    // The resolved record is written before the market read (round 5,
+    // codex 4): it always names the version apb now runs, so a read that
+    // fails after a successful install can never leave the record
+    // pointing at the previous version while apb runs the new one.
     let resolved = ResolvedListing {
         handle: l.handle.clone(),
         agent_id: creds.agent_id.clone(),
@@ -177,65 +190,70 @@ pub async fn publish(
         playbook_sha256: installed.sha256.clone(),
         price_usd: l.price_usd.clone(),
         sla_seconds: l.sla_seconds,
+        // The scope falls back to the description here, so serve reads one
+        // value (an S2 record without either skips the scope check).
+        scope: Some(l.scope.clone().unwrap_or_else(|| l.description.clone())),
+        protection: Some(l.protection),
+        limits: l.limits.clone(),
         published_at: time::OffsetDateTime::now_utc(),
     };
     listing::write_resolved(state_dir, &resolved).map_err(PublishError::Other)?;
 
-    // Market update: the pricing plan first, then the patch. A failure in
-    // the plan step then leaves the agent text untouched, instead of a
-    // visible intermediate state with a new text but the old price.
+    // The one market call left: the pricing plans read (design 13). The
+    // agent itself is not read: a draft answers 404 with the agent token
+    // (measured 2026-11-10).
     let plans = market
         .pricing_plans(&creds.agent_id)
         .await
         .map_err(|e| map_market(e, &resolved.playbook_version))?;
     let default = plans.iter().find(|p| p.is_default);
-    let same = default.is_some_and(|p| {
-        p.model.as_deref() == Some("per_call")
-            && same_price(&p.price_amount, &l.price_usd)
-            && p.sla_seconds == Some(l.sla_seconds)
+    let price_ok = default.is_some_and(|p| {
+        p.model.as_deref() == Some("per_call") && same_price(&p.price_amount, &l.price_usd)
     });
-    let _plan_id = if same {
-        default
-            .map(|p| p.pricing_plan_id.clone())
-            .unwrap_or_default()
-    } else {
-        let created = market
-            .create_pricing_plan(
-                &creds.agent_id,
-                &NewPricingPlan {
-                    price_usd: l.price_usd.clone(),
-                    sla_seconds: l.sla_seconds,
-                    display_name: Some(format!("{} per call", l.handle)),
-                },
-            )
-            .await
-            .map_err(|e| match e {
-                MarketError::Refused {
-                    status: 409, code, ..
-                } => PublishError::PlanCap { code },
-                other => map_market(other, &resolved.playbook_version),
-            })?;
-        let id = created.pricing_plan_id.clone();
-        market
-            .make_default(&creds.agent_id, &id)
-            .await
-            .map_err(|e| map_market(e, &resolved.playbook_version))?;
-        id
+    let mut rows = Vec::new();
+    for (field, value) in [
+        ("name", l.name.clone()),
+        ("description", l.description.clone()),
+        ("bio", l.bio_markdown.clone()),
+        ("category", l.category.clone()),
+        ("tags", l.tags.join(", ")),
+    ] {
+        rows.push(SettingRow {
+            field,
+            file_value: value,
+            market_value: NOT_READABLE.into(),
+            status: "set in web app",
+        });
+    }
+    let (sla_market, sla_status) = match default {
+        Some(p) => match p.sla_seconds {
+            Some(s) if s == l.sla_seconds => (s.to_string(), "ok"),
+            Some(s) => (s.to_string(), "mismatch"),
+            // A null plan SLA inherits the agent default, which the token
+            // cannot read.
+            None => ("inherits the agent default".into(), "unverified"),
+        },
+        None => (NOT_SET.into(), "set in web app"),
     };
-    let patch = AgentPatch {
-        name: Some(l.name.clone()),
-        description: Some(l.description.clone()),
-        bio_markdown: Some(l.bio_markdown.clone()),
-        category: Some(l.category.clone()),
-        tags: Some(l.tags.clone()),
-        sla_seconds: Some(l.sla_seconds),
+    rows.push(SettingRow {
+        field: "SLA",
+        file_value: format!("{}s", l.sla_seconds),
+        market_value: sla_market,
+        status: sla_status,
+    });
+    let (price_market, price_status) = match default {
+        Some(p) if price_ok => (p.price_amount.clone(), "ok"),
+        Some(p) => (p.price_amount.clone(), "mismatch"),
+        None => (NOT_SET.into(), "set in web app"),
     };
-    market
-        .patch_agent(&creds.agent_id, &patch)
-        .await
-        .map_err(|e| map_market(e, &resolved.playbook_version))?;
+    rows.push(SettingRow {
+        field: "price",
+        file_value: format!("{} USD", l.price_usd),
+        market_value: price_market,
+        status: price_status,
+    });
 
-    Ok(resolved)
+    Ok((resolved, rows))
 }
 
 /// Two price strings are the same amount.
@@ -276,10 +294,10 @@ pub async fn publish_list(
     )
     .await
     {
-        Ok(r) => {
+        Ok((r, rows)) => {
             let _ = writeln!(
                 out,
-                "published {} ({}, {} USD, SLA {}s) on {} version {} digest {}",
+                "installed {} ({}, {} USD, SLA {}s) on {} version {} digest {}",
                 r.handle,
                 r.agent_id,
                 r.price_usd,
@@ -288,11 +306,24 @@ pub async fn publish_list(
                 r.playbook_version,
                 &r.playbook_sha256[..12.min(r.playbook_sha256.len())]
             );
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "set these in the market web app (https://market.near.ai):"
+            );
+            let width = rows.iter().map(|r| r.field.len()).max().unwrap_or(0);
+            for r in &rows {
+                let _ = writeln!(
+                    out,
+                    "  {:<width$}  {}  |  {}  |  {}",
+                    r.field,
+                    r.file_value,
+                    r.market_value,
+                    r.status,
+                    width = width
+                );
+            }
             0
-        }
-        Err(e) if matches!(e, PublishError::PlanCap { .. }) => {
-            let _ = writeln!(out, "error: {e}");
-            1
         }
         Err(e) => {
             let _ = writeln!(out, "error: {e}");

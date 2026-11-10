@@ -6,7 +6,7 @@ Defines how a listing file becomes a draft agent on the market backed by a mater
 ## Requirements
 
 ### Requirement: Listing file
-A listing file SHALL be YAML with `handle`, `name`, `source_playbook`, `price_usd` (decimal string), `sla_seconds`, `category` (one of the market's categories), `tags` (at most 10, each 1 to 40 characters), `description` (at most 200 characters) and `bio_markdown`; unknown keys SHALL be refused.
+A listing file SHALL be YAML with `handle`, `name`, `source_playbook`, `price_usd` (decimal string), `sla_seconds`, `category` (one of the market's categories), `tags` (at most 10, each 1 to 40 characters), `description` (at most 200 characters) and `bio_markdown`, and optionally `scope` (at most 300 characters), `protection` (`on` or `off`, default `on`) and `limits` (`max_brief_bytes`, `max_attachments`, `max_attachment_bytes`, `file_types`); unknown keys SHALL be refused.
 
 #### Scenario: Category outside the enum
 - **WHEN** `category` is `games`
@@ -16,16 +16,32 @@ A listing file SHALL be YAML with `handle`, `name`, `source_playbook`, `price_us
 - **WHEN** `price_usd` is the YAML number `0.5` instead of a string
 - **THEN** loading fails asking for a decimal string
 
+#### Scenario: Unknown limit
+- **WHEN** `limits` contains `max_pages`
+- **THEN** loading fails naming the key
+
+#### Scenario: Price too low for protection
+- **WHEN** `price_usd` is `0.26` and `protection` is not `off` (`0.26 * 0.95 - 0.25` is not above zero)
+- **THEN** loading fails saying the per-hire ceiling would not be above zero, while `0.264` loads
+
 ### Requirement: Materialisation
-Publishing SHALL install the source playbook into Nearbee's apb instance under the id `<handle>` with fixed profile names and `trial_candidates: off`, approve exactly the installed bundle, read the installed current version back from apb, and record its version and digest in `.nearbee/listings/<handle>.json`.
+Publishing SHALL install the source playbook into Nearbee's apb instance under the id `<handle>` with fixed profile names, `trial_candidates: off` and a numeric version `1.0.<n>` derived from the whole bundle (the playbook text, every script's bytes and executable flag), approve exactly the installed bundle, read the installed current version back from apb, and record its version, digest, price, SLA, scope, protection and limits in `.nearbee/listings/<handle>.json`.
 
 #### Scenario: Republish unchanged
 - **WHEN** the source playbook has not changed since the last publish
 - **THEN** the installed version and digest stay the same
 
 #### Scenario: Market call fails after the install
-- **WHEN** apb installed a new version and a later market call fails
-- **THEN** `.nearbee/listings/<handle>.json` already names the installed version and digest (it is written before the first market call), and the error tells the operator to publish again to finish the market update
+- **WHEN** apb installed a new version and the pricing plan read that follows fails
+- **THEN** `.nearbee/listings/<handle>.json` already names the installed version and digest (it is written before the first market call), the command exits non-zero, and serve can serve the installed version
+
+#### Scenario: Script-only change
+- **WHEN** only a script's bytes changed since the last publish
+- **THEN** the derived version changes and the new bundle installs
+
+#### Scenario: Scripts await approval
+- **WHEN** apb's import answers that the version has scripts and asks for approval with `--digest sha256:<d>`
+- **THEN** publishing approves exactly that digest and reads the version back
 
 ### Requirement: Trial setting
 Publishing SHALL refuse, before any market call, a source playbook that sets `trial_candidates` to any value other than `off`, and an installed current version that does not read back with `trial_candidates: off`.
@@ -38,17 +54,20 @@ Publishing SHALL refuse, before any market call, a source playbook that sets `tr
 - **WHEN** the installed current version read back from apb does not carry `trial_candidates: off`
 - **THEN** publishing fails before any market call
 
-### Requirement: Market update
-Publishing SHALL patch the agent's name, description, bio, category, tags and SLA, create a per-call pricing plan with the listing's price and SLA and make it the default, and SHALL never change `listing_status`.
+### Requirement: No market writes
+Publishing SHALL send no market write: no agent patch, no pricing plan creation, no make-default, and never `listing_status`.
 
-#### Scenario: Status untouched
+#### Scenario: Install only
 - **WHEN** a listing is published
-- **THEN** no request carries `listing_status`
+- **THEN** the market receives only reads
 
-#### Scenario: Price unchanged
-- **WHEN** the default plan already has the same price and SLA
-- **THEN** no new plan is created
+### Requirement: Web-app settings report
+After installing, publishing SHALL read the agent's pricing plans and print, for the owner, the values to set in the web app (name, description, bio, category, tags, SLA, price) and per value whether the market matches: the default plan's model is `per_call` and its price equals `price_usd`; its SLA equals `sla_seconds`, or is `null` and printed as unverified (it inherits the agent default, which the token cannot read). A mismatch SHALL be printed and SHALL not fail the command.
 
-#### Scenario: Pricing plan cap
-- **WHEN** creating a plan answers `409` because the agent already has the maximum number of plans
-- **THEN** publishing fails naming the cap and tells the operator to remove an unused plan; no plan is deleted or patched
+#### Scenario: No plan yet
+- **WHEN** the agent has no pricing plan
+- **THEN** publishing succeeds, says "installed", and prints that the price is not set in the web app yet
+
+#### Scenario: Price differs
+- **WHEN** the default plan's price is `1.00` and the file says `0.50`
+- **THEN** the report marks the price as a mismatch and the command exits 0

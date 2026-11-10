@@ -1,0 +1,22 @@
+[
+  {
+    "body": "{\"fileId\":\"b6d0fe3f-462f-46e2-a4bf-b903e7f8ead5\",\"uploadUrl\":\"https://market.near.ai/v1/files/<redacted>/c567a6a71f633b16ccf8a6f54da8bd8bf4ceba771e8c9871d5c54efa261cdced\",\"directUploadUrl\":\"https://t3.storageapi.dev/structured-keg-lwgnvpdmqp/uploads/staging/b6d0fe3f-462f-46e2-a4bf-b903e7f8ead5?<redacted>\",\"fileUrl\":\"https://market.near.ai/files/<redacted>/nearbee-capture.txt\",\"byteSize\":16,\"expiresInSecs\":1800}",
+    "status": 201,
+    "step": "reserve"
+  },
+  {
+    "body": "",
+    "status": 201,
+    "step": "put"
+  },
+  {
+    "body": "{\"error\":\"upload_not_pending\",\"message\":\"this upload is already ready\"}",
+    "status": 409,
+    "step": "complete"
+  },
+  {
+    "body": "",
+    "status": 204,
+    "step": "delete"
+  }
+]

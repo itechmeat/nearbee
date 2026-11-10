@@ -36,6 +36,38 @@ pub const TAG_MAX: usize = 40;
 pub const DESCRIPTION_MAX: usize = 200;
 pub const HANDLE_MAX: usize = 30;
 
+/// Whether the listing protects its hires with a computed budget
+/// (default `on`); `off` starts runs without a budget object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protection {
+    On,
+    Off,
+}
+
+impl Protection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Protection::On => "on",
+            Protection::Off => "off",
+        }
+    }
+}
+
+/// The optional hard limits of a listing file (spec `hire-intake`); a
+/// limit absent means no limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingLimits {
+    pub max_brief_bytes: Option<u64>,
+    pub max_attachments: Option<usize>,
+    pub max_attachment_bytes: Option<u64>,
+    pub file_types: Option<Vec<String>>,
+}
+
+/// The longest `scope`, in characters.
+pub const SCOPE_MAX: usize = 300;
+
 /// A listing file as written in the repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
@@ -49,6 +81,10 @@ pub struct Listing {
     pub tags: Vec<String>,
     pub description: String,
     pub bio_markdown: String,
+    /// What the listing takes (its `description` when absent).
+    pub scope: Option<String>,
+    pub protection: Protection,
+    pub limits: Option<ListingLimits>,
 }
 
 /// A listing file failure. Errors never carry a token value.
@@ -82,6 +118,10 @@ pub enum ListingError {
         "listing file {path} holds an agent token; tokens belong in the credentials store, not a listing"
     )]
     Token { path: String },
+    #[error(
+        "listing file {path}: price_usd {price} is too low: with protection on the per-hire ceiling (price * 0.95 - 0.25) would not be above zero; raise the price or set protection: off"
+    )]
+    PriceTooLow { path: String, price: String },
 }
 
 /// Parses and validates a listing file's text.
@@ -102,6 +142,9 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         tags: Vec<String>,
         description: String,
         bio_markdown: String,
+        scope: Option<String>,
+        protection: Option<Protection>,
+        limits: Option<ListingLimits>,
     }
     /// A price that accepts only a YAML string, never a number.
     #[derive(Deserialize)]
@@ -153,6 +196,34 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
     if raw.description.chars().count() > DESCRIPTION_MAX {
         return Err(ListingError::DescriptionTooLong { path });
     }
+    let scope = match &raw.scope {
+        Some(s) => {
+            if s.chars().count() > SCOPE_MAX {
+                return Err(ListingError::Parse {
+                    path: path.clone(),
+                    message: format!("scope must be at most {SCOPE_MAX} characters"),
+                });
+            }
+            Some(s.clone())
+        }
+        None => None,
+    };
+    let protection = raw.protection.unwrap_or(Protection::On);
+    // With protection on the per-hire ceiling must be above zero
+    // (spec `listing-publish`, Listing file; the formula, not a cent rule).
+    if protection == Protection::On {
+        let price = price_usd
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|_| ListingError::PriceNotString { path: path.clone() })?;
+        if price * rust_decimal::Decimal::new(95, 2) - rust_decimal::Decimal::new(25, 2)
+            <= rust_decimal::Decimal::ZERO
+        {
+            return Err(ListingError::PriceTooLow {
+                path,
+                price: price_usd,
+            });
+        }
+    }
     Ok(Listing {
         handle: raw.handle,
         name: raw.name,
@@ -163,6 +234,9 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         tags: raw.tags,
         description: truncate(&raw.description, DESCRIPTION_MAX * 4 + 1),
         bio_markdown: raw.bio_markdown,
+        scope,
+        protection,
+        limits: raw.limits,
     })
 }
 
@@ -191,6 +265,14 @@ pub struct ResolvedListing {
     /// Decimal string in USD.
     pub price_usd: String,
     pub sla_seconds: u64,
+    /// What the listing takes; absent means from the description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Absent (an S2 record) reads as protected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ListingLimits>,
     #[serde(with = "time::serde::rfc3339")]
     pub published_at: time::OffsetDateTime,
 }
@@ -275,6 +357,82 @@ description: "Audits a public repository and returns a short Markdown report."
 bio_markdown: "A Nearbee example agent."
 "#
         .to_owned()
+    }
+
+    fn text_with_new_keys() -> String {
+        format!(
+            "{}\nscope: \"Audits of public git repositories\"\nprotection: on\nlimits:\n  max_brief_bytes: 8192\n  max_attachments: 3\n  max_attachment_bytes: 10485760\n  file_types: [\".md\", \".csv\"]\n",
+            text()
+        )
+    }
+
+    /// The new keys parse with their defaults and values.
+    #[test]
+    fn scope_protection_and_limits_parse() {
+        let l = parse(&text(), Path::new("l.yaml")).unwrap();
+        assert_eq!(l.scope, None, "no scope key: none");
+        assert_eq!(l.protection, Protection::On, "protection defaults to on");
+        assert_eq!(l.limits, None, "no limits key: none");
+        let l = parse(&text_with_new_keys(), Path::new("l.yaml")).unwrap();
+        assert_eq!(
+            l.scope.as_deref(),
+            Some("Audits of public git repositories")
+        );
+        assert_eq!(l.protection, Protection::On);
+        let limits = l.limits.expect("the limits parse");
+        assert_eq!(limits.max_brief_bytes, Some(8192));
+        assert_eq!(limits.max_attachments, Some(3));
+        assert_eq!(limits.max_attachment_bytes, Some(10_485_760));
+        assert_eq!(
+            limits.file_types.as_deref(),
+            Some(&[".md".to_owned(), ".csv".to_owned()][..])
+        );
+        // protection off parses.
+        let off = text_with_new_keys().replace("protection: on", "protection: off");
+        let l = parse(&off, Path::new("l.yaml")).unwrap();
+        assert_eq!(l.protection, Protection::Off);
+        // A scope is at most 300 characters.
+        let long = text().replace(
+            "bio_markdown:",
+            &format!("scope: \"{}\"\nbio_markdown:", "s".repeat(301)),
+        );
+        let err = parse(&long, Path::new("l.yaml")).unwrap_err();
+        assert!(err.to_string().contains("scope"), "{err}");
+    }
+
+    /// An unknown key under `limits` is refused by name.
+    #[test]
+    fn an_unknown_limit_is_refused_by_name() {
+        let bad = text_with_new_keys().replace("max_brief_bytes: 8192", "max_pages: 5");
+        let err = parse(&bad, Path::new("l.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("max_pages"), "{msg}");
+    }
+
+    /// A price whose protected ceiling would not be above zero is refused;
+    /// the formula is `price * 0.95 - 0.25 > 0`, not a cent rule, so
+    /// `0.264` loads and `0.26` does not. With protection off any price
+    /// loads.
+    #[test]
+    fn a_price_too_low_for_protection_is_refused() {
+        let bad = text().replace("\"0.50\"", "\"0.26\"");
+        let err = parse(&bad, Path::new("l.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ceiling"), "{msg}");
+        // 0.264 * 0.95 - 0.25 = 0.0008 > 0: loads.
+        let ok = text().replace("\"0.50\"", "\"0.264\"");
+        let l = parse(&ok, Path::new("l.yaml")).unwrap();
+        assert_eq!(l.price_usd, "0.264");
+        // 0.265 * 0.95 - 0.25 = 0.00175: loads as well.
+        let ok = text().replace("\"0.50\"", "\"0.265\"");
+        assert!(parse(&ok, Path::new("l.yaml")).is_ok());
+        // Protection off: the price is not checked against the ceiling.
+        let off = text()
+            .replace("\"0.50\"", "\"0.26\"")
+            .replace("bio_markdown:", "protection: off\nbio_markdown:");
+        let l = parse(&off, Path::new("l.yaml")).unwrap();
+        assert_eq!(l.protection, Protection::Off);
+        assert_eq!(l.price_usd, "0.26");
     }
 
     #[test]
@@ -374,6 +532,9 @@ bio_markdown: "A Nearbee example agent."
             playbook_sha256: crate::journal::sha256_hex(b"playbook"),
             price_usd: "0.50".into(),
             sla_seconds: 86_400,
+            scope: None,
+            protection: None,
+            limits: None,
             published_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
         };
         write_resolved(dir.path(), &r).unwrap();
@@ -402,6 +563,9 @@ mod resolved_tests {
             playbook_sha256: "ab".into(),
             price_usd: "0.50".into(),
             sla_seconds: 3600,
+            scope: None,
+            protection: None,
+            limits: None,
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

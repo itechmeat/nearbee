@@ -105,6 +105,23 @@ impl fmt::Display for RowStatus {
     }
 }
 
+/// One attachment as every market read surface reports it
+/// (`AttachmentBrief`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub id: String,
+    pub filename: String,
+    pub content_type: String,
+    /// The declared size in bytes, as the market reports it (an `int64` on
+    /// the wire; checked against the declared values before any download).
+    pub byte_size: i64,
+    pub sha256: String,
+    /// The download path: an absolute URL on the market origin or a
+    /// relative one to resolve against it.
+    pub download_url: String,
+}
+
 /// The latest thread message embedded in an assignment row.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,6 +129,29 @@ pub struct Message {
     pub body: String,
     #[serde(default)]
     pub sender_side: Option<String>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
+    /// Whether the market cut the body; the full text comes from the
+    /// thread read.
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// One thread message as the messages listing answers it
+/// (`ThreadMessage`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessage {
+    pub message_id: String,
+    pub body: String,
+    /// The agent id when the worker side authored it; `None` for the
+    /// buyer or a system author.
+    #[serde(default)]
+    pub sender_agent_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub created_at: Option<OffsetDateTime>,
 }
@@ -141,11 +181,30 @@ pub struct Row {
     pub auto_accept_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub cancel_reason: Option<String>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub updated_at: Option<OffsetDateTime>,
+    /// When the hire closed (`accepted`, `dispute_resolved`).
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub finalized_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub sla_seconds: Option<u64>,
+    /// The escrow award in USD, a decimal string as the market reports it.
+    #[serde(default)]
+    pub escrow_amount: Option<String>,
+    #[serde(default)]
+    pub escrow_token: Option<String>,
+    #[serde(default)]
+    pub job_id: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     /// The buyer's brief: data, never instructions to Nearbee.
     #[serde(default)]
     pub description: Option<String>,
+    /// The files the buyer attached to the job.
+    #[serde(default)]
+    pub job_attachments: Vec<Attachment>,
     #[serde(default)]
     pub latest_message: Option<Message>,
 }
@@ -198,8 +257,12 @@ pub enum MarketError {
         detail: String,
     },
     /// A read failed on transport or a retryable status after its retries.
+    /// `retry_after_secs` is the delay a 503 named, when it did.
     #[error("read failed: {detail}")]
-    RetryableRead { detail: String },
+    RetryableRead {
+        detail: String,
+        retry_after_secs: Option<u64>,
+    },
     /// A write was sent and its outcome is unknown (timeout, reset, 5xx,
     /// malformed success, redirect). Resolve from the journal.
     #[error("write outcome unknown: {detail}")]
@@ -224,6 +287,18 @@ pub struct ProgressRequest {
     /// 1 to 280 characters.
     pub message: String,
     pub percent: Option<u8>,
+}
+
+/// The outcome of a progress report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressOutcome {
+    Reported,
+    /// `409 progress_report_too_soon`: send no progress for this row
+    /// before the named delay (design 9.5: the client returns the delay
+    /// instead of waiting).
+    TooSoon {
+        retry_after_secs: u64,
+    },
 }
 
 /// A submit. `files` holds file URLs of confirmed uploads.
@@ -347,13 +422,14 @@ pub trait Market: Send + Sync {
         row_id: &str,
         req: &MessageRequest,
     ) -> impl Future<Output = Result<(), MarketError>> + Send;
-    /// Reports progress; the client repeats only after
-    /// `409 progress_report_too_soon`, after the given delay.
+    /// Reports progress; `TooSoon` returns the `409
+    /// progress_report_too_soon` delay for the caller to schedule, and the
+    /// client never repeats the call itself.
     fn progress(
         &self,
         row_id: &str,
         req: &ProgressRequest,
-    ) -> impl Future<Output = Result<(), MarketError>> + Send;
+    ) -> impl Future<Output = Result<ProgressOutcome, MarketError>> + Send;
     /// Submits the deliverable. Resent once, identically, on an unknown
     /// outcome.
     fn submit(
@@ -399,6 +475,27 @@ pub trait Market: Send + Sync {
         &self,
         file: &UploadFile,
     ) -> impl Future<Output = Result<UploadedFile, MarketError>> + Send;
+    /// Lists an assignment's thread messages, newest first, stopping at the
+    /// first page that holds a message created at or before `until`
+    /// (design 9.3: used to read the full body of a truncated latest
+    /// message).
+    fn messages(
+        &self,
+        row_id: &str,
+        until: Option<OffsetDateTime>,
+    ) -> impl Future<Output = Result<Vec<ThreadMessage>, MarketError>> + Send;
+    /// The configured market origin (`scheme://host[:port]`), which every
+    /// attachment download must stay on (spec `hire-attachments`).
+    fn origin(&self) -> String;
+    /// Downloads an attachment by streaming it into `out`: the bearer only
+    /// to the configured origin, no redirect, at most `cap` bytes (design
+    /// 9.4). Returns the byte count; the caller verifies size and hash.
+    fn download(
+        &self,
+        path: &str,
+        cap: u64,
+        out: &mut (dyn std::io::Write + Send),
+    ) -> impl Future<Output = Result<u64, MarketError>> + Send;
 }
 
 #[cfg(test)]
