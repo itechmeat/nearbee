@@ -16,6 +16,7 @@ use nearbee_core::runner::{ExecutionId, HireId, PlaybookId, RunQuery, Runner, Se
 use nearbee_core::secret::Secret;
 use nearbee_market::NearAgentMarket;
 
+pub mod audit;
 pub mod publish;
 
 /// Exit code for an error that is not a finding (unreadable config,
@@ -63,6 +64,22 @@ pub enum Command {
     /// Delete the files of hires past their retention (takes the serve
     /// lock).
     Cleanup(CleanupArgs),
+    /// Agent A's steps, run by the `repo-audit` playbook's script nodes in
+    /// the run's worktree.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditAction {
+    /// Take a snapshot of the one public GitHub repository the run's
+    /// brief names into `audit-snapshot/`.
+    Fetch,
+    /// Check `audit/candidates.json` against the snapshot and write
+    /// `out/findings.json`, `out/deliverable.md` and `out/result.json`.
+    Finish,
 }
 
 #[derive(Debug, Args)]
@@ -180,6 +197,8 @@ fn apb_options(cfg: &Config, env: &Env<'_>) -> ApbOptions {
         timing: env.timing.clone(),
         bin: apb_bin(env),
         config_dir: cfg.apb.config_dir.clone(),
+        systemctl_bin: systemctl_bin(env),
+        xdg_config_home: cfg.apb.xdg_config_home.clone(),
     }
 }
 
@@ -222,6 +241,64 @@ pub async fn run(cli: Cli, env: &Env<'_>, out: &mut dyn Write) -> i32 {
         Command::Serve(args) => serve(cli.config.as_deref(), args, env, out).await,
         Command::Hires(args) => hires(cli.config.as_deref(), args, env, out),
         Command::Cleanup(args) => cleanup(cli.config.as_deref(), args, env, out),
+        Command::Audit {
+            action: AuditAction::Fetch,
+        } => audit_fetch(env, out).await,
+        Command::Audit {
+            action: AuditAction::Finish,
+        } => audit_finish(env, out),
+    }
+}
+
+/// `nearbee audit fetch`: the brief comes from the run's params
+/// (`APB_RUN_DIR`), the snapshot goes into the current directory.
+pub async fn audit_fetch(env: &Env<'_>, out: &mut dyn Write) -> i32 {
+    let mut lines = Lines::new(out);
+    let run_dir = (env.var)("APB_RUN_DIR").map(PathBuf::from);
+    let params = match nearbee_apb::run_params::from_run_dir(run_dir.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            lines.line(&format!("error: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    let brief = params.get("brief").cloned().unwrap_or_default();
+    match audit::fetch_snapshot(audit::API_BASE, audit::CODELOAD_BASE, &brief, env.cwd).await {
+        Ok(audit::Fetched::Published { sha, coverage }) => {
+            lines.line(&format!(
+                "snapshot published: commit {sha}, {} files, {} members skipped",
+                coverage.files_written,
+                coverage.skipped_total()
+            ));
+            0
+        }
+        Ok(audit::Fetched::Reused { sha }) => {
+            lines.line(&format!("snapshot reused: commit {sha}"));
+            0
+        }
+        Err(e) => {
+            lines.line(&format!("error: audit fetch: {e}"));
+            EXIT_ERROR
+        }
+    }
+}
+
+/// `nearbee audit finish` in the current directory.
+pub fn audit_finish(env: &Env<'_>, out: &mut dyn Write) -> i32 {
+    let mut lines = Lines::new(out);
+    match audit::finish(env.cwd) {
+        Ok(f) => {
+            lines.line(&format!(
+                "deliverable written: {} findings location checked, {} rejected",
+                f.accepted.len(),
+                f.rejected.len()
+            ));
+            0
+        }
+        Err(e) => {
+            lines.line(&format!("error: audit finish: {e}"));
+            EXIT_ERROR
+        }
     }
 }
 
@@ -388,6 +465,54 @@ fn market_options(
 }
 
 /// The market base URL: `MARKET_URL`, default `https://market.near.ai`.
+/// The NEAR AI Cloud API base of the attestation reports (design 6.1):
+/// `NEARAI_CLOUD_URL` when set, else the production base.
+fn nearai_cloud_url(env: &Env<'_>) -> String {
+    (env.var)("NEARAI_CLOUD_URL")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| nearbee_cloud::PRODUCTION_BASE.into())
+}
+
+/// The attestor of a serve round (design 6.1): the NEAR AI Cloud client
+/// when an attested listing is served and the key is configured; else an
+/// attestor whose every fetch fails with its reason and sends nothing.
+enum ServeAttestor {
+    Cloud(Box<nearbee_cloud::CloudAttestor>),
+    Off(nearbee_core::evidence::Unavailable),
+}
+
+impl nearbee_core::evidence::Attestor for ServeAttestor {
+    async fn report(&self, model: &str, nonce: &str) -> Result<Vec<u8>, String> {
+        match self {
+            ServeAttestor::Cloud(c) => c.report(model, nonce).await,
+            ServeAttestor::Off(u) => u.report(model, nonce).await,
+        }
+    }
+}
+
+fn serve_attestor<'a>(
+    cfg: &Config,
+    env: &Env<'_>,
+    mut contexts: impl Iterator<Item = &'a nearbee_core::serve::ListingContext>,
+) -> ServeAttestor {
+    use nearbee_core::evidence::Unavailable;
+    let attested = contexts.any(|c| {
+        c.record
+            .as_ref()
+            .is_some_and(|r| r.tier == Some(nearbee_core::listing::Tier::Attested))
+    });
+    if !attested {
+        return ServeAttestor::Off(Unavailable("no attested listing is served".into()));
+    }
+    let Some(key) = cfg.nearai_api_key.clone() else {
+        return ServeAttestor::Off(Unavailable(nearbee_cloud::NO_KEY.into()));
+    };
+    match nearbee_cloud::CloudAttestor::new(nearai_cloud_url(env), key) {
+        Ok(c) => ServeAttestor::Cloud(Box::new(c)),
+        Err(e) => ServeAttestor::Off(Unavailable(e)),
+    }
+}
+
 fn market_url(env: &Env<'_>) -> String {
     (env.var)("MARKET_URL")
         .filter(|v| !v.is_empty())
@@ -529,6 +654,16 @@ pub async fn agent_add_from(
 }
 
 /// The apb binary: `APB_BIN`, default `apb` on the path.
+/// The `systemctl` binary the inspection reads the apb unit's
+/// environment with: `SYSTEMCTL_BIN`, else `systemctl` on `PATH` (like
+/// `APB_BIN` for apb).
+fn systemctl_bin(env: &Env<'_>) -> PathBuf {
+    (env.var)("SYSTEMCTL_BIN")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("systemctl"))
+}
+
 fn apb_bin(env: &Env<'_>) -> PathBuf {
     (env.var)("APB_BIN")
         .filter(|v| !v.is_empty())
@@ -561,8 +696,13 @@ pub async fn publish_list(
     // already refused the operator's everyday instance.
     let pub_env = publish::PublishEnv {
         market_url: market_url(env),
+        apb_url: cfg.apb.url.clone(),
+        apb_api_key: cfg.apb.api_key.clone(),
+        timing: env.timing.clone(),
         apb_bin: apb_bin(env),
         apb_config_dir: cfg.apb.config_dir.clone(),
+        apb_xdg_config_home: cfg.apb.xdg_config_home.clone(),
+        systemctl_bin: systemctl_bin(env),
         apb_workspace: cfg.apb.workspace_path.clone(),
     };
     // The publish writes plain lines; they go through a buffer so every
@@ -625,6 +765,7 @@ pub async fn serve(
         // The poll interval is validated to the spec: every 30 to 60 s.
         poll_interval_secs: nearbee_core::serve::clamp_poll_interval_secs(poll),
         forbidden: forbidden_secrets(&cfg, &store),
+        statement_retention_days: cfg.retention.after_acceptance_days,
         ..Default::default()
     };
     serve_loop(&cfg, &store, &opts, env, &mut out, None).await
@@ -796,8 +937,10 @@ pub async fn serve_loop(
                         market,
                     })
                     .collect();
+                let attestor = serve_attestor(cfg, env, agents.iter().map(|a| &a.ctx));
                 match nearbee_core::serve::round(
                     &runner,
+                    &attestor,
                     &agents,
                     &mut round_state,
                     opts,
@@ -956,6 +1099,24 @@ impl Runner for RoundRunner {
             RoundRunner::Down { .. } => Err(self.unavailable()),
         }
     }
+    async fn inspect(
+        &self,
+        id: &PlaybookId,
+    ) -> Result<nearbee_core::runner::ExecutionFacts, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.inspect(id).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
+    async fn inspect_source(
+        &self,
+        source: &str,
+    ) -> Result<nearbee_core::runner::ExecutionFacts, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.inspect_source(source).await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
+        }
+    }
 }
 
 /// `nearbee hires [--json]`: one line per journaled hire, read only and
@@ -1111,5 +1272,102 @@ pub fn agent_list(env: &Env<'_>, out: &mut dyn Write) -> i32 {
             }
             i32::from(all.is_empty())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nearbee_core::evidence::Attestor;
+
+    fn config(vars: &[(&str, &str)]) -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_string_lossy().to_string();
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .chain([("HOME".to_owned(), home)])
+            .collect();
+        let cfg = config::load(
+            LoadOptions {
+                file: None,
+                cwd: dir.path(),
+            },
+            |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()),
+        )
+        .unwrap();
+        (dir, cfg)
+    }
+
+    fn listing(tier: nearbee_core::listing::Tier) -> nearbee_core::serve::ListingContext {
+        let record: nearbee_core::listing::ResolvedListing =
+            serde_json::from_value(serde_json::json!({
+                "handle": "h",
+                "agent_id": "a",
+                "playbook_id": "p",
+                "playbook_version": "1.0.0",
+                "playbook_sha256": "ab",
+                "price_usd": "0.50",
+                "sla_seconds": 3600,
+                "tier": tier,
+                "published_at": "2026-11-11T00:00:00Z"
+            }))
+            .unwrap();
+        nearbee_core::serve::ListingContext {
+            handle: "h".into(),
+            agent_id: "a".into(),
+            playbook: nearbee_core::runner::PlaybookId::new("p"),
+            workspace: std::path::PathBuf::from("/ws"),
+            price_usd: rust_decimal::Decimal::new(50, 2),
+            scope: None,
+            protection: nearbee_core::listing::Protection::On,
+            limits: None,
+            sla_seconds: Some(3600),
+            playbook_version: "1.0.0".into(),
+            playbook_sha256: "ab".into(),
+            record: Some(record),
+        }
+    }
+
+    fn env_of(dir: &std::path::Path) -> (std::path::PathBuf, impl Fn(&str) -> Option<String>) {
+        (dir.to_path_buf(), |_: &str| None)
+    }
+
+    /// No `NEARAI_API_KEY` with an attested listing served: every fetch
+    /// fails with that reason and nothing is sent (spec `run-evidence`,
+    /// No key); plain listings never need the key.
+    #[tokio::test]
+    async fn the_serve_attestor_needs_the_key_only_for_attested_listings() {
+        use nearbee_core::listing::Tier;
+        let (dir, cfg) = config(&[]);
+        let (cwd, var) = env_of(dir.path());
+        let env = Env {
+            cwd: &cwd,
+            var: &var,
+            timing: Timing::default(),
+        };
+        let attested = [listing(Tier::Attested)];
+        let a = serve_attestor(&cfg, &env, attested.iter());
+        assert!(matches!(a, ServeAttestor::Off(_)));
+        assert_eq!(
+            a.report("Qwen/Qwen3.8-27B", "00").await.unwrap_err(),
+            nearbee_cloud::NO_KEY
+        );
+        let plain = [listing(Tier::Plain)];
+        assert!(matches!(
+            serve_attestor(&cfg, &env, plain.iter()),
+            ServeAttestor::Off(_)
+        ));
+        let (dir, cfg) = config(&[("NEARAI_API_KEY", "sk-test-0123456789")]);
+        let (cwd, var) = env_of(dir.path());
+        let env = Env {
+            cwd: &cwd,
+            var: &var,
+            timing: Timing::default(),
+        };
+        assert!(matches!(
+            serve_attestor(&cfg, &env, attested.iter()),
+            ServeAttestor::Cloud(_)
+        ));
     }
 }

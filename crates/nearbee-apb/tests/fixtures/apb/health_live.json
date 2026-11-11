@@ -1,0 +1,18 @@
+{
+  "apb": "1.0.0-beta.6",
+  "request": {
+    "method": "GET",
+    "path": "/api/health",
+    "query": [],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "build_id": "a5e9fb7fcb49c7c9",
+      "status": "ok",
+      "version": "1.0.0-beta.6"
+    }
+  },
+  "recorded": "2026-11-11"
+}

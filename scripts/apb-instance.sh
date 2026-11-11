@@ -12,7 +12,9 @@
 #                                      install playbooks/profiles and playbooks/smoke into the
 #                                      workspace (default ~/.local/share/nearbee/apb-workspace):
 #                                      profiles as project profiles, playbooks imported as bundles
-#                                      with their scripts and approved by their trust digest
+#                                      with their scripts and approved by their trust digest;
+#                                      writes decisions: { enabled: false } into the project's
+#                                      .apb/config.yaml
 #   scripts/apb-instance.sh allow-billed
 #                                      let this instance start billed and unknown-basis agent
 #                                      work (NEAR AI Cloud through OpenCode) without a per-run
@@ -26,7 +28,16 @@
 # repository root), NEARBEE_APB_ENV_VARS (variables passed from that file to
 # apb and its executors, default NEARAI_API_KEY). Only the listed variables are
 # copied, read the way Nearbee reads .env (scripts/dotenv-export.py), into a
-# 0600 file under $XDG_RUNTIME_DIR; values are never printed.
+# 0600 file under $XDG_RUNTIME_DIR; values are never printed. No OPENCODE_
+# variable is ever passed: it would override the provider routes the tier
+# check reads from opencode.json. NEARBEE_BIN (default: nearbee on PATH) is
+# set in the unit for the repo-audit playbook's script nodes.
+# NEARBEE_APB_XDG_CONFIG_HOME (~/.local/share/nearbee/xdg-config) is the
+# unit's XDG_CONFIG_HOME: a directory Nearbee owns, created empty, so
+# OpenCode in a run merges no global config (MCP servers, plugins, share,
+# providers) over the workspace's opencode.json; start refuses when it holds
+# an opencode entry. Set apb.xdg_config_home in nearbee.yaml to the same
+# path when you change it: the tier check compares the two.
 set -euo pipefail
 
 UNIT=nearbee-apb
@@ -38,8 +49,41 @@ ENV_VARS="${NEARBEE_APB_ENV_VARS:-NEARAI_API_KEY}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-$HOME/.cache}"
 APB_ENV="$RUNTIME_DIR/nearbee-apb.env"
 APB_BIN="${APB_BIN:-$(command -v apb || true)}"
+XDG_DIR="${NEARBEE_APB_XDG_CONFIG_HOME:-$HOME/.local/share/nearbee/xdg-config}"
 
 die() { echo "apb-instance: $*" >&2; exit 1; }
+
+# The nearbee binary the repo-audit script nodes run: NEARBEE_BIN, else
+# nearbee on PATH; empty when neither is found.
+nearbee_bin() {
+  if [ -n "${NEARBEE_BIN:-}" ]; then printf '%s' "$NEARBEE_BIN"; return; fi
+  command -v nearbee 2>/dev/null || true
+}
+
+# OpenCode reads OPENCODE_ variables over its config files; the tier check
+# treats any of them in the instance's environment as unknown routes, so
+# none may reach apb.
+refuse_opencode_vars() {
+  local name
+  for name in $ENV_VARS; do
+    case "$name" in OPENCODE_*) die "NEARBEE_APB_ENV_VARS names $name; no OPENCODE_ variable may reach apb" ;; esac
+  done
+  if have_systemd; then
+    local found
+    found="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^\(OPENCODE_[A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')"
+    [ -z "$found" ] || die "the systemd user manager's environment sets $found; unset it (systemctl --user unset-environment) before starting"
+  fi
+}
+
+# The unit's XDG_CONFIG_HOME: created empty and private; an opencode entry
+# in it would be merged into every OpenCode run, so start refuses it.
+prepare_xdg() {
+  mkdir -p "$XDG_DIR"
+  chmod 700 "$XDG_DIR"
+  if [ -e "$XDG_DIR/opencode" ] || [ -L "$XDG_DIR/opencode" ]; then
+    die "$XDG_DIR holds an opencode entry; Nearbee's XDG config directory must hold no OpenCode configuration"
+  fi
+}
 
 [ "$PORT" = 7321 ] && die "port 7321 is the operator's everyday apb; Nearbee uses its own port"
 [ -n "$APB_BIN" ] || die "apb is not on PATH (set APB_BIN)"
@@ -82,12 +126,16 @@ health() { curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1
 
 case "${1:-}" in
   start)
+    refuse_opencode_vars
+    prepare_xdg
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
     write_env
+    bin="$(nearbee_bin)"
+    [ -n "$bin" ] || echo "apb-instance: nearbee is not on PATH and NEARBEE_BIN is not set; the repo-audit scripts will fail" >&2
     if ! have_systemd; then
-      echo "No systemd user session. Run instead:"
-      echo "  set -a; . $APB_ENV; set +a; APB_CONFIG_DIR=$CONFIG_DIR $APB_BIN dashboard --no-open --port $PORT"
+      echo "No systemd user session. Run instead (with no OPENCODE_ variable set):"
+      echo "  set -a; . $APB_ENV; set +a; NEARBEE_BIN=$bin APB_CONFIG_DIR=$CONFIG_DIR XDG_CONFIG_HOME=$XDG_DIR $APB_BIN dashboard --no-open --port $PORT"
       exit 0
     fi
     if systemctl --user is-active --quiet "$UNIT"; then
@@ -99,6 +147,7 @@ case "${1:-}" in
     systemd-run --user --unit "$UNIT" --collect \
       -p KillMode=process -p "EnvironmentFile=$APB_ENV" \
       --setenv=APB_CONFIG_DIR="$CONFIG_DIR" --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+      --setenv=NEARBEE_BIN="$bin" --setenv=XDG_CONFIG_HOME="$XDG_DIR" \
       --working-directory="$CONFIG_DIR" \
       "$APB_BIN" dashboard --no-open --port "$PORT" >/dev/null
     for _ in $(seq 1 50); do
@@ -146,6 +195,31 @@ case "${1:-}" in
     # OpenCode reads its provider config from the project directory.
     cp "$REPO_ROOT/playbooks/workspace/opencode.json" "$ws/opencode.json"
     echo "apb-instance: opencode.json (provider nearai)"
+    # Decisions off for the whole project (design 2, point 4): the tier
+    # check reads decisions.enabled, and an attested listing refuses any
+    # value but false. Other keys of the file are kept; an earlier
+    # top-level decisions block is replaced.
+    python3 - "$ws/.apb/config.yaml" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+text = open(path).read() if os.path.exists(path) else ""
+lines = text.splitlines()
+out, skip = [], False
+for line in lines:
+    if re.match(r"^decisions\s*:", line):
+        skip = True
+        continue
+    if skip and (line.startswith((" ", "\t")) or not line.strip()):
+        continue
+    skip = False
+    out.append(line)
+out += ["decisions:", "  enabled: false"]
+tmp = path + ".nearbee-tmp"
+with open(tmp, "w") as f:
+    f.write("\n".join(out) + "\n")
+os.replace(tmp, path)
+PY
+    echo "apb-instance: decisions off in $ws/.apb/config.yaml"
     bundles="$(mktemp -d "${TMPDIR:-/tmp}/nearbee-bundles.XXXXXX")"
     # Whether apb's current version of <id> is <ver> and holds exactly the
     # bundle just built (apb's own comparison of definition and scripts).

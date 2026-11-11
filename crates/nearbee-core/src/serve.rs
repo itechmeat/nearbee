@@ -25,10 +25,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::config::Limits;
 use crate::credentials;
+use crate::evidence::{self, Attestor, EvidenceSnapshot, Phase};
 use crate::journal::{
     self, Decision, Event, Intent, JournalRead, OpResult, Received, RunObserved, Writer,
     WriterError,
@@ -42,6 +44,7 @@ use crate::runner::{
     Budget, ExecutionId, HireId, PlaybookId, RunDetail, RunId, RunQuery, RunStatus, Runner,
     RunnerError, SearchField, StartRequest,
 };
+use crate::statement;
 use crate::{attachments, cost, intake};
 use uuid::Uuid;
 
@@ -63,6 +66,10 @@ pub struct ServeOptions {
     /// Secret values that must never appear in a deliverable: configured
     /// secrets and stored agent tokens. Compared as plain strings.
     pub forbidden: Vec<String>,
+    /// The local retention days the statement was rendered with (design
+    /// 4.5): the drift pass re-renders with them, so a changed setting
+    /// drifts the listing until it is listed again.
+    pub statement_retention_days: u32,
 }
 
 /// The poll interval bounds of the spec (`hire-serving`, requirement
@@ -79,6 +86,7 @@ impl Default for ServeOptions {
             reject_handle: None,
             sla_margin_minutes: 10,
             forbidden: Vec::new(),
+            statement_retention_days: 7,
         }
     }
 }
@@ -139,6 +147,37 @@ pub struct RoundState {
     /// by design). Due times of delayed steps (progress, downloads) live
     /// in the journal, not here, so a restart keeps them (C17).
     pub aborts_open: BTreeSet<String>,
+    /// This round's verdict per listing handle (design 4.5): clean,
+    /// drifted with the reason, or held because the facts could not be
+    /// read. Filled by the drift pass at the start of the round and read
+    /// by `intake_short` and `admit`; kept for this round only.
+    pub drift: BTreeMap<String, ListingVerdict>,
+    /// Handles whose drift has been reported to the operator once (the
+    /// drift is printed once per change, not once per round); a handle is
+    /// removed once its listing is clean again, so a later drift is
+    /// reported again.
+    pub drift_reported: BTreeSet<String>,
+}
+
+/// One listing's verdict for one round (design 4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListingVerdict {
+    /// The facts were read and match the record.
+    Clean,
+    /// The facts were read and do not match the record: hires that have
+    /// not started their run are declined at once.
+    Drifted(String),
+    /// The facts could not be read this round (an inspection error): no
+    /// new market start, scope check or apb start, and no decline; the
+    /// waiting-past-deadline rule declines in the end.
+    Held(String),
+}
+
+/// What the listing's verdict means for one hire this round.
+enum ListingGate {
+    Go,
+    Decline(String),
+    Hold,
 }
 
 /// What serve knows about one published listing: the agent it serves for.
@@ -172,6 +211,12 @@ pub struct ListingContext {
     /// The digest of the published playbook text, recorded per hire in
     /// the run intent so the journal proves what the hire ran.
     pub playbook_sha256: String,
+    /// The resolved listing record serve works from (design 4.5): its
+    /// tier, statement snapshot, fingerprint, evidence models and
+    /// intake check. `None` in a test context or an S2 record serves
+    /// without the drift pass, the intake check and the statement
+    /// snapshot.
+    pub record: Option<listing::ResolvedListing>,
 }
 
 /// A serve failure of one polling round (the loop continues unless this is
@@ -737,8 +782,9 @@ pub struct Agent<'a, M> {
 /// from its journal, and its local work (abort confirmation, the run's
 /// observation and wall clock) still advances (C3, O4).
 #[allow(clippy::too_many_arguments)]
-pub async fn round<M: Market, R: Runner>(
+pub async fn round<M: Market, R: Runner, A: Attestor>(
     runner: &R,
+    attestor: &A,
     agents: &[Agent<'_, M>],
     state: &mut RoundState,
     opts: &ServeOptions,
@@ -843,6 +889,12 @@ pub async fn round<M: Market, R: Runner>(
             Err(e) => out.push(step_failed(&v.row.id, &e)),
         }
     }
+    // Pass 2a: the drift pass (design 4.5), once per round before the
+    // intake pass: every listing with a record is inspected and its
+    // verdict kept for this round only.
+    for o in drift_pass(runner, agents, state, opts).await {
+        out.push(o);
+    }
     // Pass 2b: intake for new first-time rows, the checks that need no
     // long step (spec `hire-intake`): received, then daily loss, hard
     // limits and cost admission. Intake runs whether or not the slot is
@@ -863,19 +915,28 @@ pub async fn round<M: Market, R: Runner>(
     // off at the earliest wall clock of any hire with an active run and
     // at the hire's own wall clock (C8). No scope question is asked while
     // apb cannot be reached (O3).
-    let mut long: Vec<(usize, bool)> = Vec::new();
+    let mut long: Vec<(usize, LongStep)> = Vec::new();
     if !state.runner_unavailable {
-        long.extend(scope_due.iter().map(|&i| (i, true)));
+        long.extend(scope_due.iter().map(|&i| (i, LongStep::Scope)));
     }
     for (i, v) in views.iter().enumerate() {
         if downloads_due(v, limits, clock) {
-            long.push((i, false));
+            long.push((i, LongStep::Download));
+        }
+        // Evidence (design 6.4): a report file a crash left without its
+        // record is completed here with no fetch; the first missing
+        // report of the hire is a long-step candidate.
+        match evidence_due(v, state_dir) {
+            Ok(Some((phase, model))) => long.push((i, LongStep::Evidence(phase, model))),
+            Ok(None) => {}
+            Err(e) => out.push(step_failed(&v.row.id, &e)),
         }
     }
-    if let Some(&(i, is_scope)) = long
+    if let Some((i, step)) = long
         .iter()
         .min_by_key(|(i, _)| (views[*i].row.created_at, views[*i].row.id.clone()))
     {
+        let i = *i;
         let v = &views[i];
         let own = generation_deadline(v, current_generation(&v.j), opts, clock);
         let cutoff = match (
@@ -885,11 +946,15 @@ pub async fn round<M: Market, R: Runner>(
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let o = if is_scope {
-            scope_check(runner, v, state, state_dir, clock, cutoff).await
-        } else {
-            let market = agents[v.agent].market;
-            download_step(market, v, state_dir, limits, clock, cutoff).await
+        let o = match step {
+            LongStep::Scope => scope_check(runner, v, state, state_dir, clock, cutoff).await,
+            LongStep::Download => {
+                let market = agents[v.agent].market;
+                download_step(market, v, state_dir, limits, clock, cutoff).await
+            }
+            LongStep::Evidence(phase, model) => {
+                evidence_step(attestor, v, state_dir, clock, cutoff, *phase, model).await
+            }
         };
         match o {
             Ok(Some(o)) => out.push(o),
@@ -1129,6 +1194,11 @@ async fn local_only<R: Runner>(
                 let terminal = detail.status.is_terminal();
                 if terminal || observed.status != detail.status.as_str() {
                     w.append(Event::RunObserved(RunObserved {
+                        attempts: if terminal {
+                            detail.attempts.clone()
+                        } else {
+                            Vec::new()
+                        },
                         run_id: observed.run_id.clone(),
                         execution: observed.execution,
                         status: detail.status.as_str().to_owned(),
@@ -1870,7 +1940,18 @@ async fn advance<M: Market, R: Runner>(
     {
         let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
         w.set_generation(generation);
-        return Ok(waiting_decline(&mut w, v, generation)?);
+        return Ok(waiting_decline(
+            &mut w,
+            v,
+            generation,
+            (
+                "nothing was started before the deadline".to_owned(),
+                BUYER_WAITING.to_owned(),
+                "the generation could not start its run before the deadline".to_owned(),
+                BUYER_SLA.to_owned(),
+            ),
+            None,
+        )?);
     }
     let gen_state = derive_gen_state(&records);
     // A settled generation whose adopted run still runs (a crash after a
@@ -2028,16 +2109,20 @@ async fn advance<M: Market, R: Runner>(
     }
 }
 
-/// Declines a waiting generation whose deadline passed (design 5): a
-/// first-time hire not started on the market `rejected` (nothing was
-/// started); a first-time hire already started there (by the owner or by
-/// its own market start), a rework or a redo `failed`, since work counts
-/// as started (AGENTS rule 6, spec `hire-intake` Owner-started rows;
-/// R2-12).
+/// Declines a waiting generation whose deadline passed or whose listing
+/// drifted (design 4.6): a first-time hire not started on the market
+/// `rejected` (nothing was started); a first-time hire already started
+/// there (by the owner or by its own market start), a rework or a redo
+/// `failed`, since work counts as started (AGENTS rule 6, spec
+/// `hire-intake` Owner-started rows; R2-12). The callers pass the texts
+/// of both branches and, for the drift, the attention code; the
+/// rejected-or-failed choice stays inside.
 fn waiting_decline(
     w: &mut Writer,
     v: &HireView<'_>,
     generation: u32,
+    texts: (String, String, String, String),
+    attention: Option<&str>,
 ) -> Result<HireOutcome, WriterError> {
     let row = v.row;
     let kind = row_kind_of(&v.j, generation);
@@ -2046,19 +2131,14 @@ fn waiting_decline(
             .iter()
             .any(|r| matches!(&r.event, Event::Intent(i) if i.kind == "market_start"));
     let (reason, buyer, decision) = if kind == "first" && !started_on_market {
-        (
-            "nothing was started before the deadline",
-            BUYER_WAITING,
-            "rejected",
-        )
+        (texts.0, texts.1, "rejected")
     } else {
-        (
-            "the generation could not start its run before the deadline",
-            BUYER_SLA,
-            "failed",
-        )
+        (texts.2, texts.3, "failed")
     };
-    open_decline_intent(w, row.id.as_str(), decision, reason, buyer)?;
+    if let Some(code) = attention {
+        append_attention(w, &gen_records(&v.j, generation), code, &reason)?;
+    }
+    open_decline_intent(w, row.id.as_str(), decision, &reason, &buyer)?;
     Ok(if decision == "rejected" {
         HireOutcome::DeclinedRejected {
             row_id: row.id.clone(),
@@ -2066,9 +2146,602 @@ fn waiting_decline(
     } else {
         HireOutcome::DeclinedFailed {
             row_id: row.id.clone(),
-            reason: buyer.to_owned(),
+            reason: buyer,
         }
     })
+}
+
+/// The texts [`waiting_decline`] sends for a drifted listing (design
+/// 4.5): both branches carry the same journal reason (the drift detail
+/// prefixed) and the fixed buyer refund text, and the attention code
+/// names the drift for the operator.
+fn drift_decline_args(detail: &str) -> ((String, String, String, String), Option<&'static str>) {
+    let reason = format!("listing drift: {detail}");
+    (
+        (
+            reason.clone(),
+            BUYER_LISTING_DRIFT.to_owned(),
+            reason,
+            BUYER_LISTING_DRIFT.to_owned(),
+        ),
+        Some("listing_drift"),
+    )
+}
+
+/// The flat name of a generation's statement snapshot (design 5.1).
+const STATEMENT_SNAPSHOT: &str = "statement.json";
+
+/// The content of a generation's statement snapshot: what the listing
+/// published, frozen at the generation's first apb start (design 5.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StatementSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    statement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    statement_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    statement_format: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+    #[serde(default)]
+    evidence_models: Vec<String>,
+}
+
+/// The drift pass of design 4.5, run once per round before the intake
+/// pass: inspect every listing that has a record, keep the verdict for
+/// this round only in [`RoundState::drift`], and tell the operator once
+/// per change. A listing whose inspection fails this round is held: no
+/// hire of it starts anything and none is declined for it; the next round
+/// retries.
+async fn drift_pass<M: Market, R: Runner>(
+    runner: &R,
+    agents: &[Agent<'_, M>],
+    state: &mut RoundState,
+    opts: &ServeOptions,
+) -> Vec<HireOutcome> {
+    let mut out = Vec::new();
+    state.drift.clear();
+    for a in agents {
+        let Some(record) = &a.ctx.record else {
+            continue;
+        };
+        let handle = &a.ctx.handle;
+        let verdict = match runner.inspect(&a.ctx.playbook).await {
+            Ok(facts) => match statement::drift(record, &facts, opts.statement_retention_days) {
+                Some(detail) => ListingVerdict::Drifted(detail),
+                None => ListingVerdict::Clean,
+            },
+            Err(e) => ListingVerdict::Held(e.to_string()),
+        };
+        match &verdict {
+            ListingVerdict::Drifted(detail) => {
+                if state.drift_reported.insert(handle.clone()) {
+                    out.push(HireOutcome::OperatorNeeded {
+                        row_id: handle.clone(),
+                        why: format!(
+                            "the listing {handle} drifted: {detail}; run `nearbee list` again"
+                        ),
+                    });
+                }
+            }
+            ListingVerdict::Clean => {
+                state.drift_reported.remove(handle);
+            }
+            ListingVerdict::Held(_) => {}
+        }
+        state.drift.insert(handle.clone(), verdict);
+    }
+    out
+}
+
+/// The listing's verdict for the hire this round, when the hire's
+/// current generation has not started its run yet (design 4.5): a hire
+/// of a drifted listing without a `run_start` intent is declined at
+/// once, a hire of a held listing waits, and a hire whose run already
+/// runs or ran is observed and delivered with the statement snapshotted
+/// at its start.
+fn listing_gate(v: &HireView<'_>, state: &RoundState) -> ListingGate {
+    let verdict = match state.drift.get(v.ctx.handle.as_str()) {
+        None | Some(ListingVerdict::Clean) => return ListingGate::Go,
+        Some(verdict) => verdict.clone(),
+    };
+    let records = gen_records(&v.j, current_generation(&v.j));
+    if open_intent(&records, "run_start").is_some() || last_observed(&records).is_some() {
+        return ListingGate::Go;
+    }
+    match verdict {
+        ListingVerdict::Drifted(detail) => ListingGate::Decline(detail),
+        ListingVerdict::Held(_) => ListingGate::Hold,
+        ListingVerdict::Clean => ListingGate::Go,
+    }
+}
+
+/// Writes the generation's statement snapshot when it is missing, and
+/// refuses a stale one (design 5.1): called before the market start of a
+/// first-time hire and before the apb start of any generation. A
+/// snapshot an earlier round left is reused only when its fingerprint
+/// and statement hash still equal the record's and the generation has
+/// not started its run yet. Returns the decline when the generation must
+/// not start.
+fn prepare_statement_snapshot(
+    v: &HireView<'_>,
+    w: &mut Writer,
+    state_dir: &Path,
+    generation: u32,
+    records: &[journal::Record],
+) -> Result<Option<HireOutcome>, ServeError> {
+    let Some(record) = v.ctx.record.clone() else {
+        return Ok(None);
+    };
+    // A record that is not serveable never starts a generation: it would
+    // freeze no statement, and the generation would deliver as legacy.
+    if !record.serveable() {
+        let (texts, attention) =
+            drift_decline_args("the listing record is not serveable; run `nearbee list` again");
+        return Ok(Some(waiting_decline(w, v, generation, texts, attention)?));
+    }
+    let row = v.row;
+    let existing =
+        journal::read_snapshot(state_dir, row.id.as_str(), generation, STATEMENT_SNAPSHOT).ok();
+    if let Some(bytes) = existing {
+        if open_intent(records, "run_start").is_none() {
+            let stale = serde_json::from_slice::<StatementSnapshot>(&bytes).map_or(true, |s| {
+                s.fingerprint != record.fingerprint || s.statement_sha256 != record.statement_sha256
+            });
+            if stale {
+                let (texts, attention) = drift_decline_args(
+                    "the generation's statement snapshot no longer matches the listing",
+                );
+                return Ok(Some(waiting_decline(w, v, generation, texts, attention)?));
+            }
+        }
+        return Ok(None);
+    }
+    let snapshot = StatementSnapshot {
+        tier: record.tier.map(|t| t.as_str().to_owned()),
+        statement: record.statement.clone(),
+        statement_sha256: record.statement_sha256.clone(),
+        statement_format: record.statement_format,
+        fingerprint: record.fingerprint.clone(),
+        evidence_models: record.evidence_models.clone(),
+    };
+    journal::write_snapshot(
+        state_dir,
+        row.id.as_str(),
+        generation,
+        STATEMENT_SNAPSHOT,
+        &serde_json::to_vec(&snapshot).expect("the statement snapshot serializes"),
+    )
+    .map_err(|e| ServeError::Other(e.to_string()))?;
+    Ok(None)
+}
+
+/// The statement a generation's snapshot froze, checked against the hash
+/// the run intent journaled (design 5.3): `Err` names why the statement
+/// is missing or does not match, and the hire is declined `failed` with
+/// attention `statement_missing`.
+fn snapshotted_statement(
+    state_dir: &Path,
+    row_id: &str,
+    generation: u32,
+    intent: Option<&Intent>,
+) -> Result<String, String> {
+    let want = intent.and_then(|i| i.refs.get("statement_sha256")).cloned();
+    let bytes = journal::read_snapshot(state_dir, row_id, generation, STATEMENT_SNAPSHOT)
+        .map_err(|e| format!("the generation's statement snapshot is unreadable: {e}"))?;
+    let snapshot: StatementSnapshot = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("the statement snapshot does not parse: {e}"))?;
+    let text = snapshot
+        .statement
+        .clone()
+        .ok_or_else(|| "the statement snapshot holds no statement".to_owned())?;
+    let hash = journal::sha256_hex(text.as_bytes());
+    if snapshot.statement_sha256.as_deref() != Some(hash.as_str()) {
+        return Err("the statement snapshot does not match its own hash".to_owned());
+    }
+    if let Some(want) = &want
+        && want != &hash
+    {
+        return Err(format!(
+            "the statement snapshot's hash {hash} does not match the run intent's {want}"
+        ));
+    }
+    Ok(text)
+}
+
+/// The long step pass 3 runs for one hire (design 1, 6.4).
+enum LongStep {
+    Scope,
+    Download,
+    Evidence(Phase, String),
+}
+
+/// The buyer text of a hire declined because its run evidence could not
+/// be collected (design 6.7).
+const BUYER_EVIDENCE: &str = "the run evidence could not be collected";
+
+/// The frozen evidence model set of an attested generation (design 6.5):
+/// the models its statement snapshot froze. `None` when the generation
+/// has no snapshot or is not attested (plain listings never reach the
+/// attestor).
+fn attested_set(state_dir: &Path, row_id: &str, generation: u32) -> Option<Vec<String>> {
+    let bytes = journal::read_snapshot(state_dir, row_id, generation, STATEMENT_SNAPSHOT).ok()?;
+    let s: StatementSnapshot = serde_json::from_slice(&bytes).ok()?;
+    (s.tier.as_deref() == Some("attested")).then_some(s.evidence_models)
+}
+
+/// Where one phase of a generation's evidence stands (design 6.3 to 6.5).
+#[derive(Debug, Default)]
+struct EvidenceView {
+    /// Reports with their record whose stored body matches it, in the
+    /// frozen set's order.
+    collected: Vec<EvidenceSnapshot>,
+    /// Models with neither a record nor a usable stored report.
+    missing: Vec<String>,
+    /// Stored reports that check out but whose record a crash lost.
+    unrecorded: Vec<EvidenceSnapshot>,
+    /// Models whose record exists but whose stored report is missing or
+    /// does not match it: never fetched again to stand in for it.
+    broken: Vec<String>,
+    /// The `evidence_failed` records of the phase in the generation.
+    failures: usize,
+}
+
+impl EvidenceView {
+    fn complete(&self) -> bool {
+        self.missing.is_empty() && self.unrecorded.is_empty() && self.broken.is_empty()
+    }
+}
+
+fn evidence_view(
+    state_dir: &Path,
+    row_id: &str,
+    generation: u32,
+    records: &[journal::Record],
+    phase: Phase,
+    models: &[String],
+) -> EvidenceView {
+    let mut view = EvidenceView {
+        failures: records
+            .iter()
+            .filter(|r| matches!(&r.event, Event::EvidenceFailed(f) if f.phase == phase.as_str()))
+            .count(),
+        ..EvidenceView::default()
+    };
+    for model in models {
+        let recorded = records.iter().rev().find_map(|r| match &r.event {
+            Event::EvidenceCollected(c) if c.phase == phase.as_str() && &c.model == model => {
+                Some(c.sha256.clone())
+            }
+            _ => None,
+        });
+        let stored = journal::read_snapshot(
+            state_dir,
+            row_id,
+            generation,
+            &evidence::snapshot_name(phase, model),
+        )
+        .ok()
+        .and_then(|b| EvidenceSnapshot::read_checked(&b, phase, model).ok());
+        match (recorded, stored) {
+            (Some(hash), Some(s)) if s.sha256 == hash => view.collected.push(s),
+            (Some(_), _) => view.broken.push(model.clone()),
+            (None, Some(s)) => view.unrecorded.push(s),
+            (None, None) => view.missing.push(model.clone()),
+        }
+    }
+    view
+}
+
+/// The evidence phase a hire's current generation collects now, with its
+/// frozen model set (design 6.5, 6.6): `start` while the generation waits
+/// for its run and has no `run_start` intent, `end` once its run
+/// succeeded and nothing was submitted or declined. `None` for a plain
+/// or settled generation.
+fn evidence_phase(v: &HireView<'_>, state_dir: &Path) -> Option<(Phase, Vec<String>)> {
+    if v.row.status() != RowStatus::InProgress {
+        return None;
+    }
+    let generation = current_generation(&v.j);
+    let records = gen_records(&v.j, generation);
+    let has_run_intent = records
+        .iter()
+        .any(|r| matches!(&r.event, Event::Intent(i) if i.kind == "run_start"));
+    let phase = match derive_gen_state(&records) {
+        GenState::Started | GenState::Fresh if !has_run_intent => Phase::Start,
+        GenState::RunFinished { observed, .. }
+            if RunStatus::parse(&observed.status).is_success() =>
+        {
+            Phase::End
+        }
+        _ => return None,
+    };
+    let models = attested_set(state_dir, &v.row.id, generation)?;
+    Some((phase, models))
+}
+
+/// Pass 3's evidence candidate of one hire: the first missing report of
+/// the phase it collects now, unless its failures already reached the
+/// decline. Reports a crash left stored without their record get the
+/// record here, with no fetch (spec `run-evidence`, Crash between file
+/// and record).
+fn evidence_due(v: &HireView<'_>, state_dir: &Path) -> Result<Option<(Phase, String)>, ServeError> {
+    let Some((phase, models)) = evidence_phase(v, state_dir) else {
+        return Ok(None);
+    };
+    let generation = current_generation(&v.j);
+    let records = gen_records(&v.j, generation);
+    let view = evidence_view(state_dir, &v.row.id, generation, &records, phase, &models);
+    if !view.unrecorded.is_empty() {
+        let mut w = Writer::open(journal::journal_path(state_dir, &v.row.id), &v.row.id)?;
+        w.set_generation(generation);
+        for s in &view.unrecorded {
+            w.append(Event::EvidenceCollected(journal::EvidenceCollected {
+                phase: phase.as_str().to_owned(),
+                model: s.model.clone(),
+                sha256: s.sha256.clone(),
+            }))?;
+        }
+    }
+    if view.failures >= evidence::MAX_FAILURES || !view.broken.is_empty() {
+        return Ok(None);
+    }
+    Ok(view.missing.first().map(|m| (phase, m.clone())))
+}
+
+/// Pass 3, one report fetch (design 6.4): skipped when the round's
+/// cut-off is nearer than the fetch bound; the stored report is written
+/// before its `evidence_collected` record; a failure is journaled, and the
+/// third failure of the phase declines the hire at once (design 6.7).
+async fn evidence_step<A: Attestor>(
+    attestor: &A,
+    v: &HireView<'_>,
+    state_dir: &Path,
+    clock: &Clock,
+    cutoff: Option<OffsetDateTime>,
+    phase: Phase,
+    model: &str,
+) -> Result<Option<HireOutcome>, ServeError> {
+    if cutoff.is_some_and(|c| {
+        std::time::Duration::try_from(c - clock.now()).unwrap_or_default() < evidence::FETCH_BOUND
+    }) {
+        return Ok(None);
+    }
+    let row = v.row;
+    let generation = current_generation(&v.j);
+    let records = gen_records(&v.j, generation);
+    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    w.set_generation(generation);
+    let fetched = match evidence::new_nonce() {
+        Ok(nonce) => {
+            // The attestor bounds itself; the outer timeout is a backstop.
+            let backstop = evidence::FETCH_BOUND + std::time::Duration::from_secs(5);
+            match tokio::time::timeout(backstop, attestor.report(model, &nonce)).await {
+                Ok(Ok(body)) => Ok((nonce, body)),
+                Ok(Err(reason)) => Err(reason),
+                Err(_) => Err("the fetch ran past its bound".to_owned()),
+            }
+        }
+        Err(reason) => Err(reason),
+    };
+    match fetched {
+        Ok((nonce, body)) => {
+            let snapshot = EvidenceSnapshot::new(model, phase, &nonce, clock.now(), &body);
+            journal::write_snapshot(
+                state_dir,
+                row.id.as_str(),
+                generation,
+                &evidence::snapshot_name(phase, model),
+                &snapshot.to_bytes(),
+            )
+            .map_err(|e| ServeError::Other(e.to_string()))?;
+            w.append(Event::EvidenceCollected(journal::EvidenceCollected {
+                phase: phase.as_str().to_owned(),
+                model: model.to_owned(),
+                sha256: snapshot.sha256,
+            }))?;
+            Ok(Some(HireOutcome::Left {
+                row_id: row.id.clone(),
+                why: "an endpoint attestation report was collected",
+            }))
+        }
+        Err(reason) => {
+            let reason = evidence::short_reason(&reason);
+            w.append(Event::EvidenceFailed(journal::EvidenceFailed {
+                phase: phase.as_str().to_owned(),
+                model: model.to_owned(),
+                reason: reason.clone(),
+            }))?;
+            let failures = 1 + records
+                .iter()
+                .filter(
+                    |r| matches!(&r.event, Event::EvidenceFailed(f) if f.phase == phase.as_str()),
+                )
+                .count();
+            if failures < evidence::MAX_FAILURES {
+                return Ok(Some(HireOutcome::Left {
+                    row_id: row.id.clone(),
+                    why: "an endpoint attestation report fetch failed; it is retried",
+                }));
+            }
+            let detail = format!(
+                "the {} endpoint attestation evidence could not be collected: {reason}",
+                phase.as_str()
+            );
+            Ok(Some(evidence_decline(
+                &mut w,
+                v,
+                generation,
+                phase,
+                "evidence_unavailable",
+                &detail,
+            )?))
+        }
+    }
+}
+
+/// Declines a generation whose evidence cannot be collected or is lost:
+/// a start-phase decline goes through [`waiting_decline`] (`rejected`
+/// for a first-time hire not started on the market, else `failed`), an
+/// end-phase one is always `failed`; both set the attention `code`.
+fn evidence_decline(
+    w: &mut Writer,
+    v: &HireView<'_>,
+    generation: u32,
+    phase: Phase,
+    code: &str,
+    detail: &str,
+) -> Result<HireOutcome, WriterError> {
+    if phase == Phase::Start
+        && !gen_records(&v.j, generation)
+            .iter()
+            .any(|r| matches!(&r.event, Event::Intent(i) if i.kind == "run_start"))
+    {
+        return waiting_decline(
+            w,
+            v,
+            generation,
+            (
+                detail.to_owned(),
+                BUYER_EVIDENCE.to_owned(),
+                detail.to_owned(),
+                BUYER_EVIDENCE.to_owned(),
+            ),
+            Some(code),
+        );
+    }
+    append_attention(w, &gen_records(&v.j, generation), code, detail)?;
+    open_decline_intent(w, v.row.id.as_str(), "failed", detail, BUYER_EVIDENCE)?;
+    Ok(HireOutcome::DeclinedFailed {
+        row_id: v.row.id.clone(),
+        reason: BUYER_EVIDENCE.to_owned(),
+    })
+}
+
+/// What the start preflight decides for an attested generation before
+/// its market start or apb start (design 6.5).
+enum EvidenceGate {
+    Go,
+    Wait,
+    Decline(HireOutcome),
+}
+
+/// The start preflight of design 6.5: a plain generation goes; an
+/// attested one waits until every start report of its frozen set is
+/// collected, and is declined when the phase failed three times
+/// (`evidence_unavailable`) or a recorded report is lost
+/// (`evidence_missing`).
+fn start_evidence_gate(
+    v: &HireView<'_>,
+    w: &mut Writer,
+    state_dir: &Path,
+    generation: u32,
+) -> Result<EvidenceGate, ServeError> {
+    let Some(models) = attested_set(state_dir, &v.row.id, generation) else {
+        return Ok(EvidenceGate::Go);
+    };
+    let records = gen_records(&v.j, generation);
+    let view = evidence_view(
+        state_dir,
+        &v.row.id,
+        generation,
+        &records,
+        Phase::Start,
+        &models,
+    );
+    if let Some(model) = view.broken.first() {
+        let detail =
+            format!("the stored start report of {model} is missing or does not match its record");
+        return Ok(EvidenceGate::Decline(evidence_decline(
+            w,
+            v,
+            generation,
+            Phase::Start,
+            "evidence_missing",
+            &detail,
+        )?));
+    }
+    if view.failures >= evidence::MAX_FAILURES {
+        return Ok(EvidenceGate::Decline(evidence_decline(
+            w,
+            v,
+            generation,
+            Phase::Start,
+            "evidence_unavailable",
+            "the start endpoint attestation evidence could not be collected",
+        )?));
+    }
+    Ok(if view.complete() {
+        EvidenceGate::Go
+    } else {
+        EvidenceGate::Wait
+    })
+}
+
+/// What delivery does with an attested generation's evidence (design
+/// 6.5, 6.6).
+enum EndEvidence {
+    /// The disclosure section to place before the statement.
+    Ready(String),
+    Wait,
+    /// (attention code, journal reason, buyer reason).
+    Decline(&'static str, String),
+}
+
+/// The evidence check of delivery: every start report must be stored and
+/// recorded (after the `run_start` intent a lost one is never fetched
+/// again: `evidence_missing`); the end reports are waited for, and the
+/// disclosure is rendered once all are in.
+fn end_evidence(
+    state_dir: &Path,
+    row_id: &str,
+    generation: u32,
+    records: &[journal::Record],
+    models: &[String],
+    attempts: &[crate::runner::AttemptModel],
+) -> EndEvidence {
+    let start = evidence_view(state_dir, row_id, generation, records, Phase::Start, models);
+    if !start.complete() {
+        let model = start
+            .broken
+            .iter()
+            .chain(start.missing.iter())
+            .chain(start.unrecorded.iter().map(|s| &s.model))
+            .next()
+            .cloned()
+            .unwrap_or_default();
+        return EndEvidence::Decline(
+            "evidence_missing",
+            format!("the start report of {model} is missing after the run started"),
+        );
+    }
+    let end = evidence_view(state_dir, row_id, generation, records, Phase::End, models);
+    if let Some(model) = end.broken.first() {
+        return EndEvidence::Decline(
+            "evidence_missing",
+            format!("the stored end report of {model} is missing or does not match its record"),
+        );
+    }
+    if end.failures >= evidence::MAX_FAILURES {
+        return EndEvidence::Decline(
+            "evidence_unavailable",
+            "the end endpoint attestation evidence could not be collected".to_owned(),
+        );
+    }
+    if !end.complete() {
+        return EndEvidence::Wait;
+    }
+    let collected = |v: &EvidenceView| -> Vec<evidence::Collected> {
+        v.collected.iter().map(evidence::Collected::from).collect()
+    };
+    EndEvidence::Ready(evidence::section(
+        models,
+        &collected(&start),
+        &collected(&end),
+        attempts,
+    ))
 }
 
 /// The kind of a generation: `first`, `rework` or `redo`.
@@ -2362,6 +3035,7 @@ async fn lookup_start<R: Runner>(
     } else if let Some(run) = lookup.runs.first() {
         let id = run.id.as_str().to_owned();
         w.append(Event::RunObserved(RunObserved {
+            attempts: Vec::new(),
             run_id: id.clone(),
             execution: intent.execution,
             status: "running".into(),
@@ -2497,6 +3171,7 @@ async fn record_terminal<R: Runner>(
         let back = w.generation();
         w.set_generation(g);
         w.append(Event::RunObserved(RunObserved {
+            attempts: detail.attempts.clone(),
             run_id: run_id.to_owned(),
             execution,
             status: detail.status.as_str().to_owned(),
@@ -2649,6 +3324,11 @@ async fn observe_run<M: Market, R: Runner>(
             (None, None, None)
         };
         w.append(Event::RunObserved(RunObserved {
+            attempts: if terminal {
+                detail.attempts.clone()
+            } else {
+                Vec::new()
+            },
             run_id: run_id.as_str().to_owned(),
             execution: generation,
             status: detail.status.as_str().to_owned(),
@@ -2770,6 +3450,7 @@ async fn observe_run<M: Market, R: Runner>(
             clock,
             records,
             RunObserved {
+                attempts: detail.attempts.clone(),
                 run_id: run_id.as_str().to_owned(),
                 execution: generation,
                 status: detail.status.as_str().to_owned(),
@@ -2996,6 +3677,7 @@ async fn confirm_aborts<R: Runner>(
                 w.set_generation(generation);
                 if !ended.contains(&a.run_id) {
                     w.append(Event::RunObserved(RunObserved {
+                        attempts: detail.attempts.clone(),
                         run_id: a.run_id.clone(),
                         execution,
                         status: detail.status.as_str().to_owned(),
@@ -3155,7 +3837,85 @@ async fn finish_terminal(
         observed.execution,
         latest_run_intent(&v.j).as_ref(),
     );
-    match validate_deliverable(&wt, limits, opts) {
+    // The footer the delivery appends (design 5.3, 5.4): a run intent
+    // without a statement hash is legacy (S3) and delivers as in S3;
+    // a statement generation whose snapshot is missing or does not
+    // match its hash fails closed.
+    let run_intent = records.iter().rev().find_map(|r| match &r.event {
+        Event::Intent(i) if i.kind == "run_start" => Some(i),
+        _ => None,
+    });
+    let legacy = run_intent.is_none_or(|i| !i.refs.contains_key("statement_sha256"));
+    let mut footer = if legacy {
+        None
+    } else {
+        match snapshotted_statement(state_dir, row.id.as_str(), generation, run_intent) {
+            Ok(text) => Some(text),
+            Err(detail) => {
+                append_attention(w, records, "statement_missing", &detail)?;
+                open_decline_intent(w, row.id.as_str(), "failed", &detail, BUYER_INVALID_RESULT)?;
+                return Ok(HireOutcome::DeclinedFailed {
+                    row_id: row.id.clone(),
+                    reason: BUYER_INVALID_RESULT.to_owned(),
+                });
+            }
+        }
+    };
+    // An attested generation (design 6.5, 6.6): the manifest is validated
+    // first, then delivery waits for every end report, and the disclosure
+    // goes before the statement. A legacy generation has no evidence.
+    if let Some(statement) = &footer
+        && let Some(models) = attested_set(state_dir, row.id.as_str(), generation)
+    {
+        if let Err((journal_reason, buyer)) = validate_deliverable(&wt, limits, opts, None) {
+            open_decline_intent(w, row.id.as_str(), "failed", &journal_reason, buyer)?;
+            return Ok(HireOutcome::DeclinedFailed {
+                row_id: row.id.clone(),
+                reason: buyer.to_owned(),
+            });
+        }
+        match end_evidence(
+            state_dir,
+            row.id.as_str(),
+            generation,
+            records,
+            &models,
+            &observed.attempts,
+        ) {
+            EndEvidence::Ready(section) => {
+                footer = Some(format!("{section}\n\n{statement}"));
+            }
+            EndEvidence::Wait => {
+                if generation_deadline(v, generation, opts, clock).is_some_and(|d| clock.now() >= d)
+                {
+                    open_decline_intent(
+                        w,
+                        row.id.as_str(),
+                        "failed",
+                        "the SLA deadline arrived before the run evidence was collected",
+                        BUYER_SLA,
+                    )?;
+                    return Ok(HireOutcome::DeclinedFailed {
+                        row_id: row.id.clone(),
+                        reason: BUYER_SLA.to_owned(),
+                    });
+                }
+                return Ok(HireOutcome::Left {
+                    row_id: row.id.clone(),
+                    why: "waiting for the end attestation reports",
+                });
+            }
+            EndEvidence::Decline(code, detail) => {
+                append_attention(w, records, code, &detail)?;
+                open_decline_intent(w, row.id.as_str(), "failed", &detail, BUYER_EVIDENCE)?;
+                return Ok(HireOutcome::DeclinedFailed {
+                    row_id: row.id.clone(),
+                    reason: BUYER_EVIDENCE.to_owned(),
+                });
+            }
+        }
+    }
+    match validate_deliverable(&wt, limits, opts, footer.as_deref()) {
         Ok(submission) => {
             let execution_id = intent_execution_id(records, &row.id, observed.execution);
             open_submit_intent(
@@ -3551,14 +4311,45 @@ async fn admit<M: Market, R: Runner>(
     if row.status() != RowStatus::InProgress {
         return Ok(None);
     }
+    // A hire of a listing that drifted this round, whose generation has
+    // not started its run, is declined at once; one of a listing whose
+    // facts could not be read waits (design 4.5).
+    match listing_gate(v, state) {
+        ListingGate::Go => {}
+        ListingGate::Decline(detail) => {
+            let (texts, attention) = drift_decline_args(&detail);
+            return Ok(Some(waiting_decline(
+                &mut w, v, generation, texts, attention,
+            )?));
+        }
+        ListingGate::Hold => {
+            return Ok(Some(HireOutcome::Left {
+                row_id: row.id.clone(),
+                why: "held: the listing's execution facts could not be read this round",
+            }));
+        }
+    }
     // The wall clock is checked again here, right before any start: a
     // long step earlier in this round may have run up to it (C8).
     if generation_deadline(v, generation, opts, clock).is_some_and(|d| clock.now() >= d) {
-        return Ok(Some(waiting_decline(&mut w, v, generation)?));
+        return Ok(Some(waiting_decline(
+            &mut w,
+            v,
+            generation,
+            (
+                "nothing was started before the deadline".to_owned(),
+                BUYER_WAITING.to_owned(),
+                "the generation could not start its run before the deadline".to_owned(),
+                BUYER_SLA.to_owned(),
+            ),
+            None,
+        )?));
     }
     // A gen-1 hire whose received record exists but whose market start
     // was never journaled still owes the market its start (the S2 crash
-    // rule): journal the intent and make the idempotent start now.
+    // rule): journal the intent and make the idempotent start now. The
+    // statement snapshot is written first (design 5.1): the market start
+    // of a first-time hire never precedes it.
     if waiting
         && generation == 1
         && !fresh_records
@@ -3566,6 +4357,18 @@ async fn admit<M: Market, R: Runner>(
             .any(|r| matches!(&r.event, Event::Intent(i) if i.kind == "market_start"))
         && row.started_at.is_none()
     {
+        if let Some(decline) =
+            prepare_statement_snapshot(v, &mut w, state_dir, generation, &fresh_records)?
+        {
+            return Ok(Some(decline));
+        }
+        // An attested generation's start reports precede its market start
+        // (design 6.5): it waits until every one is collected.
+        match start_evidence_gate(v, &mut w, state_dir, generation)? {
+            EvidenceGate::Go => {}
+            EvidenceGate::Wait => return Ok(None),
+            EvidenceGate::Decline(o) => return Ok(Some(o)),
+        }
         let operation_id = uuid_v7();
         w.append(Event::Intent(Intent {
             operation_id,
@@ -3601,6 +4404,24 @@ async fn admit<M: Market, R: Runner>(
         return Ok(Some(HireOutcome::DeclinedRejected {
             row_id: row.id.clone(),
         }));
+    }
+    // The generation's statement snapshot precedes the run intent
+    // (design 5.1): the apb start of any generation never precedes it,
+    // and a stale snapshot an earlier round left declines the hire. It is
+    // written before the files and the start preflight, so an attested
+    // generation's start reports, frozen with it, can be collected while
+    // its files download.
+    if let Some(decline) =
+        prepare_statement_snapshot(v, &mut w, state_dir, generation, &fresh_records)?
+    {
+        return Ok(Some(decline));
+    }
+    // An attested generation's start reports precede its apb start
+    // (design 6.5): it waits until every one is collected.
+    match start_evidence_gate(v, &mut w, state_dir, generation)? {
+        EvidenceGate::Go => {}
+        EvidenceGate::Wait => return Ok(None),
+        EvidenceGate::Decline(o) => return Ok(Some(o)),
     }
     let ctx = &v.ctx;
     let execution = if rework_waiting { generation } else { 1 };
@@ -3755,8 +4576,20 @@ async fn admit<M: Market, R: Runner>(
     };
     // The wall clock once more, right before the apb start (C8).
     if generation_deadline(v, generation, opts, clock).is_some_and(|d| clock.now() >= d) {
-        return Ok(Some(waiting_decline(&mut w, v, generation)?));
+        return Ok(Some(waiting_decline(
+            &mut w,
+            v,
+            generation,
+            (
+                "nothing was started before the deadline".to_owned(),
+                BUYER_WAITING.to_owned(),
+                "the generation could not start its run before the deadline".to_owned(),
+                BUYER_SLA.to_owned(),
+            ),
+            None,
+        )?));
     }
+    let record = v.ctx.record.clone();
     // The run request snapshot precedes the intent (design 2).
     let budget_json = budget
         .as_ref()
@@ -3780,29 +4613,44 @@ async fn admit<M: Market, R: Runner>(
     )
     .map_err(|e| ServeError::Other(e.to_string()))?;
     let run_intent_id = uuid_v7();
+    let mut intent_refs = BTreeMap::from([
+        ("execution_id".into(), execution_id.as_str().to_owned()),
+        ("worktree".into(), wt.to_string_lossy().to_string()),
+        ("playbook_version".into(), ctx.playbook_version.clone()),
+        ("playbook_sha256".into(), ctx.playbook_sha256.clone()),
+        (
+            "sla_deadline_at".into(),
+            row.sla_deadline_at.map(rfc3339).unwrap_or_default(),
+        ),
+        (
+            "budget_usd".into(),
+            budget
+                .as_ref()
+                .and_then(|b| b.usd)
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        ),
+    ]);
+    // The statement the generation froze (design 5.2), only for a
+    // listing with a record: a run intent without the statement hash
+    // reads as legacy (S3) at delivery, so an absent field stays absent.
+    if let Some(r) = &record {
+        if let Some(t) = r.tier {
+            intent_refs.insert("tier".into(), t.as_str().to_owned());
+        }
+        if let Some(h) = &r.statement_sha256 {
+            intent_refs.insert("statement_sha256".into(), h.clone());
+        }
+        if let Some(f) = &r.fingerprint {
+            intent_refs.insert("fingerprint".into(), f.clone());
+        }
+    }
     w.append(Event::Intent(Intent {
         operation_id: run_intent_id,
         kind: "run_start".into(),
         execution,
         request_digest: sha_of(&body.to_string()),
-        refs: BTreeMap::from([
-            ("execution_id".into(), execution_id.as_str().to_owned()),
-            ("worktree".into(), wt.to_string_lossy().to_string()),
-            ("playbook_version".into(), ctx.playbook_version.clone()),
-            ("playbook_sha256".into(), ctx.playbook_sha256.clone()),
-            (
-                "sla_deadline_at".into(),
-                row.sla_deadline_at.map(rfc3339).unwrap_or_default(),
-            ),
-            (
-                "budget_usd".into(),
-                budget
-                    .as_ref()
-                    .and_then(|b| b.usd)
-                    .map(|d| d.to_string())
-                    .unwrap_or_default(),
-            ),
-        ]),
+        refs: intent_refs,
     }))?;
     let mut req = start_request(
         ctx,
@@ -3819,6 +4667,7 @@ async fn admit<M: Market, R: Runner>(
     match runner.start(req).await {
         Ok(id) => {
             w.append(Event::RunObserved(RunObserved {
+                attempts: Vec::new(),
                 run_id: id.as_str().to_owned(),
                 execution,
                 status: "running".into(),
@@ -4001,6 +4850,19 @@ fn intake_short(
         }));
     }
     if !intake_owed(row, &records) || intake_complete(&records) {
+        // A hire already past intake still declines when its listing
+        // drifted this round and its generation has not started (design
+        // 4.5); a decided hire is never reopened.
+        if !decided(&records)
+            && let ListingGate::Decline(detail) = listing_gate(v, state)
+        {
+            let (texts, attention) = drift_decline_args(&detail);
+            let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+            w.set_generation(1);
+            return Ok(IntakeStep::Outcome(waiting_decline(
+                &mut w, v, 1, texts, attention,
+            )?));
+        }
         return Ok(IntakeStep::Nothing);
     }
     let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
@@ -4019,6 +4881,19 @@ fn intake_short(
                 row_id: row.id.clone(),
             }));
         }
+    }
+    // A hire of a listing that drifted this round is declined at once,
+    // before any check, scope question or market start; one of a listing
+    // whose facts could not be read runs no check this round (design 4.5).
+    match listing_gate(v, state) {
+        ListingGate::Go => {}
+        ListingGate::Decline(detail) => {
+            let (texts, attention) = drift_decline_args(&detail);
+            return Ok(IntakeStep::Outcome(waiting_decline(
+                &mut w, v, 1, texts, attention,
+            )?));
+        }
+        ListingGate::Hold => return Ok(IntakeStep::Nothing),
     }
     let done: BTreeSet<String> = intake_records(&records)
         .iter()
@@ -4061,6 +4936,18 @@ fn intake_short(
     if !done.contains(intake::COST) {
         let o = intake::cost_admission(cost::ceiling(row, ctx.price_usd), ctx.protection);
         if let Some(out) = record_intake(&mut w, row, intake::COST, &o, clock)? {
+            return Ok(IntakeStep::Outcome(out));
+        }
+    }
+    // The deterministic intake check of the listing (design 8.1, spec
+    // `repo-audit`, Deterministic intake check): run before the scope
+    // check, declining `rejected` with the buyer text.
+    if !done.contains(intake::GITHUB_REPO)
+        && ctx.record.as_ref().and_then(|r| r.intake_check)
+            == Some(listing::IntakeCheck::GithubRepo)
+    {
+        let o = intake::github_repo_check(&intake::brief_text(row));
+        if let Some(out) = record_intake(&mut w, row, intake::GITHUB_REPO, &o, clock)? {
             return Ok(IntakeStep::Outcome(out));
         }
     }
@@ -4644,6 +5531,9 @@ const BUYER_SUBMIT_REFUSED: &str = "the market refused the result";
 const BUYER_REFUSED_SECRET: &str = "the deliverable was refused by a local safety check";
 const BUYER_WAITING: &str = intake::TEXT_WAITING;
 const BUYER_INPUTS: &str = "the attached files could not be used";
+/// The buyer text of a drifted listing (design 4.5): the hire was never
+/// taken, the listing must be listed again first.
+const BUYER_LISTING_DRIFT: &str = "the listing is being updated; you are refunded in full.";
 /// The attention code of a manifest with output files (C11).
 const UNSUPPORTED_OUTPUT: &str = "unsupported_output";
 /// The fixed run instruction: the brief is data (the untrusted `brief`
@@ -4658,13 +5548,16 @@ struct Submission {
     deliverable: String,
 }
 
-/// Validates the manifest and scans the deliverable for secrets. `Ok` is
-/// the submission; `Err` is (journal-only reason, buyer reason) for the
+/// Validates the manifest, appends the statement footer (design 5.4)
+/// when one is due, and scans the assembled text for secrets. `Ok` is
+/// the submission (its `markdown` is the assembled text the snapshot
+/// freezes); `Err` is (journal-only reason, buyer reason) for the
 /// decline intent.
 fn validate_deliverable(
     wt: &Path,
     limits: &Limits,
     opts: &ServeOptions,
+    statement: Option<&str>,
 ) -> Result<Submission, (String, &'static str)> {
     let validated = manifest::validate(wt, limits).map_err(|e| {
         (
@@ -4683,7 +5576,20 @@ fn validate_deliverable(
             BUYER_INVALID_RESULT,
         ));
     }
-    let markdown = validated.markdown_text;
+    let mut markdown = validated.markdown_text;
+    // The footer: a horizontal rule, then the snapshotted statement
+    // (design 5.4). The assembled text is what the limit and the secret
+    // scan see, and what the submission snapshot freezes.
+    if let Some(statement) = statement {
+        markdown.push_str("\n\n---\n\n");
+        markdown.push_str(statement);
+        if let Err(e) = manifest::check_final_markdown(&markdown, limits) {
+            return Err((
+                format!("the deliverable with its statement does not pass the final check: {e}"),
+                BUYER_INVALID_RESULT,
+            ));
+        }
+    }
     // Secret scan before anything leaves the process: an `aat_` token, a
     // configured secret or a stored agent token refuses the deliverable.
     if let Some(offender) = scan_secrets(&markdown, opts) {
@@ -4900,6 +5806,7 @@ pub fn load_contexts(
         out.insert(
             r.handle.clone(),
             ListingContext {
+                record: Some(r.clone()),
                 handle: r.handle,
                 agent_id: r.agent_id,
                 playbook: PlaybookId::new(r.playbook_id),
@@ -5033,6 +5940,7 @@ mod tests {
     fn the_secret_scan_names_the_class_not_the_value() {
         let opts = ServeOptions {
             forbidden: vec!["super-secret-api-key-value".into()],
+            statement_retention_days: 7,
             ..Default::default()
         };
         assert_eq!(
@@ -5050,6 +5958,7 @@ mod tests {
                 "text with abc",
                 &ServeOptions {
                     forbidden: vec!["abc".into()],
+                    statement_retention_days: 7,
                     ..Default::default()
                 }
             ),

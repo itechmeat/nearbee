@@ -5,9 +5,11 @@
 //! `nearbee-market`) implement the traits defined here.
 
 pub mod attachments;
+pub mod catalog;
 pub mod config;
 pub mod cost;
 pub mod credentials;
+pub mod evidence;
 pub mod intake;
 pub mod journal;
 pub mod listing;
@@ -19,6 +21,8 @@ pub mod retention;
 pub mod runner;
 pub mod secret;
 pub mod serve;
+pub mod statement;
+pub mod tiers;
 
 pub use market::Market;
 pub use runner::Runner;

@@ -1,0 +1,985 @@
+{
+ "apb_version": "apb 1.0.0-beta.6",
+ "captured_at": "2026-11-09T19:53:34Z",
+ "request": {
+  "body": null,
+  "method": "GET",
+  "path": "/api/runs/run-attempt-one",
+  "query": [
+   [
+    "workspace",
+    "ws-c0188762df734bf4a1f03f8db22f19d7"
+   ]
+  ]
+ },
+ "response": {
+  "body": {
+   "answer": null,
+   "attempt_models": [
+    {
+     "node": "write",
+     "attempt": 1,
+     "executed_by": "host",
+     "agent": "opencode",
+     "requested_model": "nearai/Qwen/Qwen3.8-27B",
+     "reported": {
+      "kind": "one",
+      "model": "nearai/Qwen/Qwen3.8-27B"
+     }
+    }
+   ],
+   "budget": {
+    "limit": {
+     "usd": 0.5
+    },
+    "on_no_estimate": "continue",
+    "sets": 1,
+    "source": "run",
+    "usd": {
+     "remaining": 0.49749286,
+     "spent": 0.00250714,
+     "unknown_attempts": 0
+    }
+   },
+   "children": [],
+   "driven_by": "driven by apb 1.0.0-beta.6",
+   "driver_alive": null,
+   "estimate": {
+    "comparable": {
+     "attempts_without_cost": 0,
+     "attempts_without_usage": 0,
+     "key_version": 2,
+     "runs": 2,
+     "runs_without_usage": 0,
+     "succeeded": 0,
+     "window": 50
+    },
+    "cost_usd": null,
+    "execution": "cli",
+    "nodes": [
+     {
+      "node": "write",
+      "per_attempt_p50": {},
+      "per_run": {
+       "cost_usd": {
+        "high": 0.0,
+        "kind": "min_max",
+        "low": 0.0,
+        "n": 2,
+        "p50": 0.0
+       },
+       "ms": {
+        "high": 0,
+        "kind": "min_max",
+        "low": 0,
+        "n": 2,
+        "p50": 0
+       },
+       "tokens": {
+        "high": 0,
+        "kind": "min_max",
+        "low": 0,
+        "n": 2,
+        "p50": 0
+       }
+      },
+      "per_visit": {},
+      "visits_p50": 0.0
+     }
+    ],
+    "note": "2 comparable runs: indicative only",
+    "playbook": "smoke-own",
+    "time": {
+     "basis": "declared",
+     "spread": {
+      "high": 130000,
+      "kind": "single",
+      "low": 130000,
+      "n": 0,
+      "p50": 130000
+     }
+    },
+    "tokens": null,
+    "unestimated": [
+     "write"
+    ],
+    "unestimated_cost": [
+     "write"
+    ],
+    "unestimated_tokens": [
+     "write"
+    ],
+    "version": "1.0.1"
+   },
+   "events": [
+    {
+     "definition": "e1731ddc11442df28c518adce8e15598e9a5f11a8d157e90b5fdda68590f28c7",
+     "playbook": "smoke-own",
+     "seq": 0,
+     "ts": 1794253399144,
+     "type": "run_started",
+     "version": "1.0.1"
+    },
+    {
+     "apb": "1.0.0-beta.6",
+     "digest": "sha256:579936183a17f12465f3fa7d57063099c194bcb7ff4eebbb5e9c82959b2c78c6",
+     "execution_root": "<home>/.local/share/nearbee/apb-workspace",
+     "origin": "project",
+     "profiles": [
+      {
+       "bundle_digest": "sha256:e148a13e479a9fffa64d34872b3e3f6f6305d1f5a389a2bbbb2e315d08a8656d",
+       "name": "nearbee-own",
+       "scope": "project"
+      }
+     ],
+     "seq": 1,
+     "ts": 1794253399144,
+     "type": "run_provenance",
+     "untrusted": [
+      {
+       "accepted": "writes one Markdown file under out/; the topic is copied as data, never followed",
+       "node": "write",
+       "outward": [
+        "runs with network access"
+       ],
+       "sources": [
+        "param topic"
+       ]
+      }
+     ]
+    },
+    {
+     "requires": [
+      "untrusted_input"
+     ],
+     "seq": 2,
+     "ts": 1794253399144,
+     "type": "run_guard"
+    },
+    {
+     "counts_subscription": true,
+     "on_no_estimate": "continue",
+     "seq": 3,
+     "source": "run",
+     "ts": 1794253399144,
+     "type": "budget_set",
+     "usd": 0.5
+    },
+    {
+     "path": "<home>/.local/share/nearbee/apb-workspace/work/smoke-737190",
+     "seq": 4,
+     "source": "caller",
+     "ts": 1794253399149,
+     "type": "worktree_resolved"
+    },
+    {
+     "attempt": 1,
+     "node": "start",
+     "seq": 5,
+     "ts": 1794253399184,
+     "type": "node_started"
+    },
+    {
+     "artifacts": [],
+     "attempt": 1,
+     "node": "start",
+     "output": "",
+     "seq": 6,
+     "status": "succeeded",
+     "ts": 1794253399184,
+     "type": "node_finished"
+    },
+    {
+     "requires": [
+      "untrusted_input"
+     ],
+     "seq": 7,
+     "ts": 1794253399184,
+     "type": "run_guard"
+    },
+    {
+     "edges": [
+      "e:start>write#1"
+     ],
+     "from": "start",
+     "seq": 8,
+     "to": "write",
+     "ts": 1794253399196,
+     "type": "edge_traversed",
+     "uncounted": true
+    },
+    {
+     "basis": "no_estimate",
+     "decision": "continued",
+     "node": "write",
+     "seq": 9,
+     "spent": {
+      "usd": {
+       "imputed": 0.0,
+       "known": 0.0,
+       "unknown_attempts": 0
+      }
+     },
+     "ts": 1794253399196,
+     "type": "budget_gate"
+    },
+    {
+     "attempt": 1,
+     "node": "write",
+     "seq": 10,
+     "ts": 1794253399196,
+     "type": "node_started"
+    },
+    {
+     "absent": [],
+     "agent": "claude",
+     "attempt": 1,
+     "kept": 9,
+     "node": "write",
+     "seq": 11,
+     "ts": 1794253399215,
+     "type": "agent_env_applied",
+     "withheld": [
+      "BUN_INSTALL",
+      "DBUS_SESSION_BUS_ADDRESS",
+      "DEBUGINFOD_URLS",
+      "DECIDE_API_KEY",
+      "DECIDE_AUTO_ORDER",
+      "DECIDE_BASE_URL",
+      "DECIDE_COMPATIBLE_MAX_STATE_TOKENS",
+      "DECIDE_COMPATIBLE_MODEL",
+      "DESKTOP_SESSION",
+      "DISPLAY",
+      "GDMSESSION",
+      "GNOME_DESKTOP_SESSION_ID",
+      "GNOME_SETUP_DISPLAY",
+      "GPG_AGENT_INFO",
+      "GTK_MODULES",
+      "IM_CONFIG_ENTRY",
+      "INVOCATION_ID",
+      "JOURNAL_STREAM",
+      "MANAGERPID",
+      "MANAGERPIDFDID",
+      "MEMORY_PRESSURE_WATCH",
+      "MEMORY_PRESSURE_WRITE",
+      "NEARAI_API_KEY",
+      "PWD",
+      "QT_ACCESSIBILITY",
+      "QT_IM_MODULE",
+      "QT_IM_MODULES",
+      "SHLVL",
+      "SSH_AUTH_SOCK",
+      "SYSTEMD_EXEC_PID",
+      "TYPESAFE_API_KEY",
+      "USERNAME",
+      "WAYLAND_DISPLAY",
+      "XAUTHORITY",
+      "XDG_CONFIG_DIRS",
+      "XDG_CURRENT_DESKTOP",
+      "XDG_DATA_DIRS",
+      "XDG_MENU_PREFIX",
+      "XDG_SESSION_CLASS",
+      "XDG_SESSION_DESKTOP",
+      "XDG_SESSION_EXTRA_DEVICE_ACCESS",
+      "XDG_SESSION_TYPE",
+      "XMODIFIERS"
+     ],
+     "withheld_more": 0
+    },
+    {
+     "agent": "claude",
+     "attempt": 1,
+     "exec": {
+      "binding": "fc438b49db0aabcef539f96db4a988e785685988e88637d811e51ba4639afc9b",
+      "executed_by": "cli",
+      "source": {
+       "kind": "primary"
+      },
+      "step": 0
+     },
+     "model": "claude-haiku-5-5",
+     "node": "write",
+     "pid": 737462,
+     "seq": 12,
+     "skills_mode": "advisory",
+     "soul_delivery": "native",
+     "spawn_ms": 0,
+     "token": "7yjvebrzendvral7zazqwyff",
+     "transcript": "attempts/write-1",
+     "ts": 1794253399216,
+     "type": "attempt_started",
+     "workdir": "<home>/.local/share/nearbee/apb-workspace/work/smoke-737190"
+    },
+    {
+     "attempt": 1,
+     "node": "write",
+     "seq": 13,
+     "ts": 1794253407282,
+     "type": "attempt_exited"
+    },
+    {
+     "attempt": 1,
+     "duration_ms": 8106,
+     "node": "write",
+     "seq": 14,
+     "session": "9c3c0e9e-3c22-4599-bd28-a2d0e1da65d8",
+     "status": "succeeded",
+     "summary": "Wrote out/deliverable.md (3 lines, heading plus two sentences on honey bees).",
+     "ts": 1794253407323,
+     "type": "attempt_finished",
+     "usage": {
+      "cache_read_tokens": 50384,
+      "cache_write_tokens": 8621,
+      "cost_basis": "subscription_equivalent",
+      "cost_usd": 0.00250714,
+      "input_tokens": 6,
+      "output_tokens": 557,
+      "source": "reported"
+     }
+    },
+    {
+     "artifacts": [],
+     "attempt": 1,
+     "node": "write",
+     "output": "I wrote `out/deliverable.md` with a level-one heading and two sentences, each on its own line, and nothing else in the repo changed.",
+     "seq": 15,
+     "status": "succeeded",
+     "ts": 1794253407326,
+     "type": "node_finished"
+    },
+    {
+     "requires": [
+      "untrusted_input"
+     ],
+     "seq": 16,
+     "ts": 1794253407326,
+     "type": "run_guard"
+    },
+    {
+     "edges": [
+      "e:write>manifest#1"
+     ],
+     "from": "write",
+     "seq": 17,
+     "to": "manifest",
+     "ts": 1794253407337,
+     "type": "edge_traversed",
+     "uncounted": true
+    },
+    {
+     "attempt": 1,
+     "node": "manifest",
+     "seq": 18,
+     "ts": 1794253407337,
+     "type": "node_started"
+    },
+    {
+     "artifacts": [],
+     "attempt": 1,
+     "node": "manifest",
+     "output": "manifest: deliverable.md 167 bytes sha256 da8cb8ec7897093f39ea4041fb06057b8f75d19e36362c7ee9e2d4167a51c871",
+     "seq": 19,
+     "status": "succeeded",
+     "ts": 1794253407397,
+     "type": "node_finished"
+    },
+    {
+     "requires": [
+      "untrusted_input"
+     ],
+     "seq": 20,
+     "ts": 1794253407397,
+     "type": "run_guard"
+    },
+    {
+     "edges": [
+      "e:manifest>done#1"
+     ],
+     "from": "manifest",
+     "seq": 21,
+     "to": "done",
+     "ts": 1794253407408,
+     "type": "edge_traversed",
+     "uncounted": true
+    },
+    {
+     "artifacts": [],
+     "attempt": 1,
+     "node": "done",
+     "output": "",
+     "seq": 22,
+     "status": "succeeded",
+     "ts": 1794253407408,
+     "type": "node_finished"
+    },
+    {
+     "requires": [
+      "untrusted_input"
+     ],
+     "seq": 23,
+     "ts": 1794253407408,
+     "type": "run_guard"
+    },
+    {
+     "outcome": "succeeded",
+     "seq": 24,
+     "ts": 1794253407410,
+     "type": "run_finished"
+    },
+    {
+     "requires": [
+      "untrusted_input"
+     ],
+     "seq": 25,
+     "ts": 1794253407410,
+     "type": "run_guard"
+    }
+   ],
+   "execution": "cli",
+   "execution_fallback": false,
+   "failure_reason": null,
+   "graph": {
+    "edges": [
+     {
+      "count": 1,
+      "edge": {
+       "from": "start",
+       "kind": "derived",
+       "ordinal": 1,
+       "to": "write"
+      },
+      "from": "start",
+      "rendered": "e:start>write#1",
+      "segment": 0,
+      "state": "taken",
+      "to": "write"
+     },
+     {
+      "count": 1,
+      "edge": {
+       "from": "write",
+       "kind": "derived",
+       "ordinal": 1,
+       "to": "manifest"
+      },
+      "from": "write",
+      "rendered": "e:write>manifest#1",
+      "segment": 0,
+      "state": "taken",
+      "to": "manifest"
+     },
+     {
+      "count": 1,
+      "edge": {
+       "from": "manifest",
+       "kind": "derived",
+       "ordinal": 1,
+       "to": "done"
+      },
+      "from": "manifest",
+      "rendered": "e:manifest>done#1",
+      "segment": 0,
+      "state": "taken",
+      "to": "done"
+     }
+    ],
+    "ended": true,
+    "judge_edges": [],
+    "judge_nodes": [],
+    "nodes": [
+     {
+      "by_status": {
+       "succeeded": 1
+      },
+      "cancelled": 0,
+      "executions": 1,
+      "in_definition": true,
+      "last_status": "succeeded",
+      "node": "start",
+      "open": 0,
+      "status": "succeeded"
+     },
+     {
+      "by_status": {
+       "succeeded": 1
+      },
+      "cancelled": 0,
+      "executions": 1,
+      "in_definition": true,
+      "last_status": "succeeded",
+      "node": "write",
+      "open": 0,
+      "status": "succeeded"
+     },
+     {
+      "by_status": {
+       "succeeded": 1
+      },
+      "cancelled": 0,
+      "executions": 1,
+      "in_definition": true,
+      "last_status": "succeeded",
+      "node": "manifest",
+      "open": 0,
+      "status": "succeeded"
+     },
+     {
+      "by_status": {
+       "succeeded": 1
+      },
+      "cancelled": 0,
+      "executions": 1,
+      "in_definition": true,
+      "last_status": "succeeded",
+      "node": "done",
+      "open": 0,
+      "status": "succeeded"
+     }
+    ],
+    "not_run": [],
+    "segments": [
+     {
+      "digest": "e1731ddc11442df28c518adce8e15598e9a5f11a8d157e90b5fdda68590f28c7",
+      "from_seq": 0,
+      "index": 0,
+      "known": true,
+      "mismatch_recorded": false,
+      "opened_by": "start",
+      "reason": null,
+      "to_seq": null
+     }
+    ],
+    "shown_segment": 0,
+    "traversals": [
+     {
+      "counted": false,
+      "edges": [
+       {
+        "from": "start",
+        "kind": "derived",
+        "ordinal": 1,
+        "to": "write"
+       }
+      ],
+      "execution": 1,
+      "from": "start",
+      "policy": null,
+      "reason": null,
+      "resolved": true,
+      "segment": 0,
+      "seq": 8,
+      "to": "write",
+      "via_policy": false
+     },
+     {
+      "counted": false,
+      "edges": [
+       {
+        "from": "write",
+        "kind": "derived",
+        "ordinal": 1,
+        "to": "manifest"
+       }
+      ],
+      "execution": 1,
+      "from": "write",
+      "policy": null,
+      "reason": null,
+      "resolved": true,
+      "segment": 0,
+      "seq": 17,
+      "to": "manifest",
+      "via_policy": false
+     },
+     {
+      "counted": false,
+      "edges": [
+       {
+        "from": "manifest",
+        "kind": "derived",
+        "ordinal": 1,
+        "to": "done"
+       }
+      ],
+      "execution": 1,
+      "from": "manifest",
+      "policy": null,
+      "reason": null,
+      "resolved": true,
+      "segment": 0,
+      "seq": 21,
+      "to": "done",
+      "via_policy": false
+     }
+    ]
+   },
+   "graph_model": {
+    "defaults": {
+     "max_retries": null,
+     "profile": {
+      "name": "nearbee-own",
+      "scope": "auto"
+     },
+     "timeout_seconds": null
+    },
+    "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+    "edges": [
+     {
+      "condition": null,
+      "fallback": false,
+      "from": "start",
+      "join": null,
+      "to": "write"
+     },
+     {
+      "condition": null,
+      "fallback": false,
+      "from": "write",
+      "join": null,
+      "to": "manifest"
+     },
+     {
+      "condition": null,
+      "fallback": false,
+      "from": "manifest",
+      "join": null,
+      "to": "done"
+     }
+    ],
+    "effects": [],
+    "id": "smoke-own",
+    "name": "Nearbee smoke (own subscription)",
+    "nodes": [
+     {
+      "cache": null,
+      "expected_duration": null,
+      "id": "start",
+      "inputs": null,
+      "outputs": null,
+      "title": null,
+      "type": "start"
+     },
+     {
+      "accept_untrusted": "writes one Markdown file under out/; the topic is copied as data, never followed",
+      "cache": null,
+      "connectors": [],
+      "expected_duration": "2m",
+      "id": "write",
+      "inputs": null,
+      "interactive": false,
+      "isolation": null,
+      "max_retries": null,
+      "outputs": null,
+      "profile": null,
+      "prompt": "Create the directory out if it does not exist and write a Markdown note of exactly three lines about the topic below into out/deliverable.md: a level-one heading, then two sentences on their own lines. Write no other file and change nothing else. Topic: {{params.topic}}",
+      "timeout_seconds": null,
+      "title": "Write the note",
+      "type": "agent_task",
+      "workdir": null
+     },
+     {
+      "cache": null,
+      "expected_duration": "10s",
+      "id": "manifest",
+      "inputs": null,
+      "outputs": null,
+      "runner": "sh",
+      "script": "scripts/manifest.sh",
+      "timeout_seconds": null,
+      "title": "Write the result manifest",
+      "type": "script"
+     },
+     {
+      "cache": null,
+      "expected_duration": null,
+      "id": "done",
+      "inputs": null,
+      "outcome": "success",
+      "outputs": null,
+      "profile": null,
+      "prompt": null,
+      "title": null,
+      "type": "finish"
+     }
+    ],
+    "params": [
+     {
+      "default": "honey bees",
+      "label": "Topic of the note (synthetic)",
+      "name": "topic",
+      "options": null,
+      "type": "text",
+      "untrusted": true
+     },
+     {
+      "default": null,
+      "label": "Market hire id",
+      "name": "hire_id",
+      "options": null,
+      "search": true,
+      "type": "text"
+     },
+     {
+      "default": null,
+      "label": "Nearbee execution id",
+      "name": "execution_id",
+      "options": null,
+      "search": true,
+      "type": "text"
+     }
+    ],
+    "requires": null,
+    "schema": 2,
+    "supervisor": null,
+    "trigger": null,
+    "version": "1.0.1"
+   },
+   "hooks": {},
+   "instruction": "Synthetic smoke run for the Nearbee fixtures.",
+   "launch": {
+    "billing": {
+     "allowed": [
+      "subscription_equivalent"
+     ],
+     "confirmed": [],
+     "sources": [
+      "default"
+     ]
+    },
+    "initiator": "dashboard_keyless",
+    "kind": "start",
+    "policy": "allow",
+    "sources": [
+     "default"
+    ]
+   },
+   "layout": null,
+   "model": {
+    "defaults": {
+     "max_retries": null,
+     "profile": {
+      "name": "nearbee-own",
+      "scope": "auto"
+     },
+     "timeout_seconds": null
+    },
+    "description": "Writes a three-line Markdown note about a synthetic topic into out/deliverable.md, then a script writes the Nearbee result manifest out/result.json with the file's real size and SHA-256.",
+    "edges": [
+     {
+      "condition": null,
+      "fallback": false,
+      "from": "start",
+      "join": null,
+      "to": "write"
+     },
+     {
+      "condition": null,
+      "fallback": false,
+      "from": "write",
+      "join": null,
+      "to": "manifest"
+     },
+     {
+      "condition": null,
+      "fallback": false,
+      "from": "manifest",
+      "join": null,
+      "to": "done"
+     }
+    ],
+    "effects": [],
+    "id": "smoke-own",
+    "name": "Nearbee smoke (own subscription)",
+    "nodes": [
+     {
+      "cache": null,
+      "expected_duration": null,
+      "id": "start",
+      "inputs": null,
+      "outputs": null,
+      "title": null,
+      "type": "start"
+     },
+     {
+      "accept_untrusted": "writes one Markdown file under out/; the topic is copied as data, never followed",
+      "cache": null,
+      "connectors": [],
+      "expected_duration": "2m",
+      "id": "write",
+      "inputs": null,
+      "interactive": false,
+      "isolation": null,
+      "max_retries": null,
+      "outputs": null,
+      "profile": null,
+      "prompt": "Create the directory out if it does not exist and write a Markdown note of exactly three lines about the topic below into out/deliverable.md: a level-one heading, then two sentences on their own lines. Write no other file and change nothing else. Topic: {{params.topic}}",
+      "timeout_seconds": null,
+      "title": "Write the note",
+      "type": "agent_task",
+      "workdir": null
+     },
+     {
+      "cache": null,
+      "expected_duration": "10s",
+      "id": "manifest",
+      "inputs": null,
+      "outputs": null,
+      "runner": "sh",
+      "script": "scripts/manifest.sh",
+      "timeout_seconds": null,
+      "title": "Write the result manifest",
+      "type": "script"
+     },
+     {
+      "cache": null,
+      "expected_duration": null,
+      "id": "done",
+      "inputs": null,
+      "outcome": "success",
+      "outputs": null,
+      "profile": null,
+      "prompt": null,
+      "title": null,
+      "type": "finish"
+     }
+    ],
+    "params": [
+     {
+      "default": "honey bees",
+      "label": "Topic of the note (synthetic)",
+      "name": "topic",
+      "options": null,
+      "type": "text",
+      "untrusted": true
+     },
+     {
+      "default": null,
+      "label": "Market hire id",
+      "name": "hire_id",
+      "options": null,
+      "search": true,
+      "type": "text"
+     },
+     {
+      "default": null,
+      "label": "Nearbee execution id",
+      "name": "execution_id",
+      "options": null,
+      "search": true,
+      "type": "text"
+     }
+    ],
+    "requires": null,
+    "schema": 2,
+    "supervisor": null,
+    "trigger": null,
+    "version": "1.0.1"
+   },
+   "next_actions": {
+    "actions": [
+     {
+      "args": [],
+      "code": "read_report",
+      "command": "apb runs smoke-own-1794253399097",
+      "principals": [
+       "person",
+       "operator",
+       "host",
+       "supervisor"
+      ],
+      "ready": true,
+      "reason": "the run finished (succeeded); read its report",
+      "run_id": "smoke-own-1794253399097",
+      "target": {}
+     }
+    ],
+    "observed_at_ms": 1794254014126,
+    "primary": 0,
+    "status": "succeeded",
+    "stop": "finished"
+   },
+   "nodes": {
+    "done": "succeeded",
+    "manifest": "succeeded",
+    "start": "succeeded",
+    "write": "succeeded"
+   },
+   "outcome": {
+    "done": [
+     "succeeded: manifest, write"
+    ],
+    "findings": [],
+    "headline": "Run succeeded; nothing checked by the engine; 1 not verified",
+    "unverified": [
+     {
+      "detail": "the agent's own report is the only evidence",
+      "kind": "self_reported_node",
+      "subject": "write"
+     }
+    ],
+    "verified": [],
+    "warnings": []
+   },
+   "outputs": {
+    "done": "",
+    "manifest": "manifest: deliverable.md 167 bytes sha256 da8cb8ec7897093f39ea4041fb06057b8f75d19e36362c7ee9e2d4167a51c871",
+    "start": "",
+    "write": "I wrote `out/deliverable.md` with a level-one heading and two sentences, each on its own line, and nothing else in the repo changed."
+   },
+   "params": {
+    "execution_id": "fixture-exec-737190",
+    "hire_id": "fixture-hire-737190",
+    "topic": "honey bees"
+   },
+   "playbook": "smoke-own",
+   "progress": {
+    "label": null,
+    "pending_question": null,
+    "pending_questions": [],
+    "pending_review": null,
+    "pending_reviews": [],
+    "pending_supervisor": null,
+    "pending_waits": [],
+    "percent": 100,
+    "plan_key": "1.0.1|",
+    "waiting_kind": null,
+    "waiting_on": null
+   },
+   "redacted_params": [],
+   "run_id": "run-attempt-one",
+   "run_status": "succeeded",
+   "unknown_events": 0,
+   "untrusted": [
+    {
+     "accepted": "writes one Markdown file under out/; the topic is copied as data, never followed",
+     "node": "write",
+     "outward": [
+      "runs with network access"
+     ],
+     "sources": [
+      "param topic"
+     ]
+    }
+   ],
+   "usage": {
+    "attempts": 1,
+    "cache_read_tokens": 50384,
+    "cache_write_tokens": 8621,
+    "cost_attempts": 1,
+    "cost_by_basis": {
+     "subscription_equivalent_usd": 0.00250714
+    },
+    "cost_usd": 0.00250714,
+    "finished_attempts": 1,
+    "input_tokens": 6,
+    "output_tokens": 557
+   },
+   "version": "1.0.1",
+   "worktree": "<home>/.local/share/nearbee/apb-workspace/work/smoke-737190"
+  },
+  "headers": {
+   "content-type": "application/json"
+  },
+  "status": 200
+ }
+}

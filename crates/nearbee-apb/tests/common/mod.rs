@@ -81,6 +81,8 @@ pub fn opts(server: &MockServer) -> ApbOptions {
         timing: fast_timing(),
         bin: PathBuf::from("apb"),
         config_dir: PathBuf::from("/tmp/nearbee-test-apb-config"),
+        systemctl_bin: PathBuf::from("systemctl"),
+        xdg_config_home: PathBuf::from("/nonexistent/xdg-config"),
     }
 }
 
@@ -225,5 +227,7 @@ pub fn raw_opts(server: &RawServer) -> ApbOptions {
         timing: fast_timing(),
         bin: PathBuf::from("apb"),
         config_dir: PathBuf::from("/tmp/nearbee-test-apb-config"),
+        systemctl_bin: PathBuf::from("systemctl"),
+        xdg_config_home: PathBuf::from("/nonexistent/xdg-config"),
     }
 }

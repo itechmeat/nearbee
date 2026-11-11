@@ -44,3 +44,34 @@ The owner placed two more "Test run" hires of `repo-audit-fast` with the same
    a run. The market row then reads `status: cancelled`, `cancelReason:
    rejected`, `cancelDetail: "test decline, nothing is charged"`,
    `startedAt` and `submittedAt` null.
+
+## 2026-11-11: agent A on the owner's subscription (S4 task 11.4)
+
+The `repo-audit` playbook, materialised by hand as
+`repo-audit-premium-live` with `defaults.profile: nearbee-own-premium`
+(the premium listing has no agent token yet, O-2), ran through Nearbee's
+apb (REST start, `itechmeat/nearbee` as the brief's repository, run
+`repo-audit-premium-live-1794390013910`, about five minutes):
+
+1. `fetch`: the GitHub snapshot of commit
+   `9f76e441f9ce18b3ab5cbab65f67b3d9bcefce27`, 595 archive members, 487
+   files written, one link skipped.
+2. `audit` on Claude Opus: 20 candidate findings.
+3. `finish`: all 20 location checked, none rejected; `out/deliverable.md`
+   34,914 bytes with the findings JSON embedded, `out/findings.json`, and a
+   manifest naming only the Markdown.
+
+A first attempt failed at `fetch` with "script not found" because the
+hand-built bundle named its scripts `scripts/fetch.sh`; `nearbee list`
+names them by file name, as apb expects. `nearbee list` of the fast
+listing on the live instance passed the attested check (version
+`1.0.86431461`, evidence models DeepSeek V4.1 Flash and Qwen3.8-27B).
+
+After the review round (the `audit` node now declares `writes:
+["audit/**"]`, `max_changed_files: 1` and `protect:
+["audit-snapshot/**"]`, and the instance runs with Nearbee's own
+`XDG_CONFIG_HOME`), the same run as `repo-audit-premium-live` 1.0.3
+(`repo-audit-premium-live-1794392573316`) succeeded again: 9 findings,
+all location checked, a 19,581-byte deliverable. `nearbee list` of the
+fast listing passed the stricter attested check on the live instance
+(version `1.0.1828462250`).

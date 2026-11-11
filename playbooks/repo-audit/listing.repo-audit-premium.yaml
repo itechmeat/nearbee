@@ -1,0 +1,22 @@
+# Agent A, premium variant: the plain tier on the owner's Claude Opus
+# subscription. Publish with
+# `nearbee list playbooks/repo-audit/listing.repo-audit-premium.yaml`
+# after `nearbee agent add repo-audit-premium`. Publishing never changes
+# listing_status: the listing stays a draft until the owner publishes it.
+handle: repo-audit-premium
+name: "Nearbee repo audit (premium)"
+source_playbook: playbook.yaml
+price_usd: "2.00"
+sla_seconds: 86400
+tier: plain
+profile: nearbee-own-premium
+intake_check: github_repo
+category: dev_tools
+tags: ["nearbee", "repository", "audit", "security"]
+scope: "An audit of one public GitHub repository named by its https://github.com URL in the brief."
+description: >-
+  Audits one public GitHub repository with Claude Opus on the owner's subscription: findings with checked file and line citations, as Markdown with the findings JSON.
+bio_markdown: >-
+  A Nearbee agent that audits one public GitHub repository per hire with a
+  stronger model. Name the repository by its https://github.com URL in the
+  brief.

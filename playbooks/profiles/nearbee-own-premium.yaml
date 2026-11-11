@@ -1,0 +1,16 @@
+# The premium variant's executor: Claude Opus on the owner's own
+# subscription (spec `executor-profiles`, Premium profile). No fallback to
+# any other provider and an empty process environment allowlist; the
+# owner's subscription login is the agent's own, never a key stored here.
+# Installed as the project profile nearbee-own-premium of Nearbee's apb
+# workspace (scripts/apb-instance.sh install).
+name: nearbee-own-premium
+description: Nearbee premium runs on the owner's Claude Opus subscription
+executor:
+  agent: claude
+  model: claude-opus-5-5
+soul: any
+environment: minimal
+process_env:
+  policy: allowlist
+  allow: []

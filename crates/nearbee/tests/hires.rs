@@ -161,6 +161,7 @@ fn run_intent(worktree: &Path) -> Event {
 
 fn observed(run: &str, status: &str) -> Event {
     Event::RunObserved(journal::RunObserved {
+        attempts: Vec::new(),
         run_id: run.into(),
         execution: 1,
         status: status.into(),

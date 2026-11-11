@@ -32,17 +32,23 @@ is files under `.nearbee/` (one durable journal per hire) and the market itself.
 | `core/listing` | a `Listing`: materialised playbook id + version digest, tier, price, SLA, category, tags, input schema and limits, generated description, data statement | nothing external |
 | `core/intake` | take or decline a hire against its listing: hard limits, scope question to a decision model, cost ceiling | `Runner.decide` |
 | `core/pricing` | price and SLA from run observations; per-hire cumulative cost ceiling; the SKU expansion of one playbook into several materialised playbooks and listings | `Runner.runs`, `Runner.estimate` |
-| `core/privacy` | tiers (plain, attested, blind), the profile, connector and decision-provider rules per tier, the data statement, evidence collection, deletion inventory | `Runner.profiles`, `Runner.connectors` |
+| `core/tiers` (S4) | the execution facts across the seam (`Known<T>`, profile, node, route facts), `check(tier, facts, catalog)` with one English line per breach, `evidence_models` | the embedded catalog |
+| `core/catalog` (S4) | the dated NEAR AI Cloud model list (`docs/reference/near-ai-cloud-models.json`) embedded with `include_str!`; which ids are owned by `nearai` | nothing external |
+| `core/statement` (S4) | the generated data statement (`render`, format 1), the facts `fingerprint`, and `drift` of a listing record against the current facts | `core/tiers` |
+| `core/evidence` (S4) | the `Attestor` seam, the private evidence snapshot record, the nonce, the `Endpoint attestation disclosure` renderer; serve schedules the fetches as long steps | `Attestor` |
+| `core/retention` | the deletion inventory and cleanup eligibility | the local filesystem |
 | `core/deliverable` | validate the run's `out/result.json` manifest (containment, hashes, sizes; `nearbee_core::manifest` since S1), build Markdown + files, append evidence and the data statement, enforce 256 KiB in UTF-8 bytes | the local filesystem (narrow synchronous reads of the finished run's `out/`) |
 | `core/hire` | the state machine of one hire with a durable journal: received → intake → start-intent → started → run-intent → running → submitted → accepted / rework / redo / cancelled / disputed → closed → deleted | `Market`, `Runner` |
 | `core/recovery` | on boot and on every poll: reconcile journal vs market rows vs apb runs; resolve ambiguous starts; stop local work on cancelled or refunded hires | `Market`, `Runner` |
 | `market/` | `Market` interface and its one implementation `NearAgentMarket`: REST client with retries, `clientRequestId` on sends, file upload, assignments in every status with paging | fetch |
-| `runner/` | `Runner` interface and its implementation `ApbRunner` (`crates/nearbee-apb`): REST client to Nearbee's own apb instance pinned to one workspace, run start with params, worktree and budget, run lookup by the `hire_id` and `execution_id` search fields with completeness, polling; later stages add answer and review, profiles, connectors, `decide`, and `apb stats --json` over the CLI where REST lacks a route | fetch, child process |
-| `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check`, `nearbee replay` (fixture walkthrough) | all of the above |
+| `runner/` | `Runner` interface and its implementation `ApbRunner` (`crates/nearbee-apb`): REST client to Nearbee's own apb instance pinned to one workspace, run start with params, worktree and budget, run lookup by the `hire_id` and `execution_id` search fields with completeness, polling, `decide`; since S4 `inspect` and `inspect_source` (the execution facts, `inspect.rs`), the per-attempt models of a run (`attempt_models`), materialisation with the listing's profile; `run_params` reads a script node's run params from `APB_RUN_DIR` | fetch, child process |
+| `cloud/` (S4) | `CloudAttestor` (`crates/nearbee-cloud`): the NEAR AI Cloud attestation report client behind `Attestor` (no redirects, 2 MiB cap, two attempts within 20 s, the key never in an error) | fetch |
+| `cli/audit` (S4) | `nearbee audit fetch` (the GitHub snapshot of the one repository the brief names) and `nearbee audit finish` (the citation check, `findings.json`, the Markdown deliverable, the manifest), run by the `repo-audit` playbook's script nodes in the run's worktree | fetch, the local filesystem |
+| `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check`, `nearbee audit`, `nearbee replay` (fixture walkthrough) | all of the above |
 | `config` | `nearbee.yaml` (committed example) + `.env` secrets | |
 
-Interfaces are small and typed; the core never imports `market/` or `runner/`
-implementations. The core does no network I/O; it may run narrow synchronous
+Interfaces are small and typed; the core never imports `market/`, `runner/`
+or `cloud/` implementations: it sees only `Market`, `Runner` and `Attestor`. The core does no network I/O; it may run narrow synchronous
 file checks of its own (the result manifest validation reads the finished
 run's `out/` with bounded reads and returns the checked bytes). Tests use in-memory fakes of both interfaces; a recorded set
 of real market responses drives the `replay` walkthrough without credentials.
@@ -262,6 +268,7 @@ apb:
   url: http://127.0.0.1:7322              # Nearbee's own apb instance (scripts/apb-instance.sh)
   workspace_path: ~/.local/share/nearbee/apb-workspace   # dedicated apb project
   config_dir: ~/.local/share/nearbee/apb-config          # its APB_CONFIG_DIR, for apb stop, apb decide and nearbee list
+  xdg_config_home: ~/.local/share/nearbee/xdg-config     # its unit's XDG_CONFIG_HOME, holding no OpenCode config (S4)
 limits:                                   # result manifest limits (S1) and the daily loss limit (S3)
   markdown_bytes: 262144
   file_bytes: 26214400

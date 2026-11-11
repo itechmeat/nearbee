@@ -28,7 +28,7 @@ When the listing file sets `limits`, intake SHALL decline `rejected` a hire whos
 - **THEN** no hard limit declines the hire
 
 ### Requirement: Scope check
-Unless the listing sets `protection: off`, intake SHALL ask `apb decide is` on Nearbee's apb instance, outside any run, whether the brief is a request for the listing's `scope` (its `description` when `scope` is absent), and SHALL decline `rejected` only on a clear no: an answer with probability `p` below 0.2; an answer with `p` from 0.2 to 0.5 is taken as uncertain.
+Unless the listing sets `protection: off`, intake SHALL ask `apb decide is` on Nearbee's apb instance, outside any run, whether the brief is a request for the listing's `scope` (its `description` when `scope` is absent), and SHALL decline `rejected` only on a clear no: an answer with probability `p` below 0.2; `p` from 0.2 to 0.5 is uncertain. The brief in the question SHALL lose every control character but newline and tab, and be cut at a character boundary to 32 KiB plus a truncation marker.
 
 #### Scenario: Clear no
 - **WHEN** the decision provider answers no with `p` 0.05 to "is this a request for an audit of a public repository"
@@ -45,6 +45,10 @@ Unless the listing sets `protection: off`, intake SHALL ask `apb decide is` on N
 #### Scenario: Brief passed without a shell
 - **WHEN** the brief contains `$(rm -rf ~)` and quotes
 - **THEN** the decide process receives it as one argument, no shell interprets it, and nothing runs
+
+#### Scenario: NUL byte and an oversized brief
+- **WHEN** the brief contains a NUL byte and is 200 KiB long
+- **THEN** the question carries the brief without the NUL, cut to 32 KiB with the marker, and the decide process starts
 
 ### Requirement: Unanswered scope check
 A scope question that gets no answer (no provider, a refusal, an error, a 60-second timeout) SHALL be journaled as skipped with its reason and SHALL not decline the hire; a check interrupted by a crash (its intent open after a restart) SHALL be journaled as skipped (`interrupted`) and SHALL not be asked again.

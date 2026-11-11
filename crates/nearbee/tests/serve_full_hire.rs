@@ -84,21 +84,6 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         .unwrap();
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(state_dir.join("listings")).unwrap();
-    std::fs::write(
-        state_dir.join("listings").join(format!("{HANDLE}.json")),
-        json!({
-            "handle": HANDLE,
-            "agent_id": "ag_123",
-            "playbook_id": HANDLE,
-            "playbook_version": "1.0.0",
-            "playbook_sha256": journal::sha256_hex(b"playbook"),
-            "price_usd": "0.50",
-            "sla_seconds": 86_400,
-            "published_at": "2026-11-09T12:00:00Z"
-        })
-        .to_string(),
-    )
-    .unwrap();
 
     // The config: apb at the wiremock server, the workspace in the tempdir.
     let cfg_path = dir.path().join("nearbee.yaml");
@@ -125,6 +110,15 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         .respond_with(ResponseTemplate::new(200).set_body_json(projects))
         .mount(&apb)
         .await;
+    // The drift pass inspects the listing each round: a serveable S4
+    // record built from the same facts does not drift.
+    let sys = mount_inspection(&apb, &ws, dir.path()).await;
+    let (record, statement) = s4_record(&apb, &ws, &sys, "1.0.0", b"playbook").await;
+    std::fs::write(
+        state_dir.join("listings").join(format!("{HANDLE}.json")),
+        record,
+    )
+    .unwrap();
     let run_id = "repo-audit-fast-1";
     // The run search by execution id answers complete and empty: no run
     // with this execution id exists, so the machine starts it.
@@ -215,7 +209,8 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         .respond_with(ResponseTemplate::new(201).set_body_json(fx::write_answer("ThreadMessage")))
         .mount(&market)
         .await;
-    let markdown = make_worktree(&ws, "hire-1");
+    // The deliverable ends with the statement snapshotted at the start.
+    let markdown = format!("{}\n\n---\n\n{statement}", make_worktree(&ws, "hire-1"));
     let submitted = Mock::given(method("POST"))
         .and(path("/v1/assignments/hire-1/submit"))
         .and(body_partial_json(json!({"deliverableMarkdown": markdown})))
@@ -239,12 +234,16 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
     // MARKET_URL must reach the market wiremock; env_of cannot see the
     // server handle after the move, so build vars first.
-    let vars = vec![("MARKET_URL", market.uri())];
+    let vars = vec![
+        ("MARKET_URL", market.uri()),
+        ("SYSTEMCTL_BIN", sys.display().to_string()),
+    ];
     let (env, _ignored) = env_of(&vars);
     let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(10)).await;
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&buf));
@@ -363,6 +362,7 @@ async fn a_revoked_token_is_polled_once_and_the_other_agent_keeps_serving() {
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
@@ -376,6 +376,92 @@ async fn a_revoked_token_is_polled_once_and_the_other_agent_keeps_serving() {
     );
     drop(revoked);
     drop(healthy);
+}
+
+/// The XDG config directory `config::load` gives with `HOME=/home/u`.
+const TEST_XDG: &str = "/home/u/.local/share/nearbee/xdg-config";
+
+/// Makes the wiremock apb answer the drift pass's inspection of `HANDLE`
+/// (a start-and-finish playbook, health at the recorded release),
+/// decisions off in the workspace, and a fake `systemctl` that reports
+/// Nearbee's own `XDG_CONFIG_HOME`; returns that `systemctl`.
+async fn mount_inspection(apb: &MockServer, ws: &Path, dir: &Path) -> std::path::PathBuf {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/playbooks/{HANDLE}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": HANDLE,
+            "yaml": format!(
+                "schema: 2\nid: {HANDLE}\nversion: 1.0.0\nnodes:\n- id: start\n  type: start\n- id: done\n  type: finish\n"
+            ),
+        })))
+        .mount(apb)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/health"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(fixture("health_live")["response"]["body"].clone()),
+        )
+        .mount(apb)
+        .await;
+    std::fs::create_dir_all(ws.join(".apb")).unwrap();
+    std::fs::write(
+        ws.join(".apb/config.yaml"),
+        "decisions:\n  enabled: false\n",
+    )
+    .unwrap();
+    let sys = dir.join("fake-systemctl.sh");
+    std::fs::write(
+        &sys,
+        format!("#!/bin/sh\nprintf '%s\\n' 'Environment=XDG_CONFIG_HOME={TEST_XDG}'\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sys, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    sys
+}
+
+/// A serveable `plain` record of `HANDLE` at `version` built from the
+/// facts the mounted inspection gives (so the drift pass finds no drift),
+/// as JSON, with its statement.
+async fn s4_record(
+    apb: &MockServer,
+    ws: &Path,
+    sys: &Path,
+    version: &str,
+    digest_of: &[u8],
+) -> (String, String) {
+    let runner = nearbee_apb::ApbRunner::connect(
+        nearbee_apb::ApbOptions {
+            url: apb.uri(),
+            api_key: None,
+            redact: Vec::new(),
+            timing: Default::default(),
+            bin: "apb".into(),
+            config_dir: "/home/u/.local/share/nearbee/apb-config".into(),
+            systemctl_bin: sys.to_path_buf(),
+            xdg_config_home: TEST_XDG.into(),
+        },
+        ws,
+    )
+    .await
+    .unwrap();
+    let facts =
+        nearbee_core::Runner::inspect(&runner, &nearbee_core::runner::PlaybookId::new(HANDLE))
+            .await
+            .unwrap();
+    let tier = nearbee_core::listing::Tier::Plain;
+    let statement = nearbee_core::statement::render(tier, &facts, 7);
+    let mut record: Value = serde_json::from_str(&listing_record(version, digest_of)).unwrap();
+    record["tier"] = json!("plain");
+    record["statement_sha256"] = json!(journal::sha256_hex(statement.as_bytes()));
+    record["statement"] = json!(statement);
+    record["statement_format"] = json!(nearbee_core::statement::STATEMENT_FORMAT);
+    record["fingerprint"] = json!(nearbee_core::statement::fingerprint(tier, &facts));
+    (record.to_string(), statement)
 }
 
 /// The resolved listing record of `HANDLE` at one playbook version.
@@ -419,7 +505,6 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(state_dir.join("listings")).unwrap();
     let record_path = state_dir.join("listings").join(format!("{HANDLE}.json"));
-    std::fs::write(&record_path, listing_record("1.0.0", b"playbook v1")).unwrap();
 
     let cfg_path = dir.path().join("nearbee.yaml");
     std::fs::write(
@@ -454,6 +539,11 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         })))
         .mount(&apb)
         .await;
+    // Both records are serveable S4 records over the same facts.
+    let sys = mount_inspection(&apb, &ws, dir.path()).await;
+    let (v1, _) = s4_record(&apb, &ws, &sys, "1.0.0", b"playbook v1").await;
+    let (v2, statement) = s4_record(&apb, &ws, &sys, "2.0.0", b"playbook v2").await;
+    std::fs::write(&record_path, v1).unwrap();
     let run_id = "repo-audit-fast-2";
     Mock::given(method("POST"))
         .and(path(format!("/api/playbooks/{HANDLE}/run")))
@@ -489,7 +579,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
     Mock::given(method("GET"))
         .and(path("/v1/agents/me/assignments"))
         .respond_with(move |_req: &wiremock::Request| {
-            std::fs::write(&republish_to, listing_record("2.0.0", b"playbook v2")).unwrap();
+            std::fs::write(&republish_to, &v2).unwrap();
             ResponseTemplate::new(200).set_body_json(fx::assignments(vec![]))
         })
         .up_to_n_times(1)
@@ -531,7 +621,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         .expect(0)
         .mount(&market)
         .await;
-    let markdown = make_worktree(&ws, "hire-2");
+    let markdown = format!("{}\n\n---\n\n{statement}", make_worktree(&ws, "hire-2"));
     Mock::given(method("POST"))
         .and(path("/v1/assignments/hire-2/submit"))
         .and(body_partial_json(json!({"deliverableMarkdown": markdown})))
@@ -556,10 +646,14 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
-    let (env, _) = env_of(&[("MARKET_URL", market.uri())]);
+    let (env, _) = env_of(&[
+        ("MARKET_URL", market.uri()),
+        ("SYSTEMCTL_BIN", sys.display().to_string()),
+    ]);
     let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(10)).await;
     let out = String::from_utf8_lossy(&buf);
     assert_eq!(code, 0, "{out}");
@@ -655,6 +749,7 @@ async fn with_apb_down_a_hire_past_its_deadline_is_still_declined() {
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
@@ -779,6 +874,7 @@ async fn with_every_read_failing_an_active_run_is_still_stopped_at_its_deadline(
         }))
         .unwrap();
         w.append(journal::Event::RunObserved(journal::RunObserved {
+            attempts: Vec::new(),
             run_id: run_id.into(),
             execution: 1,
             status: "running".into(),
@@ -804,6 +900,7 @@ async fn with_every_read_failing_an_active_run_is_still_stopped_at_its_deadline(
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);
@@ -937,6 +1034,7 @@ async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
         }))
         .unwrap();
         w.append(journal::Event::RunObserved(journal::RunObserved {
+            attempts: Vec::new(),
             run_id: run_id.into(),
             execution: 1,
             status: "running".into(),
@@ -971,6 +1069,7 @@ async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     };
     let mut buf: Vec<u8> = Vec::new();
     let mut lines = nearbee::Lines::new(&mut buf);

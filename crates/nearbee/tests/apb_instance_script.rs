@@ -427,7 +427,19 @@ fn stop_removes_the_key_file_and_stale_temp_key_files() {
 /// returns the script's output and the key file it wrote.
 #[cfg(unix)]
 fn start_with_dotenv(text: &str, names: &str) -> (Output, Fake, PathBuf) {
-    let f = Fake::new();
+    start_with_dotenv_env(text, names, &[])
+}
+
+fn start_with_dotenv_env(
+    text: &str,
+    names: &str,
+    extra: &[(&str, &str)],
+) -> (Output, Fake, PathBuf) {
+    start_in(Fake::new(), text, names, extra)
+}
+
+/// [`start_with_dotenv_env`] in a prepared fake home.
+fn start_in(f: Fake, text: &str, names: &str, extra: &[(&str, &str)]) -> (Output, Fake, PathBuf) {
     let runtime = f.path("run");
     std::fs::create_dir_all(&runtime).unwrap();
     let dotenv = f.path("cfg/.env");
@@ -446,6 +458,7 @@ fn start_with_dotenv(text: &str, names: &str) -> (Output, Fake, PathBuf) {
         .env("NEARBEE_ENV_FILE", &dotenv)
         .env("NEARBEE_APB_ENV_VARS", names)
         .env("NEARBEE_APB_CONFIG_DIR", f.path("config"))
+        .envs(extra.iter().copied())
         .output()
         .unwrap();
     let key_file = runtime.join("nearbee-apb.env");
@@ -556,4 +569,115 @@ fn start_treats_an_empty_value_as_not_set() {
     let stdout = assert_ok(&out);
     assert!(stdout.contains("NEARAI_API_KEY is not set"), "{stdout}");
     assert_eq!(sourced(&key_file, "NEARAI_API_KEY"), None);
+}
+
+/// `install` installs every shipped profile, the premium one included,
+/// as a project profile (task 9.4).
+#[test]
+fn install_installs_the_premium_profile() {
+    let f = Fake::new();
+    let stdout = assert_ok(&f.install("digest", "new"));
+    for name in ["nearbee-own", "nearbee-own-premium", "nearbee-near"] {
+        let profile = f.path(&format!("ws/.apb/profiles/{name}/profile.yaml"));
+        let text = std::fs::read_to_string(&profile).unwrap();
+        assert!(text.contains(&format!("name: {name}")), "{name}: {text}");
+        assert!(
+            stdout.contains(&format!("apb-instance: profile {name}")),
+            "{stdout}"
+        );
+    }
+}
+
+/// `install` writes `decisions: { enabled: false }` into the project's
+/// `.apb/config.yaml`, keeping the other keys and replacing an earlier
+/// decisions block (design 2, point 4).
+#[test]
+fn install_turns_decisions_off_in_the_project_config() {
+    let f = Fake::new();
+    assert_ok(&f.install("digest", "new"));
+    let text = std::fs::read_to_string(f.path("ws/.apb/config.yaml")).unwrap();
+    let v: serde_json::Value = yaml_serde::from_str(&text).unwrap();
+    assert_eq!(v["decisions"]["enabled"], false, "{text}");
+
+    let f = Fake::new();
+    std::fs::write(
+        f.path("ws/.apb/config.yaml"),
+        "feedback_loop: no\ndecisions:\n  enabled: true\n  provider: other\nstanding_block: no\n",
+    )
+    .unwrap();
+    assert_ok(&f.install("digest", "new"));
+    let text = std::fs::read_to_string(f.path("ws/.apb/config.yaml")).unwrap();
+    let v: serde_json::Value = yaml_serde::from_str(&text).unwrap();
+    assert_eq!(
+        v["decisions"],
+        serde_json::json!({"enabled": false}),
+        "{text}"
+    );
+    assert_eq!(v["feedback_loop"], "no", "{text}");
+    assert_eq!(v["standing_block"], "no", "{text}");
+    assert_eq!(text.matches("decisions:").count(), 1, "{text}");
+}
+
+/// `start` sets `NEARBEE_BIN` for the repo-audit script nodes (task 9.4).
+#[cfg(unix)]
+#[test]
+fn start_sets_nearbee_bin_for_the_script_nodes() {
+    let (out, _f, _key) = start_with_dotenv_env(
+        "NEARAI_API_KEY=synthetic-key\n",
+        "NEARAI_API_KEY",
+        &[("NEARBEE_BIN", "/opt/nearbee/bin/nearbee")],
+    );
+    let stdout = assert_ok(&out);
+    assert!(
+        stdout.contains("NEARBEE_BIN=/opt/nearbee/bin/nearbee "),
+        "{stdout}"
+    );
+}
+
+/// No `OPENCODE_` variable may reach apb: `start` refuses to pass one
+/// from the dotenv and writes no key file (design 2, point 3).
+#[cfg(unix)]
+#[test]
+fn start_refuses_to_pass_an_opencode_variable() {
+    let (out, _f, key_file) = start_with_dotenv(
+        "NEARAI_API_KEY=synthetic-key\nOPENCODE_CONFIG=/tmp/x.json\n",
+        "NEARAI_API_KEY OPENCODE_CONFIG",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("OPENCODE_CONFIG"), "{stderr}");
+    assert!(!key_file.exists(), "a key file was written");
+}
+
+/// `start` gives the instance Nearbee's own `XDG_CONFIG_HOME`, created
+/// empty and private, so OpenCode merges no global config (spec
+/// `privacy-tiers`, OpenCode configuration).
+#[cfg(unix)]
+#[test]
+fn start_sets_nearbees_own_xdg_config_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let (out, f, _key) = start_with_dotenv("NEARAI_API_KEY=synthetic-key\n", "NEARAI_API_KEY");
+    let stdout = assert_ok(&out);
+    let xdg = f.path(".local/share/nearbee/xdg-config");
+    assert!(
+        stdout.contains(&format!("XDG_CONFIG_HOME={} ", xdg.display())),
+        "{stdout}"
+    );
+    let meta = std::fs::metadata(&xdg).expect("the directory is created");
+    assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    assert_eq!(std::fs::read_dir(&xdg).unwrap().count(), 0, "it is empty");
+}
+
+/// An `opencode` entry in Nearbee's XDG config directory would be merged
+/// into every OpenCode run: `start` refuses and writes no key file.
+#[cfg(unix)]
+#[test]
+fn start_refuses_an_opencode_config_in_the_xdg_directory() {
+    let f = Fake::new();
+    std::fs::create_dir_all(f.path(".local/share/nearbee/xdg-config/opencode")).unwrap();
+    let (out, _f, key_file) = start_in(f, "NEARAI_API_KEY=synthetic-key\n", "NEARAI_API_KEY", &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("holds an opencode entry"), "{stderr}");
+    assert!(!key_file.exists(), "a key file was written");
 }

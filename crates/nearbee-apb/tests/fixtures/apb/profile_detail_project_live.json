@@ -1,0 +1,30 @@
+{
+  "apb": "1.0.0-beta.6",
+  "request": {
+    "method": "GET",
+    "path": "/api/profiles/nearbee-own",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ],
+      [
+        "scope",
+        "project"
+      ]
+    ],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "bundle_digest": "sha256:e148a13e479a9fffa64d34872b3e3f6f6305d1f5a389a2bbbb2e315d08a8656d",
+      "name": "nearbee-own",
+      "profile_digest": "sha256:b11665de5e18abf3ac5ef69a745137a3ea4781ebd9dac40c72683f61eaeb4c26",
+      "profile_yaml": "name: nearbee-own\ndescription: Nearbee runs on the owner's own agent subscription\nexecutor:\n  agent: claude\n  model: claude-haiku-5-5\nsoul: any\nenvironment: minimal\nprocess_env:\n  policy: allowlist\n",
+      "scope": "project",
+      "soul_md": "Do exactly the task in the prompt and nothing else.\n"
+    }
+  },
+  "recorded": "2026-11-11"
+}

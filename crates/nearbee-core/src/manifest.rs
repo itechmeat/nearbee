@@ -433,6 +433,42 @@ fn open_entry(_out: &OutDir, _rel: &str) -> Result<File, WalkError> {
     ))
 }
 
+/// Reads `rel` beneath the directory `root` as one regular file of at most
+/// `limit` bytes, resolved one component at a time from a descriptor of
+/// `root` without following a symbolic link anywhere on the path (the
+/// approach of [`validate`]). For a Nearbee command that reads files a
+/// run's agent wrote (design 8.6). `Err` names why, with `rel`.
+pub fn read_beneath(root: &Path, rel: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let dir = open_root(root)?;
+    let file = open_entry(&dir, rel).map_err(|w| match w {
+        WalkError::NotFound => format!("{rel}: does not exist"),
+        WalkError::Containment(reason) => format!("{rel}: {reason}"),
+        WalkError::Io(m) => format!("{rel}: {m}"),
+    })?;
+    read_bounded(file, limit, rel).map_err(|e| match e {
+        ManifestError::TooLarge { limit, .. } => format!("{rel}: larger than {limit} bytes"),
+        other => other.to_string(),
+    })
+}
+
+#[cfg(unix)]
+fn open_root(root: &Path) -> Result<OutDir, String> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
+    let fd = openat(
+        CWD,
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| format!("{}: {e}", root.display()))?;
+    Ok(OutDir(fd))
+}
+
+#[cfg(not(unix))]
+fn open_root(_root: &Path) -> Result<OutDir, String> {
+    Err("reading run files needs a unix platform".into())
+}
+
 /// Opens and reads one entry, mapping resolution errors to manifest errors
 /// that name the entry.
 fn read_entry(out: &OutDir, rel: &str, limit: u64) -> Result<Vec<u8>, ManifestError> {
@@ -978,5 +1014,31 @@ mod tests {
         let t = Tree::new();
         t.manifest(json!({"version": 1, "markdown": entry("gone.md", b"x")}));
         assert_eq!(containment(t.validate()), "gone.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_beneath_reads_regular_files_and_refuses_links_and_oversize() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("audit")).unwrap();
+        std::fs::write(dir.path().join("audit/c.json"), b"{}").unwrap();
+        assert_eq!(read_beneath(dir.path(), "audit/c.json", 10).unwrap(), b"{}");
+        let err = read_beneath(dir.path(), "audit/c.json", 1).unwrap_err();
+        assert!(err.contains("larger than 1 bytes"), "{err}");
+        std::os::unix::fs::symlink(
+            dir.path().join("audit/c.json"),
+            dir.path().join("audit/l.json"),
+        )
+        .unwrap();
+        let err = read_beneath(dir.path(), "audit/l.json", 10).unwrap_err();
+        assert!(err.contains("symbolic link"), "{err}");
+        std::os::unix::fs::symlink(dir.path().join("audit"), dir.path().join("linked")).unwrap();
+        assert!(read_beneath(dir.path(), "linked/c.json", 10).is_err());
+        assert!(read_beneath(dir.path(), "../x", 10).is_err());
+        assert!(
+            read_beneath(dir.path(), "audit/missing.json", 10)
+                .unwrap_err()
+                .contains("does not exist")
+        );
     }
 }

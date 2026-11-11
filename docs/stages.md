@@ -157,28 +157,46 @@ notices go to serve's output.
 
 ## S4. `repo-audit-and-tiers`
 
-Delivers: example agent A, the `repo-audit` playbook with `premium` (owner's
-subscription) and `fast` (Cloud TEE) variants materialised, both run on a
-real public repository with a `findings.json` manifest; the tier validator
-(executors, connectors and decision providers of a listing's profile against
-its tier, publish refused on a breach); generated data statements; the
-evidence block (run-level attestation disclosure); the signed script step for
-the digest (D-008) as a reusable node.
+Delivers: example agent A, the `repo-audit` playbook (`playbooks/repo-audit/`)
+with a GitHub snapshot fetch and a findings check and render step as Nearbee
+commands (`nearbee audit fetch`, `nearbee audit finish`), the findings JSON
+embedded in the Markdown deliverable, and two listings materialised from the
+one source with their own profile: `repo-audit-fast` (attested,
+`nearbee-near`) and `repo-audit-premium` (plain, `nearbee-own-premium`); the
+S2 placeholder `playbooks/first-hire` is removed. Listing files name their
+tier. The `Runner` reports the execution facts of an installed playbook;
+the tier check refuses a listing whose facts break its tier at publish
+(before and after installing) and drifts it in `serve`, which then takes no
+new work for it. The data statement is generated from the same facts,
+printed for the bio, recorded with a fingerprint, snapshotted per
+generation and appended to every deliverable. Attested hires collect
+endpoint attestation reports before the start and after the run and
+disclose them with the models apb requested per node (`crates/nearbee-cloud`).
+The signed step of D-008 is specified as a contract for S5
+(`docs/privacy.md`, "Attested, signed").
 
-Owner items: O-2 (variants `repo-audit-fast`, `repo-audit-premium`), O-6
-(setting them live).
+Owner items: O-2 (variant `repo-audit-premium`), O-3 (the fast variant's
+live run on Cloud credits), O-6 (setting both listings live).
 
-Done when: native gate green; both variants are live under the owner's
-account (owner confirmed); the validator refuses a crafted profile that
-breaks the tier, in a test.
+Done when: native gate green; `nearbee list` of the fast listing passes the
+attested check on the live instance and records tier and fingerprint; the
+premium listing is listed once its draft agent and token exist (O-2); the
+premium variant's playbook ran through apb on a real public repository with
+`out/findings.json`, `out/deliverable.md` and a valid manifest
+(`docs/demo-log.md`); a live attestation report was fetched for both TEE
+models (not billable) and recorded as a replay fixture; the fast variant's
+live run and both listings going live are reported to the owner (O-3, O-6),
+not done by an agent.
 
 ## S5. `doc-digest-and-paid-demo`
 
 Delivers: example agent B, `doc-digest-private` (local conversion, Qwen3-VL
 per page, `/v1/privacy/classify`, the digest through the signed step,
-`digest.json`), its limits and live listing; the paid agent-to-agent hire of
-`repo-audit-fast` from the demo caller account, with task id, settlement and
-the later payout in `docs/demo-log.md`.
+`digest.json`), its limits and live listing; the signed step of D-008 built
+to the contract in `docs/privacy.md` ("Attested, signed") as a reusable
+node; the paid agent-to-agent hire of `repo-audit-fast` from the demo caller
+account, with task id, settlement and the later payout in
+`docs/demo-log.md`.
 
 Owner items: O-2 (variant `doc-digest-private`), O-6 (live listing, the paid
 hire's spend).

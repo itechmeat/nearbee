@@ -111,6 +111,8 @@ async fn cli_runner(state: &Path, ws: &Path) -> ApbRunner {
             },
             bin,
             config_dir: state.to_path_buf(),
+            systemctl_bin: std::path::PathBuf::from("systemctl"),
+            xdg_config_home: std::path::PathBuf::from("/nonexistent/xdg-config"),
         },
         ws,
     )
