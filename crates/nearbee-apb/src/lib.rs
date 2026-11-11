@@ -13,7 +13,9 @@
 //! has configured secret values and bearer tokens removed.
 
 pub mod cli;
+mod inspect;
 pub mod install;
+pub mod run_params;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,9 +24,9 @@ use std::time::Duration;
 use nearbee_core::Secret;
 use nearbee_core::redact::redact_detail;
 use nearbee_core::runner::{
-    CostByBasis, DecideOutcome, Estimate, NodeState, PlaybookId, PlaybookSummary, RESERVED_PARAMS,
-    RunDetail, RunId, RunLookup, RunQuery, RunStatus, RunSummary, Runner, RunnerError,
-    StartRequest, Usage, WorkspaceId,
+    AttemptModel, CostByBasis, DecideOutcome, Estimate, ExecutionFacts, NodeState, PlaybookId,
+    PlaybookSummary, RESERVED_PARAMS, Reported, RunDetail, RunId, RunLookup, RunQuery, RunStatus,
+    RunSummary, Runner, RunnerError, StartRequest, Usage, WorkspaceId,
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
@@ -77,6 +79,14 @@ pub struct ApbOptions {
     /// The `APB_CONFIG_DIR` of Nearbee's own apb instance, for the CLI
     /// calls. Never the operator's everyday instance.
     pub config_dir: PathBuf,
+    /// The `systemctl` binary the inspection reads the instance
+    /// environment with (`systemctl --user show nearbee-apb -p
+    /// Environment`).
+    pub systemctl_bin: PathBuf,
+    /// The `XDG_CONFIG_HOME` the instance's unit must carry: Nearbee's own
+    /// directory with no OpenCode configuration in it (the inspection
+    /// makes the model routes unknown otherwise).
+    pub xdg_config_home: PathBuf,
 }
 
 /// One apb project as listed by the dashboard.
@@ -151,7 +161,7 @@ pub struct ApbClient {
     timing: Timing,
 }
 
-enum Kind {
+pub(crate) enum Kind {
     Read,
     Estimate,
 }
@@ -313,7 +323,7 @@ fn describe(e: &reqwest::Error) -> String {
     format!("{what}: {e}")
 }
 
-fn str_field(v: &Value, k: &str) -> Option<String> {
+pub(crate) fn str_field(v: &Value, k: &str) -> Option<String> {
     v.get(k).and_then(Value::as_str).map(str::to_owned)
 }
 
@@ -337,6 +347,11 @@ pub struct ApbRunner {
     /// The CLI binary and the instance's config directory.
     cli_bin: PathBuf,
     cli_config_dir: PathBuf,
+    /// The `systemctl` binary the inspection reads the instance
+    /// environment with.
+    systemctl_bin: PathBuf,
+    /// The instance's expected `XDG_CONFIG_HOME`.
+    xdg_config_home: PathBuf,
 }
 
 /// Why [`ApbRunner::connect`] failed.
@@ -354,6 +369,8 @@ impl ApbRunner {
     pub async fn connect(opts: ApbOptions, workspace_path: &Path) -> Result<Self, ConnectError> {
         let cli_bin = opts.bin.clone();
         let cli_config_dir = opts.config_dir.clone();
+        let systemctl_bin = opts.systemctl_bin.clone();
+        let xdg_config_home = opts.xdg_config_home.clone();
         let client = ApbClient::new(opts)?;
         let projects = client.projects().await?;
         let workspace = resolve_workspace(&projects, workspace_path)?;
@@ -363,6 +380,8 @@ impl ApbRunner {
             workspace_path: workspace_path.to_path_buf(),
             cli_bin,
             cli_config_dir,
+            systemctl_bin,
+            xdg_config_home,
         })
     }
 
@@ -524,6 +543,43 @@ fn redact_strings(v: Value, redact: &impl Fn(&str) -> String) -> Value {
     }
 }
 
+/// Parses apb's reported model record of one attempt (`reported.kind`:
+/// `none` gives no model, `one` gives its model, anything else is mixed;
+/// design 7). A missing reported model stays empty.
+pub fn parse_reported(v: &Value) -> Reported {
+    match v.get("kind").and_then(Value::as_str) {
+        Some("none") => Reported::None,
+        Some("one") => match str_field(v, "model") {
+            Some(model) => Reported::One(model),
+            None => Reported::Mixed,
+        },
+        _ => Reported::Mixed,
+    }
+}
+
+/// Parses the run's `attempt_models` (apb's `ExecutionIdentityView`).
+fn parse_attempts(v: &Value) -> Vec<AttemptModel> {
+    v.get("attempt_models")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    Some(AttemptModel {
+                        node: str_field(r, "node")?,
+                        attempt: r
+                            .get("attempt")
+                            .and_then(Value::as_u64)
+                            .and_then(|a| u32::try_from(a).ok())?,
+                        agent: str_field(r, "agent").unwrap_or_default(),
+                        requested_model: str_field(r, "requested_model"),
+                        reported: parse_reported(r.get("reported").unwrap_or(&Value::Null)),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Parses a run detail answer.
 pub fn parse_run_detail(v: &Value) -> Result<RunDetail, String> {
     let id = str_field(v, "run_id").ok_or("run detail without run_id")?;
@@ -594,6 +650,7 @@ pub fn parse_run_detail(v: &Value) -> Result<RunDetail, String> {
         params,
         usage: usage.unwrap_or_default(),
         budget_paused,
+        attempts: parse_attempts(v),
     })
 }
 
@@ -879,10 +936,19 @@ impl Runner for ApbRunner {
         let v = self.client.get("/api/runs", &query, Kind::Read).await?;
         parse_lookup(&v).map_err(|e| self.client.protocol(&format!("GET /api/runs: {e}")))
     }
+
+    async fn inspect(&self, id: &PlaybookId) -> Result<ExecutionFacts, RunnerError> {
+        self.inspect_common(None, id).await
+    }
+
+    async fn inspect_source(&self, source: &str) -> Result<ExecutionFacts, RunnerError> {
+        self.inspect_common(Some(source), &PlaybookId::new(String::new()))
+            .await
+    }
 }
 
 /// An id used as one URL path segment: no separators or dot segments.
-fn path_segment(id: &str) -> Result<&str, RunnerError> {
+pub(crate) fn path_segment(id: &str) -> Result<&str, RunnerError> {
     let ok = !id.is_empty()
         && id != "."
         && id != ".."
@@ -910,6 +976,26 @@ pub fn sent_params(req: &StartRequest) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported model mapping: `none` is empty, one model is `One`,
+    /// everything else (mixed, partial) is `Mixed` (design 7).
+    #[test]
+    fn reported_kinds_map_to_none_one_and_mixed() {
+        let none = parse_reported(&serde_json::json!({"kind": "none"}));
+        assert_eq!(none, Reported::None);
+        let one = parse_reported(&serde_json::json!({"kind": "one", "model": "m"}));
+        assert_eq!(one, Reported::One("m".into()));
+        let one_without_model = parse_reported(&serde_json::json!({"kind": "one"}));
+        assert_eq!(one_without_model, Reported::Mixed);
+        let partial = parse_reported(
+            &serde_json::json!({"kind": "partial", "known": ["m"], "unknown_tasks": 1}),
+        );
+        assert_eq!(partial, Reported::Mixed);
+        let mixed = parse_reported(&serde_json::json!({"kind": "mixed", "models": ["a", "b"]}));
+        assert_eq!(mixed, Reported::Mixed);
+        let missing = parse_reported(&serde_json::json!({}));
+        assert_eq!(missing, Reported::Mixed);
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

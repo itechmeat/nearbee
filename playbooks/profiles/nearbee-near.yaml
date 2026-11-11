@@ -1,5 +1,6 @@
-# NEAR AI Cloud Confidential TEE models only (catalog owner `nearai`), through
-# OpenCode with the custom provider `nearai` (opencode.json in Nearbee's apb
+# DeepSeek V4.1 Flash first, Qwen3.8-27B as the only fallback (spec
+# `executor-profiles`, Near profile model order). NEAR AI Cloud Confidential
+# TEE models only (catalog owner `nearai`), through OpenCode with the custom provider `nearai` (opencode.json in Nearbee's apb
 # workspace). The key comes from NEARAI_API_KEY in the apb instance's
 # environment; it is never stored here. When apb runs NEAR AI Cloud natively,
 # only the executor agent changes; playbooks keep naming this profile.
@@ -7,9 +8,9 @@ name: nearbee-near
 description: Nearbee runs on NEAR AI Cloud TEE models (Confidential, owned by nearai)
 executor:
   agent: opencode
-  model: nearai/Qwen/Qwen3.8-27B
+  model: nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017
   fallbacks:
-    - { agent: opencode, model: nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017 }
+    - { agent: opencode, model: nearai/Qwen/Qwen3.8-27B }
 soul: any
 environment: minimal
 process_env:

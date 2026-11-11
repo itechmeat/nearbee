@@ -176,6 +176,7 @@ mod tests {
         budget: Option<&str>,
     ) -> Event {
         Event::RunObserved(RunObserved {
+            attempts: Vec::new(),
             run_id: run.into(),
             execution,
             status: "failed".into(),

@@ -121,6 +121,7 @@ fn near_profile_names_only_nearai_models_and_no_key() {
         "playbooks/profiles/nearbee-near.yaml",
         "playbooks/profiles/nearbee-near-deepseek.yaml",
         "playbooks/profiles/nearbee-own.yaml",
+        "playbooks/profiles/nearbee-own-premium.yaml",
         "playbooks/profiles/nearbee-near-vision.md",
         "playbooks/workspace/opencode.json",
     ] {
@@ -128,16 +129,49 @@ fn near_profile_names_only_nearai_models_and_no_key() {
     }
 }
 
+/// The three stable names market playbooks reference (spec
+/// `executor-profiles`, Stable profile names).
 #[test]
-fn near_profile_template_names_are_stable() {
+fn profile_template_names_are_stable() {
+    for name in ["nearbee-own", "nearbee-own-premium", "nearbee-near"] {
+        assert_eq!(
+            yaml(&format!("playbooks/profiles/{name}.yaml"))["name"],
+            name
+        );
+    }
+}
+
+/// DeepSeek V4.1 Flash first, Qwen3.8-27B the only fallback, both on the
+/// `nearai` provider (spec `executor-profiles`, Near profile model order).
+#[test]
+fn near_profile_runs_deepseek_first_and_qwen_as_the_only_fallback() {
+    let p = yaml("playbooks/profiles/nearbee-near.yaml");
+    assert_eq!(p["executor"]["agent"], "opencode");
     assert_eq!(
-        yaml("playbooks/profiles/nearbee-near.yaml")["name"],
-        "nearbee-near"
+        p["executor"]["model"],
+        "nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017"
     );
-    assert_eq!(
-        yaml("playbooks/profiles/nearbee-own.yaml")["name"],
-        "nearbee-own"
-    );
+    let fallbacks = p["executor"]["fallbacks"].as_array().unwrap();
+    assert_eq!(fallbacks.len(), 1);
+    assert_eq!(fallbacks[0]["agent"], "opencode");
+    assert_eq!(fallbacks[0]["model"], "nearai/Qwen/Qwen3.8-27B");
+}
+
+/// Claude Opus on the owner's subscription, minimal environment, an empty
+/// allowlist, no fallback, no secret (spec `executor-profiles`, Premium
+/// profile).
+#[test]
+fn premium_profile_runs_claude_opus_with_no_fallback() {
+    let rel = "playbooks/profiles/nearbee-own-premium.yaml";
+    let p = yaml(rel);
+    assert_eq!(p["executor"]["agent"], "claude");
+    assert_eq!(p["executor"]["model"], "claude-opus-5-5");
+    assert!(p["executor"].get("fallbacks").is_none());
+    assert!(p.get("tiers").is_none());
+    assert_eq!(p["environment"], "minimal");
+    assert_eq!(p["process_env"]["policy"], "allowlist");
+    assert_eq!(p["process_env"]["allow"], serde_json::json!([]));
+    assert_no_secret_values(rel);
 }
 
 #[test]

@@ -12,8 +12,10 @@ use common::*;
 use nearbee_apb::{ApbRunner, ConnectError};
 use nearbee_core::redact::DETAIL_LIMIT;
 use nearbee_core::runner::{
-    ExecutionId, HireId, PlaybookId, RunId, RunQuery, RunStatus, Runner, RunnerError, SearchField,
+    AttemptModel, ExecutionId, HireId, PlaybookId, Reported, RunId, RunQuery, RunStatus, Runner,
+    RunnerError, SearchField,
 };
+use nearbee_core::tiers::{Known, NEARAI_BASE_URL, ProfileRef};
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, method, path};
@@ -873,4 +875,783 @@ fn fixtures_hold_no_key_and_no_home_path() {
             .any(|w| w.starts_with("apb_") && w.len() > 20);
         assert!(!re_key, "{} holds a key-shaped value", p.display());
     }
+}
+
+// --- Inspection (spec `apb-runner`, Playbook inspection) ---
+
+/// The `XDG_CONFIG_HOME` the test runners expect (`common::opts`); it does
+/// not exist, so it holds no OpenCode configuration.
+const TEST_XDG: &str = "/nonexistent/xdg-config";
+
+/// Connects a runner pinned to a real workspace directory (the inspection
+/// reads the workspace files), with the given fake `systemctl`, else one
+/// that reports the expected `XDG_CONFIG_HOME` and nothing else.
+async fn connected_at(server: &MockServer, ws: &Path, systemctl: Option<&Path>) -> ApbRunner {
+    connected_xdg(server, ws, systemctl, Path::new(TEST_XDG)).await
+}
+
+/// [`connected_at`] with the expected `XDG_CONFIG_HOME` set to `xdg`.
+async fn connected_xdg(
+    server: &MockServer,
+    ws: &Path,
+    systemctl: Option<&Path>,
+    xdg: &Path,
+) -> ApbRunner {
+    let default_sys;
+    let systemctl = match systemctl {
+        Some(p) => p,
+        None => {
+            default_sys = self::systemctl(
+                ws,
+                &format!("Environment=XDG_CONFIG_HOME={}", xdg.display()),
+            );
+            default_sys.as_path()
+        }
+    };
+    let mut projects = fixture("projects");
+    for row in projects["response"]["body"].as_array_mut().unwrap() {
+        if row["path"].as_str() == Some(WS_PATH) {
+            row["path"] = json!(ws.to_string_lossy());
+        }
+    }
+    recorded(&projects, false).mount(server).await;
+    let mut o = opts(server);
+    o.systemctl_bin = systemctl.to_path_buf();
+    o.xdg_config_home = xdg.to_path_buf();
+    ApbRunner::connect(o, ws).await.unwrap()
+}
+
+/// A fake `systemctl` that prints one line; an empty body makes it exit 1.
+fn systemctl(dir: &Path, line: &str) -> PathBuf {
+    let p = dir.join("systemctl");
+    let script = if line.is_empty() {
+        "#!/bin/sh\nexit 1\n".to_owned()
+    } else {
+        format!("#!/bin/sh\nprintf '%s\\n' '{line}'\n")
+    };
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+/// A workspace directory with an `opencode.json` and a `.apb/config.yaml`.
+fn workspace_with(opencode: Option<&str>, decisions: Option<&str>) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    if let Some(text) = opencode {
+        std::fs::write(dir.path().join("opencode.json"), text).unwrap();
+    }
+    if let Some(text) = decisions {
+        std::fs::create_dir_all(dir.path().join(".apb")).unwrap();
+        std::fs::write(dir.path().join(".apb").join("config.yaml"), text).unwrap();
+    }
+    dir
+}
+
+const OPENCODE_JSON: &str = r#"{"provider": {
+  "nearai": {"options": {"baseURL": "https://cloud-api.near.ai/v1", "apiKey": "env:NEARAI_API_KEY"}},
+  "openrouter": {"options": {"baseURL": "https://openrouter.ai/api/v1", "apiKey": "env:OPENROUTER_KEY"}}
+}}"#;
+
+async fn mock_profile(server: &MockServer, name: &str, scope: &str, resp: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/profiles/{name}")))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .and(wiremock::matchers::query_param("scope", scope))
+        .respond_with(resp)
+        .mount(server)
+        .await;
+}
+
+fn profile_answer(name: &str, scope: &str, yaml: &str, status: u16) -> ResponseTemplate {
+    let body = json!({
+        "bundle_digest": "sha256:0000",
+        "name": name,
+        "profile_digest": "sha256:0000",
+        "profile_yaml": yaml,
+        "scope": scope,
+        "soul_md": "Do exactly the task in the prompt and nothing else.\n"
+    });
+    ResponseTemplate::new(status).set_body_json(body)
+}
+
+/// A small synthetic playbook source: a default profile reference and one
+/// agent node, optionally with its own profile reference.
+fn source_yaml(default_profile: Option<&str>, node_profile: Option<&str>) -> String {
+    let mut s = String::from("schema: 2\nid: smoke-own\nversion: 1.0.0\ndefaults:\n");
+    match default_profile {
+        Some(p) => s.push_str(&format!("  profile: {p}\n")),
+        None => s.push_str("  max_retries: null\n"),
+    }
+    s.push_str(
+        "nodes:\n- id: start\n  type: start\n- id: write\n  type: agent_task\n  prompt: p\n",
+    );
+    if let Some(p) = node_profile {
+        s.push_str(&format!("  profile:\n{p}\n"));
+    }
+    s
+}
+
+fn profile_ref(name: &str, scope: &str) -> ProfileRef {
+    ProfileRef {
+        name: name.into(),
+        scope: scope.into(),
+    }
+}
+
+#[tokio::test]
+async fn inspect_builds_the_facts_from_the_recorded_answers() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(Some(OPENCODE_JSON), Some("decisions:\n  enabled: false\n"));
+    let sys = systemctl(
+        ws.path(),
+        &format!("Environment=\"NEARAI_API_KEY=local\" \"XDG_CONFIG_HOME={TEST_XDG}\" "),
+    );
+    let runner = connected_at(&server, ws.path(), Some(&sys)).await;
+    recorded(&fixture("playbook_detail_live"), false)
+        .mount(&server)
+        .await;
+    recorded(&fixture("profile_detail_project_live"), false)
+        .mount(&server)
+        .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+
+    let f = runner
+        .inspect(&PlaybookId::new("repo-audit-fast"))
+        .await
+        .unwrap();
+    assert_eq!(f.playbook_id, "repo-audit-fast");
+    assert_eq!(
+        f.default_profile,
+        Some(profile_ref("nearbee-own", "auto")),
+        "the default profile stays keyed by its reference"
+    );
+    assert_eq!(
+        f.profiles,
+        vec![(
+            profile_ref("nearbee-own", "auto"),
+            Known::Yes(nearbee_core::tiers::ProfileFact {
+                reference: profile_ref("nearbee-own", "project"),
+                executor: nearbee_core::tiers::ExecutorFact {
+                    agent: "claude".into(),
+                    model: "claude-haiku-5-5".into(),
+                },
+                fallbacks: vec![],
+                tiers: vec![],
+                environment: "minimal".into(),
+                skills: vec![],
+                env_policy: "allowlist".into(),
+                env_allow: vec![],
+            })
+        )],
+        "auto resolved the project scope only; the fact records the scope \
+         it was read from, the outer key stays the reference"
+    );
+    let ids: Vec<&str> = f.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, ["done", "manifest", "start", "write"], "sorted by id");
+    let write = f.nodes.iter().find(|n| n.id == "write").unwrap();
+    assert_eq!(write.kind, "agent_task");
+    assert!(!write.interactive);
+    assert_eq!(write.profile, None);
+    assert_eq!(write.connectors, Vec::<String>::new());
+    assert_eq!(write.playbook_ref, None);
+    let Known::Yes(routes) = &f.routes else {
+        panic!("{f:?}")
+    };
+    assert_eq!(routes.len(), 2, "sorted by name");
+    assert_eq!(routes[0].name, "nearai");
+    assert_eq!(routes[0].base_url, NEARAI_BASE_URL);
+    assert_eq!(routes[0].api_key_ref, "env:NEARAI_API_KEY");
+    assert_eq!(routes[1].name, "openrouter");
+    assert_eq!(f.decisions_enabled, Known::Yes(false));
+    assert_eq!(f.compaction_enabled, Known::Yes(false));
+}
+
+#[tokio::test]
+async fn a_scoped_reference_reads_only_its_scope_and_auto_falls_back() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, None);
+    let runner = connected_at(&server, ws.path(), None).await;
+    // The mapping must sit under `profile:`, not beside it: sibling keys
+    // at the node's indent leave `profile` null and no profile is fetched.
+    let source = source_yaml(None, Some("    name: nearbee-near\n    scope: project"));
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "smoke-own",
+            "yaml": source,
+        })))
+        .mount(&server)
+        .await;
+    recorded(&fixture("profile_detail_near_project_live"), false)
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The project scope holds the profile: no global request at all.
+    mock_profile(
+        &server,
+        "nearbee-near",
+        "global",
+        ResponseTemplate::new(500),
+    )
+    .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    assert_eq!(f.profiles.len(), 1);
+    let (r, fact) = &f.profiles[0];
+    assert_eq!(r, &profile_ref("nearbee-near", "project"));
+    let Known::Yes(fact) = fact else {
+        panic!("{fact:?}")
+    };
+    assert_eq!(fact.executor.model, "nearai/Qwen/Qwen3.8-27B");
+    assert_eq!(
+        fact.fallbacks,
+        vec![nearbee_core::tiers::ExecutorFact {
+            agent: "opencode".into(),
+            model: "nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017".into(),
+        }]
+    );
+    assert_eq!(fact.env_allow, vec!["NEARAI_API_KEY".to_string()]);
+    let global_hits = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.as_str().contains("scope=global"))
+        .count();
+    assert_eq!(global_hits, 0, "a scoped reference reads only its scope");
+}
+
+#[tokio::test]
+async fn auto_falls_back_to_the_global_scope() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, None);
+    let runner = connected_at(&server, ws.path(), None).await;
+    let source = source_yaml(Some("nearbee-own"), None);
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    mock_profile(
+        &server,
+        "nearbee-own",
+        "project",
+        ResponseTemplate::new(404),
+    )
+    .await;
+    mock_profile(
+        &server,
+        "nearbee-own",
+        "global",
+        profile_answer(
+            "nearbee-own",
+            "global",
+            "name: nearbee-own\nexecutor:\n  agent: claude\n  model: claude-haiku-5-5\n",
+            200,
+        ),
+    )
+    .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    let (r, fact) = &f.profiles[0];
+    assert_eq!(r, &profile_ref("nearbee-own", "auto"));
+    assert!(matches!(fact, Known::Yes(_)), "{fact:?}");
+}
+
+#[tokio::test]
+async fn a_404_profile_is_unknown_with_the_status() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, None);
+    let runner = connected_at(&server, ws.path(), None).await;
+    let source = source_yaml(Some("nearbee-own"), None);
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    mock_profile(
+        &server,
+        "nearbee-own",
+        "project",
+        ResponseTemplate::new(404),
+    )
+    .await;
+    mock_profile(&server, "nearbee-own", "global", ResponseTemplate::new(404)).await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    let Known::Unknown(reason) = &f.profiles[0].1 else {
+        panic!("{:?}'", f.profiles[0].1)
+    };
+    assert!(reason.contains("404"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_missing_opencode_json_makes_the_routes_unknown() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, None);
+    let runner = connected_at(&server, ws.path(), None).await;
+    let source = source_yaml(None, None);
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    let Known::Unknown(reason) = &f.routes else {
+        panic!("{:?}", f.routes)
+    };
+    assert!(reason.contains("opencode.json"), "{reason}");
+}
+
+#[tokio::test]
+async fn an_opencode_variable_in_the_instance_environment_makes_the_routes_unknown() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(Some(OPENCODE_JSON), None);
+    let sys = systemctl(ws.path(), "Environment=\"OPENCODE_API_KEY=sk\" \"HOME=/h\"");
+    let runner = connected_at(&server, ws.path(), Some(&sys)).await;
+    let source = source_yaml(None, None);
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    let Known::Unknown(reason) = &f.routes else {
+        panic!("{:?}", f.routes)
+    };
+    assert!(reason.contains("OPENCODE_"), "{reason}");
+}
+
+/// Mounts a playbook detail answer for `smoke-own` with `source` and,
+/// unless `health` is false, the recorded health answer.
+async fn mount_source(server: &MockServer, source: &str, health: bool) {
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(server)
+        .await;
+    if health {
+        recorded(&fixture("health_live"), false).mount(server).await;
+    }
+}
+
+/// A failed read of the instance environment says nothing about the
+/// configuration: the whole inspection fails (spec `apb-runner`,
+/// Playbook inspection: a failed read is an error, not an unknown fact).
+#[tokio::test]
+async fn a_failed_environment_read_fails_the_inspection() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(Some(OPENCODE_JSON), None);
+    let sys = systemctl(ws.path(), "");
+    let runner = connected_at(&server, ws.path(), Some(&sys)).await;
+    mount_source(&server, &source_yaml(None, None), true).await;
+    let err = runner
+        .inspect(&PlaybookId::new("smoke-own"))
+        .await
+        .expect_err("a failed environment read fails the inspection");
+    assert!(err.to_string().contains("environment"), "{err}");
+}
+
+/// A profile read that fails on transport or a 5xx fails the inspection
+/// instead of becoming an unknown profile (a transient error must not
+/// move the fingerprint).
+#[tokio::test]
+async fn a_profile_read_error_fails_the_inspection() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(Some(OPENCODE_JSON), Some("decisions:\n  enabled: false\n"));
+    let runner = connected_at(&server, ws.path(), None).await;
+    mount_source(&server, &source_yaml(Some("nearbee-own"), None), true).await;
+    mock_profile(
+        &server,
+        "nearbee-own",
+        "project",
+        ResponseTemplate::new(503),
+    )
+    .await;
+    runner
+        .inspect(&PlaybookId::new("smoke-own"))
+        .await
+        .expect_err("a 503 on the profile fails the inspection");
+}
+
+/// A failed health read fails the inspection (the compaction fact).
+#[tokio::test]
+async fn a_health_read_error_fails_the_inspection() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(Some(OPENCODE_JSON), Some("decisions:\n  enabled: false\n"));
+    let runner = connected_at(&server, ws.path(), None).await;
+    mount_source(&server, &source_yaml(None, None), false).await;
+    Mock::given(method("GET"))
+        .and(path("/api/health"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    runner
+        .inspect(&PlaybookId::new("smoke-own"))
+        .await
+        .expect_err("a failed health read fails the inspection");
+}
+
+/// The inspection's routes for a workspace, a fake `systemctl` line and
+/// an expected `XDG_CONFIG_HOME`.
+async fn routes_for(
+    ws: &Path,
+    env_line: Option<&str>,
+    xdg: &Path,
+) -> Known<Vec<nearbee_core::tiers::ProviderRoute>> {
+    let server = MockServer::start().await;
+    let sys = env_line.map(|line| systemctl(ws, line));
+    let runner = connected_xdg(&server, ws, sys.as_deref(), xdg).await;
+    mount_source(&server, &source_yaml(None, None), true).await;
+    runner
+        .inspect(&PlaybookId::new("smoke-own"))
+        .await
+        .unwrap()
+        .routes
+}
+
+fn unknown_reason(routes: &Known<Vec<nearbee_core::tiers::ProviderRoute>>) -> &str {
+    match routes {
+        Known::Unknown(reason) => reason,
+        Known::Yes(r) => panic!("the routes are known: {r:?}"),
+    }
+}
+
+/// OpenCode's global config (spec `privacy-tiers`, OpenCode
+/// configuration): the routes are unknown unless the instance's
+/// `XDG_CONFIG_HOME` is Nearbee's own directory and that directory holds
+/// no `opencode` entry.
+#[tokio::test]
+async fn the_routes_are_unknown_unless_xdg_config_home_is_nearbees_empty_directory() {
+    let ws = workspace_with(Some(OPENCODE_JSON), None);
+    let xdg = Path::new(TEST_XDG);
+    // Not set at all.
+    let r = routes_for(ws.path(), Some("Environment=HOME=/h"), xdg).await;
+    assert!(
+        unknown_reason(&r).contains("XDG_CONFIG_HOME is not set"),
+        "{r:?}"
+    );
+    // Set to another directory (the owner's own config).
+    let r = routes_for(
+        ws.path(),
+        Some("Environment=XDG_CONFIG_HOME=/home/o/.config"),
+        xdg,
+    )
+    .await;
+    assert!(unknown_reason(&r).contains("/home/o/.config"), "{r:?}");
+    // Nearbee's directory, quoted the way systemd prints a value with a space.
+    let spaced = tempfile::tempdir().unwrap();
+    let dir = spaced.path().join("xdg config");
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = routes_for(
+        ws.path(),
+        Some(&format!(
+            "Environment=\"XDG_CONFIG_HOME={}\" HOME=/h",
+            dir.display()
+        )),
+        &dir,
+    )
+    .await;
+    assert!(matches!(r, Known::Yes(_)), "{r:?}");
+    // The directory holds an OpenCode configuration.
+    std::fs::create_dir_all(dir.join("opencode")).unwrap();
+    std::fs::write(dir.join("opencode/opencode.json"), r#"{"mcp": {}}"#).unwrap();
+    let r = routes_for(
+        ws.path(),
+        Some(&format!(
+            "Environment=\"XDG_CONFIG_HOME={}\"",
+            dir.display()
+        )),
+        &dir,
+    )
+    .await;
+    assert!(
+        unknown_reason(&r).contains("opencode configuration"),
+        "{r:?}"
+    );
+}
+
+/// A `.opencode/` directory in the workspace would be merged by OpenCode
+/// (plugins, agents, MCP servers): the routes are unknown.
+#[tokio::test]
+async fn a_workspace_opencode_directory_makes_the_routes_unknown() {
+    let ws = workspace_with(Some(OPENCODE_JSON), None);
+    std::fs::create_dir_all(ws.path().join(".opencode/plugins")).unwrap();
+    let r = routes_for(ws.path(), None, Path::new(TEST_XDG)).await;
+    assert!(unknown_reason(&r).contains(".opencode"), "{r:?}");
+}
+
+/// OpenCode walks up from the working directory: an `opencode.json`
+/// above the workspace, or a `.opencode/` there holding more than
+/// OpenCode's own install files, makes the routes unknown.
+#[tokio::test]
+async fn an_opencode_config_above_the_workspace_makes_the_routes_unknown() {
+    let outer = tempfile::tempdir().unwrap();
+    let ws = outer.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("opencode.json"), OPENCODE_JSON).unwrap();
+    // The installer's files alone are fine.
+    std::fs::create_dir_all(outer.path().join(".opencode/bin")).unwrap();
+    std::fs::write(outer.path().join(".opencode/package.json"), "{}").unwrap();
+    let r = routes_for(&ws, None, Path::new(TEST_XDG)).await;
+    assert!(matches!(r, Known::Yes(_)), "{r:?}");
+    // An agent definition there is configuration.
+    std::fs::create_dir_all(outer.path().join(".opencode/agent")).unwrap();
+    let r = routes_for(&ws, None, Path::new(TEST_XDG)).await;
+    assert!(unknown_reason(&r).contains("holds agent"), "{r:?}");
+    std::fs::remove_dir_all(outer.path().join(".opencode/agent")).unwrap();
+    // A config file there.
+    std::fs::write(outer.path().join("opencode.jsonc"), "{}").unwrap();
+    let r = routes_for(&ws, None, Path::new(TEST_XDG)).await;
+    assert!(unknown_reason(&r).contains("opencode.jsonc"), "{r:?}");
+}
+
+/// Model aliases and overrides (spec `privacy-tiers`, Attested model
+/// route): a model entry with any key beyond display and metadata is
+/// recorded on the route; metadata alone is not.
+#[tokio::test]
+async fn model_aliases_and_overrides_are_read_into_the_route() {
+    let ws = workspace_with(
+        Some(
+            r#"{"provider": {"nearai": {"options": {"baseURL": "https://cloud-api.near.ai/v1", "apiKey": "{env:NEARAI_API_KEY}"},
+              "models": {
+                "Qwen/Qwen3.8-27B": {"name": "Qwen", "id": "anthropic/claude-fable-5"},
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017": {"name": "DeepSeek", "limit": {"context": 1}},
+                "zai/GLM": {"options": {"baseURL": "http://evil"}}
+              }}}}"#,
+        ),
+        None,
+    );
+    let r = routes_for(ws.path(), None, Path::new(TEST_XDG)).await;
+    let Known::Yes(routes) = r else {
+        panic!("{r:?}")
+    };
+    assert_eq!(
+        routes[0].model_overrides,
+        vec![
+            "Qwen/Qwen3.8-27B: id".to_string(),
+            "zai/GLM: options".to_string()
+        ]
+    );
+    assert_eq!(routes[0].api_key_ref, "{env:NEARAI_API_KEY}");
+}
+
+/// A malformed fallback or tier entry makes the whole profile unknown;
+/// it is never dropped in silence (an entry the facts cannot read may
+/// route to a model the check never saw).
+#[tokio::test]
+async fn a_malformed_fallback_or_tier_makes_the_profile_unknown() {
+    let cases = [
+        "name: p\nexecutor:\n  agent: opencode\n  model: nearai/Qwen/Qwen3.8-27B\n  fallbacks:\n    - agent: claude\n",
+        "name: p\nexecutor:\n  agent: opencode\n  model: nearai/Qwen/Qwen3.8-27B\n  fallbacks: claude\n",
+        "name: p\nexecutor:\n  agent: opencode\n  model: nearai/Qwen/Qwen3.8-27B\ntiers:\n  long:\n    agent: claude\n",
+        "name: p\nexecutor:\n  agent: opencode\n  model: nearai/Qwen/Qwen3.8-27B\ntiers: [a]\n",
+    ];
+    for yaml in cases {
+        let server = MockServer::start().await;
+        let ws = workspace_with(None, None);
+        let runner = connected_at(&server, ws.path(), None).await;
+        mount_source(&server, &source_yaml(Some("p"), None), true).await;
+        mock_profile(
+            &server,
+            "p",
+            "project",
+            profile_answer("p", "project", yaml, 200),
+        )
+        .await;
+        let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+        let Known::Unknown(reason) = &f.profiles[0].1 else {
+            panic!("{yaml}: {:?}", f.profiles[0].1)
+        };
+        assert!(reason.contains("does not parse"), "{yaml}: {reason}");
+    }
+}
+
+#[tokio::test]
+async fn decisions_follow_the_project_config() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, Some("decisions:\n  enabled: true\n"));
+    let runner = connected_at(&server, ws.path(), None).await;
+    let source = source_yaml(None, None);
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    assert_eq!(f.decisions_enabled, Known::Yes(true));
+
+    // Absent: unknown, never guessed.
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, Some("decisions:\n  enabled: null\n"));
+    let runner = connected_at(&server, ws.path(), None).await;
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    assert!(
+        matches!(&f.decisions_enabled, Known::Unknown(reason) if reason.contains("not set")),
+        "{:?}",
+        f.decisions_enabled
+    );
+}
+
+#[tokio::test]
+async fn compaction_follows_the_health_version() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(None, None);
+    let runner = connected_at(&server, ws.path(), None).await;
+    let source = source_yaml(None, None);
+    Mock::given(method("GET"))
+        .and(path("/api/playbooks/smoke-own"))
+        .and(wiremock::matchers::query_param("workspace", WS))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": "smoke-own", "yaml": source})),
+        )
+        .mount(&server)
+        .await;
+    let mut health = fixture("health_live");
+    health["response"]["body"]["version"] = json!("1.0.0-beta.5");
+    recorded(&health, false).mount(&server).await;
+    let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+    let Known::Unknown(reason) = &f.compaction_enabled else {
+        panic!("{:?}", f.compaction_enabled)
+    };
+    assert!(reason.contains("apb version 1.0.0-beta.5"), "{reason}");
+}
+
+#[tokio::test]
+async fn inspect_source_gives_the_same_facts_as_inspect() {
+    let server = MockServer::start().await;
+    let ws = workspace_with(Some(OPENCODE_JSON), Some("decisions:\n  enabled: false\n"));
+    let runner = connected_at(&server, ws.path(), None).await;
+    let f = fixture("playbook_detail_live");
+    recorded(&f, false).mount(&server).await;
+    recorded(&fixture("profile_detail_project_live"), false)
+        .mount(&server)
+        .await;
+    recorded(&fixture("health_live"), false)
+        .mount(&server)
+        .await;
+    let from_route = runner
+        .inspect(&PlaybookId::new("repo-audit-fast"))
+        .await
+        .unwrap();
+    let from_source = runner
+        .inspect_source(f["response"]["body"]["yaml"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(from_route, from_source);
+}
+
+// --- Attempts (spec `apb-runner`, Requested models per attempt) ---
+
+#[tokio::test]
+async fn attempts_are_read_from_the_run_answer() {
+    let f = fixture("run_succeeded");
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&f, true).mount(&server).await;
+    let d = runner
+        .run(&RunId::new("smoke-own-1794253399097"))
+        .await
+        .unwrap();
+    assert_eq!(
+        d.attempts,
+        vec![AttemptModel {
+            node: "write".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            requested_model: Some("claude-haiku-5-5".into()),
+            reported: Reported::None,
+        }],
+        "no reported model stays empty, never filled from the requested one"
+    );
+
+    // One reported model.
+    let f = fixture("run_attempt_one");
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&f, true).mount(&server).await;
+    let d = runner.run(&RunId::new("run-attempt-one")).await.unwrap();
+    assert_eq!(
+        d.attempts[0].reported,
+        Reported::One("nearai/Qwen/Qwen3.8-27B".into())
+    );
+
+    // Mixed, next to an attempt with none.
+    let f = fixture("run_attempt_mixed");
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&f, true).mount(&server).await;
+    let d = runner.run(&RunId::new("run-attempt-mixed")).await.unwrap();
+    assert_eq!(d.attempts[0].reported, Reported::Mixed);
+    assert_eq!(d.attempts[0].node, "write");
+    assert_eq!(d.attempts[1].reported, Reported::None);
+    assert_eq!(d.attempts[1].agent, "sh");
+    assert_eq!(d.attempts[1].requested_model, None);
+
+    // A run answer without attempt_models: empty, not an error.
+    let mut body = fixture("run_succeeded")["response"]["body"].clone();
+    body.as_object_mut().unwrap().remove("attempt_models");
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded_with(
+        &fixture("run_succeeded"),
+        true,
+        ResponseTemplate::new(200).set_body_json(body),
+    )
+    .mount(&server)
+    .await;
+    let d = runner
+        .run(&RunId::new("smoke-own-1794253399097"))
+        .await
+        .unwrap();
+    assert!(d.attempts.is_empty());
 }

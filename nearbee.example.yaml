@@ -14,6 +14,11 @@ apb:
   # scope check, and the import and approval of `nearbee list`). Never
   # ~/.config/apb, the everyday instance.
   config_dir: ~/.local/share/nearbee/apb-config
+  # XDG_CONFIG_HOME of that instance's unit (scripts/apb-instance.sh sets
+  # it): a directory Nearbee owns with no OpenCode configuration in it. The
+  # tier check makes the model routes unknown unless the unit carries
+  # exactly this path.
+  xdg_config_home: ~/.local/share/nearbee/xdg-config
 limits:
   markdown_bytes: 262144
   file_bytes: 26214400

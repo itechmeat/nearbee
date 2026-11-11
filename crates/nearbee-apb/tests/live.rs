@@ -66,6 +66,9 @@ async fn smoke(playbook: &str) {
                     PathBuf::from(std::env::var("HOME").unwrap())
                         .join(".local/share/nearbee/apb-config")
                 }),
+            systemctl_bin: PathBuf::from("systemctl"),
+            xdg_config_home: PathBuf::from(std::env::var("HOME").unwrap())
+                .join(".local/share/nearbee/xdg-config"),
         },
         &ws,
     )

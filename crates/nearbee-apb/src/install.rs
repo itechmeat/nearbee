@@ -146,10 +146,26 @@ impl ApbCli {
     }
 }
 
-/// Builds the materialised playbook text: `id: <handle>`, profile names
-/// unchanged, `supervisor.policy.trial_candidates: off` set, version
-/// derived from the digest of the whole bundle (text and scripts).
-pub fn materialise(source: &str, handle: &str, scripts: &[Script]) -> Result<String, InstallError> {
+/// Builds the materialised playbook text: `id: <handle>`, the listing's
+/// profile set as `defaults.profile` when one is given, `supervisor.policy
+/// .trial_candidates: off` set, version derived from the digest of the
+/// whole bundle (text and scripts). Without a profile the source's
+/// `defaults.profile` is kept and the text is byte-identical to a run
+/// without the profile step.
+pub fn materialise(
+    source: &str,
+    handle: &str,
+    profile: Option<&str>,
+    scripts: &[Script],
+) -> Result<String, InstallError> {
+    // The profile step runs first, on parsed YAML, so comments and flow
+    // style cannot hide a node's own profile; the line-based steps then run
+    // on the emitted text as before. The version is derived after both.
+    let source = match profile {
+        Some(p) => apply_profile(source, p)?,
+        None => source.to_owned(),
+    };
+    let source = source.as_str();
     if !handle
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
@@ -256,6 +272,62 @@ pub fn materialise(source: &str, handle: &str, scripts: &[Script]) -> Result<Str
         );
     }
     Ok(text)
+}
+
+/// Sets `defaults.profile` to the listing's profile in the parsed source
+/// and refuses any node that names its own `profile` (design 1.2): only
+/// the listing may bind profiles, so one source can produce two variants
+/// of one playbook. The rewritten text is emitted as YAML; nothing else is
+/// changed.
+fn apply_profile(source: &str, profile: &str) -> Result<String, InstallError> {
+    let step = "materialise";
+    let mut v: yaml_serde::Value = yaml_serde::from_str(source).map_err(|e| InstallError {
+        step,
+        detail: format!("the source playbook is not valid YAML: {e}"),
+    })?;
+    if let Some(nodes) = v.get("nodes").and_then(|n| n.as_sequence()) {
+        for node in nodes {
+            let names_profile = node.as_mapping().is_some_and(|m| m.contains_key("profile"));
+            if names_profile {
+                let id = node
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("without an id");
+                return Err(InstallError {
+                    step,
+                    detail: format!(
+                        "node `{id}` names its own `profile`; only the listing's profile is allowed"
+                    ),
+                });
+            }
+        }
+    }
+    let key = yaml_serde::Value::String("profile".into());
+    let value = yaml_serde::Value::String(profile.to_owned());
+    match v.get_mut("defaults") {
+        Some(defaults) => {
+            let map = defaults.as_mapping_mut().ok_or_else(|| InstallError {
+                step,
+                detail: "`defaults` is not a mapping; the listing's profile cannot be set".into(),
+            })?;
+            map.insert(key, value);
+        }
+        None => {
+            let mut map = yaml_serde::Mapping::new();
+            map.insert(key, value);
+            let root = v.as_mapping_mut().ok_or_else(|| InstallError {
+                step,
+                detail: "the source playbook is not a mapping".into(),
+            })?;
+            root.insert(yaml_serde::Value::String("defaults".into()), {
+                yaml_serde::Value::Mapping(map)
+            });
+        }
+    }
+    yaml_serde::to_string(&v).map_err(|e| InstallError {
+        step,
+        detail: format!("the rewritten playbook cannot be emitted: {e}"),
+    })
 }
 
 /// Whether the playbook text sets `supervisor.policy.trial_candidates`
@@ -566,9 +638,10 @@ pub fn install_source(
     cli: &ApbCli,
     source: &str,
     handle: &str,
+    profile: Option<&str>,
     scripts: &[Script],
 ) -> Result<Installed, InstallError> {
-    let materialised = materialise(source, handle, scripts)?;
+    let materialised = materialise(source, handle, profile, scripts)?;
     install_playbook(cli, &materialised, scripts)
 }
 
@@ -608,19 +681,31 @@ mod tests {
             bytes: b"echo hi\n".to_vec(),
             executable: false,
         };
-        let m_a = materialise(&src, "repo-audit-fast", std::slice::from_ref(&bytes_a)).unwrap();
+        let m_a = materialise(
+            &src,
+            "repo-audit-fast",
+            None,
+            std::slice::from_ref(&bytes_a),
+        )
+        .unwrap();
         assert_eq!(
-            materialise(&src, "repo-audit-fast", std::slice::from_ref(&bytes_a)).unwrap(),
+            materialise(
+                &src,
+                "repo-audit-fast",
+                None,
+                std::slice::from_ref(&bytes_a)
+            )
+            .unwrap(),
             m_a,
             "an unchanged bundle keeps its version"
         );
-        let m_b = materialise(&src, "repo-audit-fast", &[bytes_b]).unwrap();
+        let m_b = materialise(&src, "repo-audit-fast", None, &[bytes_b]).unwrap();
         assert_ne!(
             version_in(&m_a).unwrap(),
             version_in(&m_b).unwrap(),
             "a script byte change must give a new version"
         );
-        let m_c = materialise(&src, "repo-audit-fast", &[flag_c]).unwrap();
+        let m_c = materialise(&src, "repo-audit-fast", None, &[flag_c]).unwrap();
         assert_ne!(
             version_in(&m_a).unwrap(),
             version_in(&m_c).unwrap(),
@@ -632,14 +717,14 @@ mod tests {
 
     fn read_source() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../playbooks/first-hire/repo-audit-fast.yaml");
+            .join("../../playbooks/repo-audit/playbook.yaml");
         std::fs::read_to_string(path).unwrap()
     }
 
     #[test]
     fn materialise_rewrites_the_id_and_sets_trial_off() {
         let src = read_source();
-        let m = materialise(&src, "repo-audit-fast", &scripts()).unwrap();
+        let m = materialise(&src, "repo-audit-fast", None, &scripts()).unwrap();
         assert!(m.contains("id: repo-audit-fast\n"));
         assert!(
             !m.contains("version: 1.0.0"),
@@ -652,12 +737,16 @@ mod tests {
         );
         assert!(m.contains("nodes:\n"), "the rest of the playbook is kept");
         // The version derivation is stable for the same source...
-        assert_eq!(materialise(&src, "repo-audit-fast", &scripts()).unwrap(), m);
+        assert_eq!(
+            materialise(&src, "repo-audit-fast", None, &scripts()).unwrap(),
+            m
+        );
         let v = version_in(&m).unwrap();
         // ...and a changed source gets a different version.
         let other = materialise(
             &src.replace("nodes:", "nodes_changed:"),
             "repo-audit-fast",
+            None,
             &scripts(),
         )
         .unwrap();
@@ -670,25 +759,25 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: auto\ndefaults:",
         );
-        let err = materialise(&src, "x", &scripts()).unwrap_err();
+        let err = materialise(&src, "x", None, &scripts()).unwrap_err();
         assert!(err.detail.contains("trial_candidates"), "{err}");
         // `off` explicitly is fine.
         let src = read_source().replace(
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: off\ndefaults:",
         );
-        let m = materialise(&src, "x", &scripts()).unwrap();
+        let m = materialise(&src, "x", None, &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
         // The structural check is not fooled by a comment or flow style.
         let tricky = read_source().replace(
             "defaults:",
             "supervisor:\n  policy: {trial_candidates: auto}\ndefaults:",
         );
-        assert!(materialise(&tricky, "x", &scripts()).is_err());
+        assert!(materialise(&tricky, "x", None, &scripts()).is_err());
         let commented =
             read_source().replace("defaults:", "defaults:\n  # trial_candidates: off\n");
         assert!(
-            materialise(&commented, "x", &scripts()).is_ok(),
+            materialise(&commented, "x", None, &scripts()).is_ok(),
             "a comment is not a setting"
         );
     }
@@ -696,8 +785,8 @@ mod tests {
     #[test]
     fn materialise_rejects_an_unsafe_id() {
         let src = read_source();
-        assert!(materialise(&src, "../evil", &scripts()).is_err());
-        assert!(materialise(&src, "", &scripts()).is_err());
+        assert!(materialise(&src, "../evil", None, &scripts()).is_err());
+        assert!(materialise(&src, "", None, &scripts()).is_err());
     }
 
     /// O-13: a source `policy:` block in the supervisor is dropped whole,
@@ -708,7 +797,7 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: off\n    log_level: debug\ndefaults:",
         );
-        let m = materialise(&src, "x", &scripts()).unwrap();
+        let m = materialise(&src, "x", None, &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
         assert!(
             !m.contains("log_level"),
@@ -719,7 +808,7 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    trial_candidates: off\n      nested: keep_or_drop\ndefaults:",
         );
-        let m = materialise(&src, "x", &scripts()).unwrap();
+        let m = materialise(&src, "x", None, &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
         assert!(!m.contains("nested"), "{m}");
     }
@@ -733,7 +822,7 @@ mod tests {
             "defaults:",
             "supervisor:\n  policy:\n    max_retries: 2\n\n    # a comment\n    budget: 3\n  keep_me: 1\ndefaults:",
         );
-        let m = materialise(&src, "x", &scripts()).unwrap();
+        let m = materialise(&src, "x", None, &scripts()).unwrap();
         assert!(
             !m.contains("budget"),
             "a child after the blank line survived: {m}"
@@ -778,7 +867,7 @@ mod tests {
         // A playbook with the key only in another block installs fine and
         // carries exactly the adapter's own trial setting.
         let src = read_source().replace("defaults:", "trial_candidates: auto\ndefaults:");
-        let m = materialise(&src, "x", &scripts()).unwrap();
+        let m = materialise(&src, "x", None, &scripts()).unwrap();
         assert_eq!(m.matches("trial_candidates: off").count(), 1);
     }
 
@@ -909,7 +998,7 @@ esac
     }
 
     fn materialised_for(handle: &str) -> String {
-        materialise(&read_source(), handle, &scripts()).unwrap()
+        materialise(&read_source(), handle, None, &scripts()).unwrap()
     }
 
     /// Puts the materialised text into the fake's export state, so the
@@ -1043,5 +1132,117 @@ esac
         assert!(err.detail.contains("already exists"), "{err}");
         // Nothing was approved.
         assert!(!fake.state().join("approved").exists());
+    }
+
+    /// The listing's profile replaces `defaults.profile` (spec
+    /// `listing-publish`, Materialisation) and is created when the source
+    /// has no `defaults` block.
+    #[test]
+    fn a_listing_profile_replaces_the_default_and_is_created_when_absent() {
+        let src = read_source();
+        assert!(
+            src.contains("profile: nearbee-own"),
+            "the source fixture sets defaults.profile"
+        );
+        let m = materialise(&src, "repo-audit-fast", Some("nearbee-near"), &scripts()).unwrap();
+        assert!(
+            m.contains("profile: nearbee-near"),
+            "the listing's profile is set: {m}"
+        );
+        assert!(
+            !m.contains("profile: nearbee-own"),
+            "the source's profile is replaced: {m}"
+        );
+        // Created when absent: the emitted YAML holds the block either way.
+        let bare = "id: x\nversion: 1.0.0\nnodes:\n";
+        let m = materialise(bare, "x", Some("nearbee-near"), &[]).unwrap();
+        let v: yaml_serde::Value = yaml_serde::from_str(&m).unwrap();
+        assert_eq!(
+            v["defaults"]["profile"],
+            yaml_serde::from_str::<yaml_serde::Value>("nearbee-near").unwrap()
+        );
+    }
+
+    /// A node that binds its own profile is refused, naming the node,
+    /// before anything is installed (spec `listing-publish`, "Node binds a
+    /// profile").
+    #[test]
+    fn a_node_with_its_own_profile_is_refused_naming_the_node() {
+        let src = read_source().replace(
+            "  - { id: done",
+            "  - id: gate\n    type: human_review\n    profile: my-own\n  - { id: done",
+        );
+        let err = materialise(&src, "x", Some("nearbee-near"), &scripts()).unwrap_err();
+        assert!(err.detail.contains("gate"), "{err}");
+        assert!(err.detail.contains("profile"), "{err}");
+        // The refusal is on the parsed structure: a flow-style node with a
+        // profile key is refused just the same.
+        let src = read_source().replace(
+            "  - { id: done",
+            "  - { id: gate, type: human_review, profile: my-own }\n  - { id: done",
+        );
+        let err = materialise(&src, "x", Some("nearbee-near"), &scripts()).unwrap_err();
+        assert!(err.detail.contains("gate"), "{err}");
+        // Without a listing profile the node key is still refused: the
+        // variant rewrite always runs when a profile is set, and a source
+        // that binds node profiles cannot be a variant source.
+    }
+
+    /// Two listings with two profiles on one source give two different
+    /// derived versions, because the materialised texts differ (spec
+    /// `listing-publish`, "Two variants from one source").
+    #[test]
+    fn two_profiles_from_one_source_give_two_different_derived_versions() {
+        let src = read_source();
+        let a = materialise(&src, "repo-audit-fast", Some("nearbee-near"), &scripts()).unwrap();
+        let b = materialise(
+            &src,
+            "repo-audit-fast",
+            Some("nearbee-own-premium"),
+            &scripts(),
+        )
+        .unwrap();
+        assert_ne!(version_in(&a).unwrap(), version_in(&b).unwrap());
+        assert!(a.contains("profile: nearbee-near"));
+        assert!(b.contains("profile: nearbee-own-premium"));
+    }
+
+    /// Without a profile the output is byte-identical to the rewrite
+    /// before the profile step existed: the source text survives the line
+    /// steps unchanged except for the id, version and supervisor policy.
+    #[test]
+    fn without_a_profile_the_output_is_unchanged() {
+        let src = read_source();
+        let m = materialise(&src, "repo-audit-fast", None, &scripts()).unwrap();
+        // The source's own defaults block is carried over verbatim.
+        assert!(m.contains("profile: nearbee-own"));
+        // Every source line that is not rewritten appears in the output in
+        // order: collect the source lines the steps do not touch.
+        let untouched = ["type: agent_task", "script: scripts/finish.sh", "edges:"];
+        let mut at = 0;
+        for needle in untouched {
+            let found = m[at..].find(needle).map(|i| i + at);
+            assert!(found.is_some(), "{needle} missing from the output");
+            at = found.unwrap();
+        }
+        // Idempotent: no profile twice changes nothing.
+        assert_eq!(
+            materialise(&src, "repo-audit-fast", None, &scripts()).unwrap(),
+            m
+        );
+    }
+
+    /// A source that is not valid YAML is refused by the profile step
+    /// instead of corrupting the line-based rewrite.
+    #[test]
+    fn a_source_that_is_not_yaml_is_refused_when_a_profile_is_set() {
+        let err = materialise(
+            "id: x\nnodes:\n  - { id: a\n",
+            "x",
+            Some("nearbee-near"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.detail.contains("not valid YAML"), "{err}");
     }
 }

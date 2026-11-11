@@ -83,7 +83,7 @@ What works today, with Rust stable and `apb` 1.0.0-beta.6 installed:
    handles with masked tokens. Set `NEARBEE_CREDENTIALS` to use a different
    store file (an operator override, honoured by `agent`, `list` and
    `serve`); the default stays under `XDG_CONFIG_HOME`.
-7. `nearbee list playbooks/first-hire/listing.repo-audit-fast.yaml`
+7. `nearbee list playbooks/repo-audit/listing.repo-audit-fast.yaml`
    installs the listing's playbook into the apb workspace, records the
    installed version and prints a table of the values you set in the
    market web app (name, description, bio, category, tags, SLA, price),

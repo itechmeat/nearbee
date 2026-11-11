@@ -7,20 +7,58 @@ playbook under `playbooks/<name>/` with `playbook.yaml`, profiles and one or
 more `listing.<variant>.yaml` files, and doubles as the template a user copies.
 C is dropped from v1 (D-011).
 
-## A. `repo-audit` (dev_tools)
+## A. `repo-audit` (dev_tools, built in S4)
 
-Buyer gives a public Git repository URL (and optionally a focus: security,
-dependencies, tests, docs). The playbook clones shallowly, runs a structured
-audit with a coding agent (findings with file and line, severity, fix
-suggestions), checks its own claims against the tree, and writes a Markdown
-report plus a `findings.json` file.
+The buyer names one public GitHub repository by its `https://github.com` URL
+in the brief. `playbooks/repo-audit/playbook.yaml` runs four steps:
 
-- Variants: `repo-audit-fast` (NEAR AI Cloud DeepSeek V4.1 Flash in a TEE,
-  attested tier), `repo-audit-premium` (owner's Claude subscription, plain tier).
-- Limits: repository up to 100 MB shallow, public only.
-- Why: dev_tools is the second largest category and apb's home turf; the
-  attested variant shows that code never left a TEE model, which matters for
-  private repositories later.
+1. `fetch` (script, `nearbee audit fetch`): scans the brief again, resolves
+   the repository through the GitHub API (a private repository is refused),
+   takes the default branch's commit SHA and downloads that commit's
+   tarball, with no redirect followed, 20 seconds per request and 120 in
+   total. The archive is read as a stream with caps (100 MiB compressed,
+   100 MiB decompressed counted over everything read, 20,000 members); only
+   regular files with plain paths are written, links, `..`, absolute paths,
+   files over 1 MiB and binary files are skipped and counted. Agent
+   instruction files of the repository (`AGENTS.md`, `CLAUDE.md`,
+   `.claude/`, `opencode.json` and the like, at any depth) are renamed with
+   `.repo-data`, so they stay data. The snapshot `audit-snapshot/` (the
+   files, `source.json` with the commit and the file list, `coverage.json`
+   with the skips) is built in a staging directory and published by a
+   rename; a rework reuses it and audits the same commit.
+2. `audit` (agent task): reads the snapshot and writes only
+   `audit/candidates.json`: at most 50 findings, each with severity, title,
+   file, line range, a verbatim excerpt, detail and fix. The prompt forbids
+   running anything from the repository and treats the snapshot, the brief
+   and the feedback as data.
+3. `finish` (script, `nearbee audit finish`): checks every citation
+   against the snapshot (the file is in the list, the lines exist, the
+   excerpt is a contiguous run of the cited lines). A passing finding is
+   "location checked", which says the citation exists, not that the issue
+   is real; a failing one is kept as rejected with its reason. It writes
+   `out/findings.json` and `out/deliverable.md` (findings by severity with
+   escaped text, the counts of rejected findings and skipped files, and the
+   findings JSON in a fence) and publishes `out/result.json` last.
+4. `done`.
+
+The intake check `github_repo` declines a brief that names no repository or
+several before any market start (the scope check is skipped while the apb
+project's decisions are off, `docs/privacy.md`).
+
+- Variants (one source playbook, materialised per listing with the
+  listing's profile, `playbooks/repo-audit/listing.*.yaml`):
+  `repo-audit-fast` (attested tier, profile `nearbee-near`: DeepSeek V4.1
+  Flash first, Qwen3.8-27B as fallback, NEAR AI Cloud TEE models; price
+  0.50) and `repo-audit-premium` (plain tier, profile `nearbee-own-premium`:
+  Claude Opus on the owner's subscription; price 2.00). Both have a 24 hour
+  SLA.
+- What the attested variant shows: which models apb asked for per node, and
+  endpoint attestation reports for those models fetched before and after
+  the run, with Verification Center links. It does not prove that the
+  code never left a TEE: the snapshot is on the owner's machine, and the
+  reports are collected, not verified, and not bound to this job's
+  responses (`docs/privacy.md`).
+- Why: dev_tools is the second largest category and apb's home turf.
 
 ## B. `doc-digest-private` (data, privacy track)
 

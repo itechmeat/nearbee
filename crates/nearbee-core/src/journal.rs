@@ -86,6 +86,8 @@ pub enum Event {
     Lifecycle(Lifecycle),
     Inputs(Inputs),
     Attention(Attention),
+    EvidenceCollected(EvidenceCollected),
+    EvidenceFailed(EvidenceFailed),
     Unknown {
         event_type: String,
         raw: serde_json::Value,
@@ -107,6 +109,8 @@ impl Event {
             Event::Lifecycle(_) => "lifecycle",
             Event::Inputs(_) => "inputs",
             Event::Attention(_) => "attention",
+            Event::EvidenceCollected(_) => "evidence_collected",
+            Event::EvidenceFailed(_) => "evidence_failed",
             Event::Unknown { event_type, .. } => event_type,
         }
     }
@@ -200,6 +204,11 @@ pub struct RunObserved {
     /// The per-run budget the run started with, as a decimal string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<String>,
+    /// The per-attempt model records of the terminal observation
+    /// (design 7). A record written without the field (S3) reads as
+    /// empty; non-terminal observations carry none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<crate::runner::AttemptModel>,
 }
 
 /// The files a run produced, by name, size and digest.
@@ -278,6 +287,26 @@ pub struct Attention {
     pub detail: String,
 }
 
+/// An endpoint attestation report stored for the generation (design
+/// 6.2): its phase (`start` or `end`), the model and the SHA-256 of the
+/// report body. The body itself lives in the generation's private
+/// snapshot file, never in the journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceCollected {
+    pub phase: String,
+    pub model: String,
+    pub sha256: String,
+}
+
+/// A failed report fetch (design 6.2): phase, model and a short redacted
+/// reason of at most 200 characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceFailed {
+    pub phase: String,
+    pub model: String,
+    pub reason: String,
+}
+
 /// The wire envelope. `generation` is additive: a record written without
 /// it (S2) reads as generation 1.
 #[derive(Serialize, Deserialize)]
@@ -328,6 +357,8 @@ impl Record {
             Event::Lifecycle(p) => to_value(p),
             Event::Inputs(p) => to_value(p),
             Event::Attention(p) => to_value(p),
+            Event::EvidenceCollected(p) => to_value(p),
+            Event::EvidenceFailed(p) => to_value(p),
             Event::Unknown { raw, .. } => raw.clone(),
         };
         let wire = Wire {
@@ -371,6 +402,8 @@ impl Record {
             "lifecycle" => typed(serde_json::from_value(p).map(Event::Lifecycle))?,
             "inputs" => typed(serde_json::from_value(p).map(Event::Inputs))?,
             "attention" => typed(serde_json::from_value(p).map(Event::Attention))?,
+            "evidence_collected" => typed(serde_json::from_value(p).map(Event::EvidenceCollected))?,
+            "evidence_failed" => typed(serde_json::from_value(p).map(Event::EvidenceFailed))?,
             other => Event::Unknown {
                 event_type: other.to_owned(),
                 raw: p,
@@ -583,6 +616,7 @@ mod tests {
             rec(
                 5,
                 Event::RunObserved(RunObserved {
+                    attempts: Vec::new(),
                     run_id: "r1".into(),
                     execution: 1,
                     status: "succeeded".into(),
@@ -690,12 +724,57 @@ mod tests {
                     detail: String::new(),
                 }),
             ),
+            rec(
+                7,
+                Event::EvidenceCollected(EvidenceCollected {
+                    phase: "start".into(),
+                    model: "Qwen/Qwen3.8-27B".into(),
+                    sha256: "ab".repeat(32),
+                }),
+            ),
+            rec(
+                8,
+                Event::EvidenceFailed(EvidenceFailed {
+                    phase: "end".into(),
+                    model: "Qwen/Qwen3.8-27B".into(),
+                    reason: "503 Service Unavailable".into(),
+                }),
+            ),
         ];
         for r in &all {
             assert_eq!(&Record::parse_line(&r.to_line(), 1).unwrap(), r);
         }
         let read = read(&join(&all)).unwrap();
         assert_eq!(read.records, all);
+    }
+
+    /// The evidence events of design 6.2 are written under their flat
+    /// event type names and carry no report body.
+    #[test]
+    fn evidence_events_use_their_flat_names() {
+        let r = rec(
+            1,
+            Event::EvidenceCollected(EvidenceCollected {
+                phase: "start".into(),
+                model: "m".into(),
+                sha256: "00".into(),
+            }),
+        );
+        let line = r.to_line();
+        assert!(
+            line.contains(r#""event_type":"evidence_collected""#),
+            "{line}"
+        );
+        assert!(!line.contains("body"), "{line}");
+        let f = rec(
+            2,
+            Event::EvidenceFailed(EvidenceFailed {
+                phase: "end".into(),
+                model: "m".into(),
+                reason: "timeout".into(),
+            }),
+        );
+        assert!(f.to_line().contains(r#""event_type":"evidence_failed""#));
     }
 
     /// The new intent kinds of design 2 round-trip through the existing

@@ -478,6 +478,13 @@ struct FakeRunner {
     params_by_id: std::sync::Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
     /// The time limit of every decide call, in order (R3-9).
     decide_limits: std::sync::Arc<Mutex<Vec<Duration>>>,
+    /// What `inspect` answers (the drift pass reads it each round);
+    /// `None` answers the shared `facts()`.
+    inspect_facts: Option<nearbee_core::runner::ExecutionFacts>,
+    /// The per-attempt model records every run detail reports.
+    attempts: Vec<nearbee_core::runner::AttemptModel>,
+    /// While set, `inspect` fails (a transport error on the instance).
+    inspect_fails: std::sync::Arc<Mutex<bool>>,
 }
 
 /// A complete small cost, as apb reports a finished run with usage.
@@ -520,7 +527,22 @@ impl FakeRunner {
             lookup_fails: std::sync::Arc::new(Mutex::new(Default::default())),
             params_by_id: std::sync::Arc::new(Mutex::new(BTreeMap::new())),
             decide_limits: std::sync::Arc::new(Mutex::new(Vec::new())),
+            inspect_facts: None,
+            attempts: Vec::new(),
+            inspect_fails: std::sync::Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// Pins what `inspect` answers (the drift pass reads it each round).
+    fn with_inspect_facts(mut self, facts: nearbee_core::runner::ExecutionFacts) -> Self {
+        self.inspect_facts = Some(facts);
+        self
+    }
+
+    /// Pins the per-attempt model records every run detail reports.
+    fn with_attempts(mut self, attempts: Vec<nearbee_core::runner::AttemptModel>) -> Self {
+        self.attempts = attempts;
+        self
     }
 
     /// Makes every lookup of one search value fail.
@@ -580,6 +602,21 @@ impl FakeRunner {
     }
 }
 
+/// Execution facts the fake runner reports: routes unknown (a plain
+/// listing does not need them), decisions and compaction off, which the
+/// statement states and every tier requires to be known.
+fn facts() -> nearbee_core::runner::ExecutionFacts {
+    nearbee_core::runner::ExecutionFacts {
+        playbook_id: "repo-audit-fast".into(),
+        default_profile: None,
+        nodes: Vec::new(),
+        profiles: Vec::new(),
+        routes: nearbee_core::tiers::Known::Unknown("not inspected in this test".into()),
+        decisions_enabled: nearbee_core::tiers::Known::Yes(false),
+        compaction_enabled: nearbee_core::tiers::Known::Yes(false),
+    }
+}
+
 fn detail(id: &str, status: &str) -> RunDetail {
     RunDetail {
         id: RunId::new(id),
@@ -591,6 +628,7 @@ fn detail(id: &str, status: &str) -> RunDetail {
         params: BTreeMap::new(),
         usage: Usage::default(),
         budget_paused: false,
+        attempts: Vec::new(),
     }
 }
 
@@ -693,12 +731,32 @@ impl Runner for FakeRunner {
                 Usage::default()
             },
             budget_paused: self.budget_paused,
+            attempts: self.attempts.clone(),
             ..detail(id.as_str(), status)
         })
     }
     async fn stop(&self, _id: &RunId) -> Result<(), RunnerError> {
         self.calls.push(format!("stop {}", _id));
         Ok(())
+    }
+    async fn inspect(
+        &self,
+        id: &PlaybookId,
+    ) -> Result<nearbee_core::runner::ExecutionFacts, RunnerError> {
+        self.calls.push(format!("inspect {}", id));
+        if *self.inspect_fails.lock().unwrap() {
+            return Err(RunnerError::RetryableRead {
+                detail: "GET /api/profiles/nearbee-near: connection refused".into(),
+            });
+        }
+        Ok(self.inspect_facts.clone().unwrap_or_else(facts))
+    }
+    async fn inspect_source(
+        &self,
+        _source: &str,
+    ) -> Result<nearbee_core::runner::ExecutionFacts, RunnerError> {
+        self.calls.push("inspect_source".into());
+        Ok(facts())
     }
     async fn abort(&self, id: &RunId) -> Result<(), RunnerError> {
         self.calls.push(format!("abort {}", id));
@@ -772,6 +830,51 @@ fn ctx() -> ListingContext {
         sla_seconds: Some(3600),
         playbook_version: "1.0.0".into(),
         playbook_sha256: "ab".into(),
+        // Most tests serve a context without a listing record (the S2
+        // shape): no drift pass, no intake check, no statement snapshot.
+        // The S4 tests build on `s4_ctx`.
+        record: None,
+    }
+}
+
+/// The retention days the S4 contexts render and freeze the statement
+/// with (`opts` carries the same value).
+const RETENTION: u32 = 7;
+
+/// A resolved S4 record matching the fake runner's facts: the drift pass
+/// finds no drift for it.
+fn s4_record(tier: nearbee_core::listing::Tier) -> nearbee_core::listing::ResolvedListing {
+    use nearbee_core::statement;
+    let facts = facts();
+    let statement = statement::render(tier, &facts, RETENTION);
+    nearbee_core::listing::ResolvedListing {
+        handle: "repo-audit-fast".into(),
+        agent_id: "ag_123".into(),
+        playbook_id: "repo-audit-fast".into(),
+        playbook_version: "1.0.0".into(),
+        playbook_sha256: "ab".into(),
+        price_usd: "0.50".into(),
+        sla_seconds: 3600,
+        scope: None,
+        protection: None,
+        limits: None,
+        tier: Some(tier),
+        intake_check: None,
+        statement_sha256: Some(nearbee_core::journal::sha256_hex(statement.as_bytes())),
+        statement: Some(statement),
+        statement_format: Some(statement::STATEMENT_FORMAT),
+        fingerprint: Some(statement::fingerprint(tier, &facts)),
+        evidence_models: nearbee_core::tiers::evidence_models(&facts),
+        published_at: BASE,
+    }
+}
+
+/// The listing context of an S4 record: the drift pass, the statement
+/// snapshot and the footer apply.
+fn s4_ctx(tier: nearbee_core::listing::Tier) -> ListingContext {
+    ListingContext {
+        record: Some(s4_record(tier)),
+        ..ctx()
     }
 }
 
@@ -783,6 +886,7 @@ fn opts() -> ServeOptions {
         reject_handle: None,
         sla_margin_minutes: 10,
         forbidden: Vec::new(),
+        statement_retention_days: 7,
     }
 }
 
@@ -891,6 +995,7 @@ struct Driver {
     dir: tempfile::TempDir,
     market: FakeMarket,
     runner: FakeRunner,
+    attestor: FakeAttestor,
     ctx: ListingContext,
     opts: ServeOptions,
     state: RoundState,
@@ -899,6 +1004,50 @@ struct Driver {
     limits: Limits,
     /// Rows left out of the round's reads (their agent's read failed).
     hidden: std::collections::BTreeSet<String>,
+}
+
+/// A fake endpoint attestor (design 6.1): answers from a queue of
+/// scripted results (a JSON object report when the queue is empty) and
+/// records every call as `<model> <nonce>`.
+#[derive(Default)]
+struct FakeAttestor {
+    answers: Mutex<std::collections::VecDeque<Result<Vec<u8>, String>>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FakeAttestor {
+    fn failing(n: usize) -> Self {
+        let a = Self::default();
+        for _ in 0..n {
+            a.answers
+                .lock()
+                .unwrap()
+                .push_back(Err("503 from the fake".into()));
+        }
+        a
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// The models asked for, in call order.
+    fn models(&self) -> Vec<String> {
+        self.calls()
+            .iter()
+            .map(|c| c.split(' ').next().unwrap().to_owned())
+            .collect()
+    }
+}
+
+impl nearbee_core::evidence::Attestor for FakeAttestor {
+    async fn report(&self, model: &str, nonce: &str) -> Result<Vec<u8>, String> {
+        self.calls.lock().unwrap().push(format!("{model} {nonce}"));
+        let next = self.answers.lock().unwrap().pop_front();
+        next.unwrap_or_else(|| {
+            Ok(format!(r#"{{"model":"{model}","nonce":"{nonce}"}}"#).into_bytes())
+        })
+    }
 }
 
 impl Driver {
@@ -916,6 +1065,7 @@ impl Driver {
         Self {
             market,
             runner: FakeRunner::new(vec![]),
+            attestor: FakeAttestor::default(),
             ctx: ListingContext {
                 workspace: ws,
                 ..ctx()
@@ -995,6 +1145,44 @@ impl Driver {
         self
     }
 
+    /// Serves the S4 record of `tier`: the drift pass, the statement
+    /// snapshot and the footer apply (group 6).
+    fn with_s4(mut self, tier: nearbee_core::listing::Tier) -> Self {
+        let ws = self.ctx.workspace.clone();
+        self.ctx = s4_ctx(tier);
+        // `s4_ctx` builds on `ctx()`, whose workspace is not writable;
+        // keep the driver's temp workspace so delivery can write.
+        self.ctx.workspace = ws;
+        self
+    }
+
+    /// Turns the listing record's deterministic intake check on.
+    fn with_intake_check(mut self) -> Self {
+        if let Some(r) = &mut self.ctx.record {
+            r.intake_check = Some(nearbee_core::listing::IntakeCheck::GithubRepo);
+        }
+        self
+    }
+
+    /// Pins what the fake runner's `inspect` answers.
+    fn with_facts(mut self, facts: nearbee_core::runner::ExecutionFacts) -> Self {
+        self.runner = self.runner.with_inspect_facts(facts);
+        self
+    }
+
+    /// Pins the per-attempt model records the fake runner's run detail
+    /// reports.
+    fn with_attempts(mut self, attempts: Vec<nearbee_core::runner::AttemptModel>) -> Self {
+        self.runner = self.runner.with_attempts(attempts);
+        self
+    }
+
+    /// Replaces the listing record (a republish between rounds).
+    fn with_record(mut self, r: nearbee_core::listing::ResolvedListing) -> Self {
+        self.ctx.record = Some(r);
+        self
+    }
+
     fn ws(&self) -> PathBuf {
         self.ctx.workspace.clone()
     }
@@ -1030,6 +1218,7 @@ impl Driver {
         }];
         round(
             &self.runner,
+            &self.attestor,
             &agents,
             &mut self.state,
             &self.opts,
@@ -1555,6 +1744,7 @@ async fn a_run_midway_survives_a_restart_without_a_run_intent() {
         vec![
             journal::Event::Received(journal::Received::from_brief("brief")),
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: "run-1".into(),
                 execution: 1,
                 status: "running".into(),
@@ -2022,6 +2212,7 @@ async fn a_restart_after_a_failed_run_declines_and_never_submits() {
         vec![
             journal::Event::Received(journal::Received::from_brief("brief")),
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: "run-1".into(),
                 execution: 1,
                 status: "failed".into(),
@@ -2168,6 +2359,7 @@ async fn a_finished_run_of_another_version_is_declined_for_the_operator() {
         vec![
             journal::Event::Received(journal::Received::from_brief("brief")),
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: "run-1".into(),
                 execution: 1,
                 status: "succeeded".into(),
@@ -2650,6 +2842,7 @@ async fn an_s2_running_hire_is_followed() {
                 ]),
             }),
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: "run-1".into(),
                 execution: 1,
                 status: "running".into(),
@@ -2680,6 +2873,7 @@ async fn an_s2_terminal_undecided_run_is_validated_and_snapshotted() {
         vec![
             journal::Event::Received(journal::Received::from_brief("brief")),
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: "run-1".into(),
                 execution: 1,
                 status: "succeeded".into(),
@@ -3249,6 +3443,7 @@ async fn each_agents_hire_is_written_through_its_own_market() {
     let mut state = RoundState::default();
     round(
         &runner,
+        &FakeAttestor::default(),
         &agents,
         &mut state,
         &opts(),
@@ -3753,6 +3948,7 @@ fn lost_today(dir: &Path, row_id: &str, cost: &str, execution: u32) {
         row_id,
         vec![
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: format!("run-{row_id}"),
                 execution,
                 status: "failed".into(),
@@ -4633,6 +4829,7 @@ async fn an_s2_hire_keeps_its_journaled_worktree_and_new_hires_get_one_per_hire(
                 ]),
             }),
             journal::Event::RunObserved(journal::RunObserved {
+                attempts: Vec::new(),
                 run_id: "run-1".into(),
                 execution: 1,
                 status: "running".into(),
@@ -5482,6 +5679,7 @@ fn open_run_start(row_id: &str, refs: &[(&str, &str)]) -> journal::Event {
 
 fn observed(run_id: &str, execution: u32, status: &str, cost: Option<&str>) -> journal::Event {
     journal::Event::RunObserved(journal::RunObserved {
+        attempts: Vec::new(),
         run_id: run_id.into(),
         execution,
         status: status.into(),
@@ -5950,7 +6148,8 @@ async fn r2_7_terminal_ambiguous_runs_are_recorded_once_with_their_cost() {
         );
     }
     assert_eq!(
-        nearbee_core::cost::daily_loss(d.dir.path(), d.now()).unwrap(),
+        // Journal records carry the wall clock, not the test clock.
+        nearbee_core::cost::daily_loss(d.dir.path(), time::OffsetDateTime::now_utc()).unwrap(),
         rust_decimal::Decimal::new(10, 2),
         "the ambiguous runs' cost is missing from the daily loss"
     );
@@ -6437,7 +6636,8 @@ async fn r3_5_ambiguous_runs_without_a_complete_cost_count_their_budget() {
             assert_eq!(t[0].budget_usd.as_deref(), Some("2.60"), "{id}: {t:?}");
         }
         assert_eq!(
-            nearbee_core::cost::daily_loss(d.dir.path(), d.now()).unwrap(),
+            // Journal records carry the wall clock, not the test clock.
+            nearbee_core::cost::daily_loss(d.dir.path(), time::OffsetDateTime::now_utc()).unwrap(),
             rust_decimal::Decimal::new(520, 2),
             "usage {usage:?}"
         );
@@ -6890,4 +7090,1200 @@ async fn r4_5_unlistable_snapshots_are_never_recorded_as_deleted() {
     let lines = nearbee_core::retention::execute(&a1).unwrap();
     assert!(lines.iter().all(|l| !l.starts_with("failed ")), "{lines:?}");
     assert!(!gen1.exists());
+}
+
+// ---------------------------------------------------------------------------
+// Drift, the intake check, the statement snapshot and the footer (group 6)
+// ---------------------------------------------------------------------------
+
+use nearbee_core::listing::Tier;
+use nearbee_core::runner::{AttemptModel, Reported};
+
+/// An S3-shaped record: no tier, no statement, no fingerprint. The drift
+/// pass must decline its hires (spec `data-statement`, Drift: Old
+/// record).
+fn s3_record() -> nearbee_core::listing::ResolvedListing {
+    let mut r = s4_record(Tier::Plain);
+    r.tier = None;
+    r.statement = None;
+    r.statement_sha256 = None;
+    r.statement_format = None;
+    r.fingerprint = None;
+    r.evidence_models = Vec::new();
+    r
+}
+
+/// Facts whose decisions are answered (the drift scenarios of spec
+/// `hire-serving`).
+fn decision_facts(on: bool) -> nearbee_core::runner::ExecutionFacts {
+    let mut f = facts();
+    f.decisions_enabled = nearbee_core::tiers::Known::Yes(on);
+    f
+}
+
+/// A row whose description the test sets.
+fn row_with_description(id: &str, description: &str) -> Row {
+    let mut v = json_row(id, "in_progress");
+    v["description"] = serde_json::json!(description);
+    serde_json::from_value(v).unwrap()
+}
+
+fn decline_intent_of(j: &journal::JournalRead) -> Option<&journal::Intent> {
+    j.records.iter().find_map(|r| match &r.event {
+        journal::Event::Intent(i) if i.kind == "market_decline" => Some(i),
+        _ => None,
+    })
+}
+
+fn attention_of(j: &journal::JournalRead, code: &str) -> bool {
+    j.records
+        .iter()
+        .any(|r| matches!(&r.event, journal::Event::Attention(a) if a.code == code))
+}
+
+fn intents_of(j: &journal::JournalRead, kind: &str) -> usize {
+    j.records
+        .iter()
+        .filter(|r| matches!(&r.event, journal::Event::Intent(i) if i.kind == kind))
+        .count()
+}
+
+/// A hire of an S3 record (no tier) is declined `rejected` at once, with
+/// no scope check, market start or run (spec `hire-serving`, Drifted
+/// listing).
+#[tokio::test]
+async fn an_s3_records_new_hire_is_declined_listing_drift_before_anything_runs() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec![])
+        .with_record(s3_record());
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1")),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    let decline = decline_intent_of(&j).expect("a decline intent");
+    assert_eq!(
+        decline.refs.get("reason").map(String::as_str),
+        Some("rejected")
+    );
+    assert!(
+        attention_of(&j, "listing_drift"),
+        "no listing_drift attention: {:?}",
+        j.records
+    );
+    assert_eq!(intents_of(&j, "market_start"), 0, "a market start happened");
+    assert_eq!(intents_of(&j, "run_start"), 0, "a run started");
+    assert_eq!(intents_of(&j, "scope_check"), 0, "a scope check was asked");
+    assert!(
+        d.runner.questions.lock().unwrap().is_empty(),
+        "the decision provider was asked"
+    );
+}
+
+/// Decisions turned on before a new hire of the attested listing is
+/// taken: the hire is declined `rejected` and no scope check is asked
+/// (spec `hire-serving`, Drifted listing).
+#[tokio::test]
+async fn decisions_turned_on_decline_the_next_hire_with_zero_scope_calls() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec![])
+        .with_s4(Tier::Attested)
+        .with_facts(decision_facts(true));
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert!(attention_of(
+        &read_journal_records(d.dir.path(), "a1"),
+        "listing_drift"
+    ));
+    assert!(
+        d.runner.questions.lock().unwrap().is_empty(),
+        "the decision provider was asked"
+    );
+    assert_eq!(
+        intents_of(&read_journal_records(d.dir.path(), "a1"), "run_start"),
+        0
+    );
+}
+
+/// An inspection error holds the listing for the round (spec
+/// `hire-serving`, Held listing): a new hire gets no intake check, scope
+/// question, market start or run, and is not declined; once the facts
+/// read again it proceeds, and a hire held past its deadline is declined
+/// by the waiting rule, not as drift.
+#[tokio::test]
+async fn an_inspect_error_holds_new_hires_without_a_decline() {
+    let mut d = Driver::new(&[
+        ("a1", "in_progress", "fresh"),
+        ("a2", "in_progress", "fresh"),
+    ])
+    .with_runner(vec![])
+    .with_s4(Tier::Plain)
+    .with_facts(facts());
+    let deadline = d.now() + time::Duration::minutes(30);
+    for r in d.rows().iter_mut() {
+        if r.id == "a2" {
+            r.sla_deadline_at = Some(deadline);
+        }
+    }
+    *d.runner.inspect_fails.lock().unwrap() = true;
+    for _ in 0..3 {
+        let out = d.round().await;
+        assert!(
+            !out.iter().any(|o| matches!(
+                o,
+                HireOutcome::DeclinedRejected { .. } | HireOutcome::DeclinedFailed { .. }
+            )),
+            "a held listing declined a hire: {out:?}"
+        );
+    }
+    for id in ["a1", "a2"] {
+        let j = read_journal_records(d.dir.path(), id);
+        assert!(decline_intent_of(&j).is_none(), "{id} declined");
+        assert!(!attention_of(&j, "listing_drift"), "{id} drift attention");
+        assert_eq!(intents_of(&j, "market_start"), 0, "{id} market start");
+        assert_eq!(intents_of(&j, "scope_check"), 0, "{id} scope check");
+        assert_eq!(intents_of(&j, "run_start"), 0, "{id} run start");
+        assert!(
+            !j.records
+                .iter()
+                .any(|r| matches!(&r.event, journal::Event::Intake(_))),
+            "{id} ran an intake check while held"
+        );
+    }
+    assert_eq!(
+        d.market.calls.count("start a1"),
+        0,
+        "a market start was sent"
+    );
+    // a2's deadline passes while the listing is held: the waiting rule
+    // declines it `rejected`, with no drift attention.
+    d.tick(60 * 60);
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a2")),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a2");
+    assert!(!attention_of(&j, "listing_drift"));
+    assert_eq!(
+        decline_intent_of(&j)
+            .and_then(|i| i.refs.get("reason"))
+            .map(String::as_str),
+        Some("rejected")
+    );
+    // The facts read again: a1 proceeds through intake.
+    *d.runner.inspect_fails.lock().unwrap() = false;
+    d.round().await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(
+        decline_intent_of(&j).is_none(),
+        "a1 declined after the hold"
+    );
+    assert!(
+        j.records
+            .iter()
+            .any(|r| matches!(&r.event, journal::Event::Intake(_))),
+        "a1 ran no intake check once the facts read: {:?}",
+        j.records
+    );
+}
+
+/// The drift report is once per change (spec `hire-serving`, Drifted
+/// listing): a listing that drifts is reported once, a clean round
+/// forgets it, and a later drift is reported again.
+#[tokio::test]
+async fn a_repeat_drift_is_reported_again_after_a_clean_round() {
+    // The plain record matches `facts()`; decisions on move the
+    // fingerprint, so the same listing drifts.
+    let mut d = Driver::new(&[])
+        .with_runner(vec![])
+        .with_s4(Tier::Plain)
+        .with_facts(decision_facts(true));
+    let drifted = |out: &[HireOutcome]| {
+        out.iter()
+            .filter(
+                |o| matches!(o, HireOutcome::OperatorNeeded { why, .. } if why.contains("drifted")),
+            )
+            .count()
+    };
+    assert_eq!(drifted(&d.round().await), 1, "the first drift is reported");
+    assert_eq!(
+        drifted(&d.round().await),
+        0,
+        "the same drift is not repeated"
+    );
+    d.runner.inspect_facts = Some(facts());
+    assert_eq!(
+        drifted(&d.round().await),
+        0,
+        "a clean round reports nothing"
+    );
+    d.runner.inspect_facts = Some(decision_facts(true));
+    assert_eq!(drifted(&d.round().await), 1, "the new drift is reported");
+}
+
+/// A drift between rounds declines a waiting rework `failed` (spec
+/// `hire-serving`, Drifted listing: the rejected-or-failed choice).
+#[tokio::test]
+async fn a_drift_between_rounds_declines_a_waiting_rework_failed() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_s4(Tier::Plain)
+        .with_facts(facts());
+    let _ = delivered_markdown(&d.ws(), "a1");
+    // The hire delivers: taken, run start, submit, delivered.
+    d.drive_to_delivery().await;
+    // The listing drifts between rounds: republished with other facts.
+    let mut republished = s4_record(Tier::Plain);
+    republished.fingerprint = Some("sha256:other".into());
+    d.ctx.record = Some(republished);
+    // The buyer asks for changes: generation 2 opens and, its listing
+    // drifted, is declined `failed` (delivered once) before its run.
+    for r in d.rows().iter_mut() {
+        if r.id == "a1" {
+            r.status = Some("in_progress".into());
+            r.deliverable_url = Some("https://m/f/tok".into());
+            r.submitted_at = Some(d.now());
+            r.sla_deadline_at = Some(d.now() + time::Duration::hours(1));
+            r.latest_message = Some(nearbee_core::market::Message {
+                body: "redo it".into(),
+                sender_side: Some("buyer".into()),
+                created_at: None,
+                truncated: false,
+                attachments: Vec::new(),
+            });
+        }
+    }
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert!(attention_of(
+        &read_journal_records(d.dir.path(), "a1"),
+        "listing_drift"
+    ));
+    assert_eq!(
+        d.runner.calls.count("run a1"),
+        1,
+        "the rework started anyway"
+    );
+}
+
+/// A hire whose run is already running when its listing drifts is still
+/// observed and delivered with the statement snapshotted at its start
+/// (spec `hire-serving`, Drifted listing: Started hire still delivers).
+#[tokio::test]
+async fn a_running_hire_of_a_drifted_listing_is_still_delivered() {
+    let record = s4_record(Tier::Plain);
+    let statement = record.statement.clone().unwrap();
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_record(record)
+        .with_facts(facts());
+    d.round().await;
+    d.round().await;
+    // The listing drifts while the run works.
+    let mut republished = s4_record(Tier::Plain);
+    republished.statement = Some("## Data handling\n\nChanged.".into());
+    d.ctx.record = Some(republished);
+    let _ = deliverable_worktree(&d.ws(), "a1");
+    d.drive_to_delivery().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1, "no submit");
+    assert!(
+        !d.market
+            .calls
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("decline")),
+        "a drifted listing declined a running hire"
+    );
+    // The deliverable carries the statement snapshotted at the start,
+    // not the republished one.
+    let submitted = d.market.submitted_markdown(0);
+    assert!(submitted.ends_with(&statement), "{submitted}");
+    assert!(!submitted.ends_with("Changed."));
+}
+
+/// A listing with `intake_check: github_repo` declines a brief without a
+/// repository `rejected` with the buyer text, before any scope check or
+/// market start (spec `repo-audit`, Deterministic intake check).
+#[tokio::test]
+async fn the_intake_check_declines_a_brief_without_a_repository() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec![])
+        .with_s4(Tier::Plain)
+        .with_intake_check();
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1")),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    let decline = decline_intent_of(&j).expect("a decline intent");
+    assert_eq!(
+        decline.refs.get("buyer").map(String::as_str),
+        Some(nearbee_core::intake::TEXT_GITHUB_REPO)
+    );
+    assert_eq!(intents_of(&j, "market_start"), 0);
+    assert_eq!(intents_of(&j, "scope_check"), 0);
+    assert!(d.runner.questions.lock().unwrap().is_empty());
+    assert!(
+        j.records
+            .iter()
+            .any(|r| matches!(&r.event, journal::Event::Intake(i)
+                if i.check == "github_repo" && i.outcome == "declined")),
+        "no github_repo intake record: {:?}",
+        j.records
+    );
+}
+
+/// Two distinct repositories decline the same way.
+#[tokio::test]
+async fn the_intake_check_declines_two_repositories() {
+    let rows = vec![row_with_description(
+        "a1",
+        "Compare https://github.com/a/b with https://github.com/c/d.",
+    )];
+    let mut d = Driver::with_rows(rows)
+        .with_runner(vec![])
+        .with_s4(Tier::Plain)
+        .with_intake_check();
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert_eq!(
+        intents_of(&read_journal_records(d.dir.path(), "a1"), "market_start"),
+        0
+    );
+}
+
+/// Exactly one repository passes the check and the hire is taken.
+#[tokio::test]
+async fn the_intake_check_passes_one_repository() {
+    let rows = vec![row_with_description(
+        "a1",
+        "Audit https://github.com/itechmeat/nearbee.",
+    )];
+    let mut d = Driver::with_rows(rows)
+        .with_runner(vec![])
+        .with_s4(Tier::Plain)
+        .with_intake_check();
+    d.round().await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(
+        j.records
+            .iter()
+            .any(|r| matches!(&r.event, journal::Event::Intake(i)
+                if i.check == "github_repo" && i.outcome == "passed")),
+        "no passing github_repo record: {:?}",
+        j.records
+    );
+    assert!(decline_intent_of(&j).is_none(), "the hire was declined");
+    assert_eq!(intents_of(&j, "market_start"), 1, "the hire was not taken");
+}
+
+/// The statement snapshot exists before the market start and carries the
+/// run intent's tier, hash and fingerprint (design 5.1, 5.2; spec
+/// `hire-serving`, Generation statement snapshot).
+#[tokio::test]
+async fn the_statement_snapshot_precedes_the_starts_and_the_intent_carries_it() {
+    let record = s4_record(Tier::Plain);
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running"])
+        .with_record(record.clone());
+    d.round().await;
+    // After the market start round the snapshot is on disk and no run
+    // intent exists yet.
+    let snap = journal::snapshot_path(d.dir.path(), "a1", 1, "statement.json");
+    assert!(snap.exists(), "no statement snapshot: {}", snap.display());
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert_eq!(intents_of(&j, "run_start"), 0);
+    assert_eq!(intents_of(&j, "market_start"), 1);
+    d.round().await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    let intent = j
+        .records
+        .iter()
+        .find_map(|r| match &r.event {
+            journal::Event::Intent(i) if i.kind == "run_start" => Some(i),
+            _ => None,
+        })
+        .expect("no run intent");
+    assert_eq!(
+        intent.refs.get("statement_sha256").map(String::as_str),
+        record.statement_sha256.as_deref()
+    );
+    assert_eq!(
+        intent.refs.get("fingerprint").map(String::as_str),
+        record.fingerprint.as_deref()
+    );
+    assert_eq!(intent.refs.get("tier").map(String::as_str), Some("plain"));
+    assert!(snap.exists(), "the snapshot vanished");
+}
+
+/// A snapshot left without an intent is reused when it matches, and a
+/// stale one (the listing was relisted with other facts) declines with
+/// `listing_drift` (spec `hire-serving`, Republished before the intent).
+#[tokio::test]
+async fn a_stale_statement_snapshot_declines_the_hire() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec![])
+        .with_s4(Tier::Plain);
+    // A snapshot an earlier serve process left, for other facts.
+    let stale = br#"{"tier":"plain","statement":"old text","statement_sha256":"aa","statement_format":1,"fingerprint":"sha256:old","evidence_models":[]}"#;
+    journal::write_snapshot(d.dir.path(), "a1", 1, "statement.json", stale).unwrap();
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert!(attention_of(
+        &read_journal_records(d.dir.path(), "a1"),
+        "listing_drift"
+    ));
+    assert_eq!(d.runner.calls.count("run a1"), 0);
+}
+
+/// The delivered Markdown ends with the horizontal rule and the
+/// snapshotted statement (spec `data-statement`, Deliverable footer).
+#[tokio::test]
+async fn the_deliverable_ends_with_the_snapshotted_statement() {
+    let record = s4_record(Tier::Plain);
+    let statement = record.statement.clone().unwrap();
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_record(record);
+    let markdown = delivered_markdown(&d.ws(), "a1");
+    d.drive_to_delivery().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert_eq!(
+        d.market.submitted_markdown(0),
+        format!("{markdown}\n\n---\n\n{statement}")
+    );
+}
+
+/// A footer that crosses the Markdown limit declines `failed` and
+/// submits nothing (spec `hire-serving`, Delivery).
+#[tokio::test]
+async fn a_footer_over_the_limit_declines_failed() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_s4(Tier::Plain);
+    d.limits.markdown_bytes = 600;
+    let long = format!("# Audit\n\n{}\n", "x".repeat(480));
+    assert!(long.len() < 600, "the Markdown alone must fit");
+    deliverable_worktree_with(&d.ws(), "a1", &long);
+    let out = d
+        .run_until(|o| {
+            matches!(
+                o,
+                HireOutcome::Delivered { .. } | HireOutcome::DeclinedFailed { .. }
+            )
+        })
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert_eq!(
+        d.market.calls.count("submit a1"),
+        0,
+        "something was submitted"
+    );
+}
+
+/// A restart after the submission snapshot resends the snapshotted bytes
+/// as is, statement included (spec `hire-serving`, Recovered submit).
+#[tokio::test]
+async fn a_restart_resends_the_snapshotted_bytes() {
+    let record = s4_record(Tier::Plain);
+    let statement = record.statement.clone().unwrap();
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")]).with_record(record);
+    let markdown = delivered_markdown(&d.ws(), "a1");
+    let assembled = format!("{markdown}\n\n---\n\n{statement}");
+    let run_intent = journal::Intent {
+        operation_id: uuid::Uuid::now_v7(),
+        kind: "run_start".into(),
+        execution: 1,
+        request_digest: "x".into(),
+        refs: BTreeMap::from([
+            (
+                "execution_id".to_owned(),
+                format!("{}-1", journal::safe_id("a1")),
+            ),
+            ("statement_sha256".to_owned(), "aa".to_owned()),
+        ]),
+    };
+    s3_journal(
+        d.dir.path(),
+        "a1",
+        vec![
+            journal::Event::Received(journal::Received::from_brief("brief")),
+            journal::Event::Intent(run_intent.clone()),
+            journal::Event::Result(journal::OpResult {
+                operation_id: run_intent.operation_id,
+                outcome: "done".into(),
+                external_ids: BTreeMap::new(),
+            }),
+            journal::Event::RunObserved(journal::RunObserved {
+                run_id: "run-a".into(),
+                execution: 1,
+                status: "succeeded".into(),
+                playbook_version: Some("1.0.0".into()),
+                cost_usd: None,
+                cost_complete: None,
+                budget_usd: None,
+                attempts: Vec::new(),
+            }),
+            journal::Event::Intent(submit_intent_with_snapshot(
+                d.dir.path(),
+                &d.ws(),
+                "a1",
+                &assembled,
+            )),
+        ],
+    );
+    d.round().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert_eq!(d.market.submitted_markdown(0), assembled);
+}
+
+/// A generation whose run intent has no statement hash (S3) delivers
+/// without footer, even on an S4 record (spec `hire-serving`, Legacy
+/// generations).
+#[tokio::test]
+async fn a_legacy_generation_delivers_without_a_footer() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec![])
+        .with_s4(Tier::Plain);
+    let markdown = delivered_markdown(&d.ws(), "a1");
+    let run_intent = journal::Intent {
+        operation_id: uuid::Uuid::now_v7(),
+        kind: "run_start".into(),
+        execution: 1,
+        request_digest: "x".into(),
+        refs: BTreeMap::from([(
+            "execution_id".to_owned(),
+            format!("{}-1", journal::safe_id("a1")),
+        )]),
+    };
+    s3_journal(
+        d.dir.path(),
+        "a1",
+        vec![
+            journal::Event::Received(journal::Received::from_brief("brief")),
+            journal::Event::Intent(run_intent.clone()),
+            journal::Event::Result(journal::OpResult {
+                operation_id: run_intent.operation_id,
+                outcome: "done".into(),
+                external_ids: BTreeMap::new(),
+            }),
+            journal::Event::RunObserved(journal::RunObserved {
+                run_id: "run-a".into(),
+                execution: 1,
+                status: "succeeded".into(),
+                playbook_version: Some("1.0.0".into()),
+                cost_usd: None,
+                cost_complete: None,
+                budget_usd: None,
+                attempts: Vec::new(),
+            }),
+        ],
+    );
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert_eq!(d.market.submitted_markdown(0), markdown);
+}
+
+/// An S4 generation whose `statement.json` is missing at delivery
+/// declines `failed` with attention `statement_missing` and submits
+/// nothing (spec `hire-serving`, Damaged S4 snapshot).
+#[tokio::test]
+async fn a_missing_statement_snapshot_declines_statement_missing() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")]).with_s4(Tier::Plain);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    let run_intent = journal::Intent {
+        operation_id: uuid::Uuid::now_v7(),
+        kind: "run_start".into(),
+        execution: 1,
+        request_digest: "x".into(),
+        refs: BTreeMap::from([
+            (
+                "execution_id".to_owned(),
+                format!("{}-1", journal::safe_id("a1")),
+            ),
+            ("statement_sha256".to_owned(), "aa".to_owned()),
+            ("fingerprint".to_owned(), "sha256:ff".to_owned()),
+        ]),
+    };
+    s3_journal(
+        d.dir.path(),
+        "a1",
+        vec![
+            journal::Event::Received(journal::Received::from_brief("brief")),
+            journal::Event::Intent(run_intent.clone()),
+            journal::Event::Result(journal::OpResult {
+                operation_id: run_intent.operation_id,
+                outcome: "done".into(),
+                external_ids: BTreeMap::new(),
+            }),
+            journal::Event::RunObserved(journal::RunObserved {
+                run_id: "run-a".into(),
+                execution: 1,
+                status: "succeeded".into(),
+                playbook_version: Some("1.0.0".into()),
+                cost_usd: None,
+                cost_complete: None,
+                budget_usd: None,
+                attempts: Vec::new(),
+            }),
+        ],
+    );
+    let out = d
+        .run_until(|o| {
+            matches!(
+                o,
+                HireOutcome::Delivered { .. } | HireOutcome::DeclinedFailed { .. }
+            )
+        })
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert!(attention_of(
+        &read_journal_records(d.dir.path(), "a1"),
+        "statement_missing"
+    ));
+    assert_eq!(d.market.calls.count("submit a1"), 0);
+}
+
+/// The terminal `run_observed` record carries the run's per-attempt
+/// model records (design 7).
+#[tokio::test]
+async fn the_terminal_run_observed_record_carries_the_attempts() {
+    let attempts = vec![AttemptModel {
+        node: "audit".into(),
+        attempt: 1,
+        agent: "opencode".into(),
+        requested_model: Some("nearai/Qwen/Qwen3.8-27B".into()),
+        reported: Reported::One("Qwen/Qwen3.8-27B".into()),
+    }];
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_s4(Tier::Plain)
+        .with_attempts(attempts.clone());
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.run_until(|o| {
+        matches!(
+            o,
+            HireOutcome::Delivered { .. } | HireOutcome::DeclinedFailed { .. }
+        )
+    })
+    .await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    let terminal = j
+        .records
+        .iter()
+        .rev()
+        .find_map(|r| match &r.event {
+            journal::Event::RunObserved(o)
+                if nearbee_core::runner::RunStatus::parse(&o.status).is_terminal() =>
+            {
+                Some(o)
+            }
+            _ => None,
+        })
+        .expect("no terminal observation");
+    assert_eq!(terminal.attempts, attempts);
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint evidence (group 7; design 6, spec `run-evidence`)
+// ---------------------------------------------------------------------------
+
+const EV_DS: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+const EV_QWEN: &str = "Qwen/Qwen3.8-27B";
+
+/// Facts that pass the attested check: the shipped `nearbee-near` shape,
+/// DeepSeek first and Qwen as fallback, the exact route, no side
+/// channels.
+fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
+    use nearbee_core::tiers::{
+        ExecutorFact, Known, NEARAI_API_KEY_REF, NodeFact, ProfileFact, ProfileRef, ProviderRoute,
+    };
+    let reference = ProfileRef {
+        name: "nearbee-near".into(),
+        scope: "project".into(),
+    };
+    let node = |id: &str, kind: &str| NodeFact {
+        id: id.into(),
+        kind: kind.into(),
+        interactive: false,
+        profile: None,
+        connectors: Vec::new(),
+        playbook_ref: None,
+    };
+    nearbee_core::runner::ExecutionFacts {
+        playbook_id: "repo-audit-fast".into(),
+        default_profile: Some(reference.clone()),
+        nodes: vec![node("audit", "agent_task"), node("done", "finish")],
+        profiles: vec![(
+            reference.clone(),
+            Known::Yes(ProfileFact {
+                reference,
+                executor: ExecutorFact {
+                    agent: "opencode".into(),
+                    model: format!("nearai/{EV_DS}"),
+                },
+                fallbacks: vec![ExecutorFact {
+                    agent: "opencode".into(),
+                    model: format!("nearai/{EV_QWEN}"),
+                }],
+                tiers: Vec::new(),
+                environment: "minimal".into(),
+                skills: Vec::new(),
+                env_policy: "allowlist".into(),
+                env_allow: vec!["NEARAI_API_KEY".into()],
+            }),
+        )],
+        routes: Known::Yes(vec![ProviderRoute {
+            name: "nearai".into(),
+            base_url: nearbee_core::tiers::NEARAI_BASE_URL.into(),
+            api_key_ref: NEARAI_API_KEY_REF.into(),
+            model_overrides: vec![],
+        }]),
+        decisions_enabled: Known::Yes(false),
+        compaction_enabled: Known::Yes(false),
+    }
+}
+
+/// An attested record built from [`attested_facts`]: it does not drift.
+fn attested_record() -> nearbee_core::listing::ResolvedListing {
+    use nearbee_core::listing::Tier;
+    use nearbee_core::statement;
+    let facts = attested_facts();
+    let mut r = s4_record(Tier::Attested);
+    let text = statement::render(Tier::Attested, &facts, RETENTION);
+    r.statement_sha256 = Some(journal::sha256_hex(text.as_bytes()));
+    r.statement = Some(text);
+    r.fingerprint = Some(statement::fingerprint(Tier::Attested, &facts));
+    r.evidence_models = nearbee_core::tiers::evidence_models(&facts);
+    r
+}
+
+impl Driver {
+    /// Serves the attested record with matching facts and `attestor`.
+    fn attested(mut self, attestor: FakeAttestor) -> Self {
+        let ws = self.ctx.workspace.clone();
+        self.ctx = ListingContext {
+            record: Some(attested_record()),
+            ..ctx()
+        };
+        self.ctx.workspace = ws;
+        self.attestor = attestor;
+        self.with_facts(attested_facts())
+    }
+}
+
+fn evidence_events(j: &journal::JournalRead, phase: &str) -> (Vec<String>, usize) {
+    let collected = j
+        .records
+        .iter()
+        .filter_map(|r| match &r.event {
+            journal::Event::EvidenceCollected(c) if c.phase == phase => Some(c.model.clone()),
+            _ => None,
+        })
+        .collect();
+    let failed = j
+        .records
+        .iter()
+        .filter(|r| matches!(&r.event, journal::Event::EvidenceFailed(f) if f.phase == phase))
+        .count();
+    (collected, failed)
+}
+
+/// The position of the first record matching `pred` in the journal.
+fn position(j: &journal::JournalRead, pred: impl Fn(&journal::Event) -> bool) -> Option<usize> {
+    j.records.iter().position(|r| pred(&r.event))
+}
+
+/// An attested hire collects its start reports, one per round, before
+/// its market start and its run, and its end reports after the run
+/// succeeded; the deliverable carries the disclosure before the
+/// statement (spec `run-evidence`, Which models, One fetch per round,
+/// Disclosure).
+#[tokio::test]
+async fn an_attested_hire_collects_start_and_end_reports_one_per_round() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .attested(FakeAttestor::default());
+    let markdown = delivered_markdown(&d.ws(), "a1");
+    let mut calls_before = 0;
+    for _ in 0..14 {
+        let out = d.round().await;
+        let calls = d.attestor.calls().len();
+        assert!(calls - calls_before <= 1, "two fetches in one round");
+        calls_before = calls;
+        if out
+            .iter()
+            .any(|o| matches!(o, HireOutcome::Delivered { .. }))
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        d.market.calls.count("submit a1"),
+        1,
+        "nothing was submitted"
+    );
+    // Four reports: the frozen two-model set (sorted ids), at start and
+    // at end.
+    assert_eq!(
+        d.attestor.models(),
+        vec![EV_QWEN, EV_DS, EV_QWEN, EV_DS],
+        "{:?}",
+        d.attestor.calls()
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert_eq!(evidence_events(&j, "start").0, vec![EV_QWEN, EV_DS]);
+    assert_eq!(evidence_events(&j, "end").0, vec![EV_QWEN, EV_DS]);
+    let last_start = j
+        .records
+        .iter()
+        .rposition(
+            |r| matches!(&r.event, journal::Event::EvidenceCollected(c) if c.phase == "start"),
+        )
+        .unwrap();
+    let market_start = position(
+        &j,
+        |e| matches!(e, journal::Event::Intent(i) if i.kind == "market_start"),
+    )
+    .unwrap();
+    let run_start = position(
+        &j,
+        |e| matches!(e, journal::Event::Intent(i) if i.kind == "run_start"),
+    )
+    .unwrap();
+    let first_end = position(
+        &j,
+        |e| matches!(e, journal::Event::EvidenceCollected(c) if c.phase == "end"),
+    )
+    .unwrap();
+    let terminal = position(
+        &j,
+        |e| matches!(e, journal::Event::RunObserved(o) if o.status == "succeeded"),
+    )
+    .unwrap();
+    assert!(
+        last_start < market_start,
+        "the market start preceded the start reports"
+    );
+    assert!(market_start < run_start);
+    assert!(terminal < first_end, "an end report preceded the run's end");
+    // Each stored report is a private snapshot with its nonce and hash.
+    for (phase, model) in [
+        (nearbee_core::evidence::Phase::Start, EV_DS),
+        (nearbee_core::evidence::Phase::End, EV_QWEN),
+    ] {
+        let bytes = journal::read_snapshot(
+            d.dir.path(),
+            "a1",
+            1,
+            &nearbee_core::evidence::snapshot_name(phase, model),
+        )
+        .unwrap();
+        let s =
+            nearbee_core::evidence::EvidenceSnapshot::read_checked(&bytes, phase, model).unwrap();
+        assert_eq!(s.nonce.len(), 64);
+        assert!(d.attestor.calls().contains(&format!("{model} {}", s.nonce)));
+    }
+    // The deliverable: Markdown, rule, disclosure, then the statement.
+    let delivered = d.market.submitted_markdown(0);
+    let statement = attested_record().statement.unwrap();
+    assert!(
+        delivered.starts_with(&format!(
+            "{markdown}\n\n---\n\n## Endpoint attestation disclosure"
+        )),
+        "{delivered}"
+    );
+    assert!(
+        delivered.ends_with(&format!("\n\n{statement}")),
+        "{delivered}"
+    );
+    assert!(delivered.contains("verify?model=Qwen%2FQwen3.8-27B"));
+    assert!(delivered.contains(nearbee_core::evidence::NOT_VERIFIED));
+}
+
+/// A hire waiting for its start reports makes no market start and no
+/// run; the third failed start fetch of a first-time hire not started on
+/// the market declines it `rejected` with `evidence_unavailable` (spec
+/// `run-evidence`, Cloud down at start).
+#[tokio::test]
+async fn three_failed_start_fetches_decline_a_new_hire_rejected() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .attested(FakeAttestor::failing(3));
+    let mut declined = false;
+    for _ in 0..8 {
+        let out = d.round().await;
+        if d.attestor.calls().len() < 3 {
+            assert_eq!(
+                d.market.calls.count("start a1"),
+                0,
+                "a market start while waiting"
+            );
+        }
+        if out
+            .iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1"))
+        {
+            declined = true;
+            break;
+        }
+    }
+    assert!(declined, "no rejected decline");
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert_eq!(evidence_events(&j, "start").1, 3);
+    assert!(attention_of(&j, "evidence_unavailable"));
+    assert_eq!(intents_of(&j, "market_start"), 0);
+    assert_eq!(intents_of(&j, "run_start"), 0);
+    assert_eq!(d.runner.calls.count("start"), 0, "a run started");
+}
+
+/// An owner-started hire (work counts as started) whose start fetches
+/// fail three times is declined `failed` (spec `run-evidence`, Fail
+/// closed).
+#[tokio::test]
+async fn three_failed_start_fetches_decline_an_owner_started_hire_failed() {
+    let mut d = Driver::new(&[("a1", "in_progress", "started")])
+        .with_runner(vec!["running", "succeeded"])
+        .attested(FakeAttestor::failing(3));
+    let out = d
+        .run_until(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1"))
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(attention_of(&j, "evidence_unavailable"));
+    assert_eq!(intents_of(&j, "run_start"), 0, "a run started");
+}
+
+/// A rework of an attested hire collects its own start reports, and its
+/// third failure declines the rework `failed`.
+#[tokio::test]
+async fn three_failed_start_fetches_decline_a_rework_failed() {
+    let mut d = Driver::new(&[("a1", "in_progress", "rework")])
+        .with_runner(vec!["running", "succeeded"])
+        .attested(FakeAttestor::failing(3));
+    let out = d
+        .run_until(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1"))
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(attention_of(&j, "evidence_unavailable"));
+    assert_eq!(intents_of(&j, "run_start"), 0, "a run started");
+}
+
+/// A stored report whose record a crash lost is completed on the next
+/// round without a fetch (spec `run-evidence`, Crash between file and
+/// record).
+#[tokio::test]
+async fn a_report_file_without_its_record_is_completed_without_a_fetch() {
+    use nearbee_core::evidence::{EvidenceSnapshot, Phase, snapshot_name};
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running"])
+        .attested(FakeAttestor::default());
+    // Round 1: intake and the statement snapshot; nothing is fetched yet.
+    d.round().await;
+    assert!(d.attestor.calls().is_empty());
+    // A crash left the DeepSeek start report stored, its record unwritten.
+    let s = EvidenceSnapshot::new(
+        EV_DS,
+        Phase::Start,
+        &"ab".repeat(32),
+        BASE,
+        br#"{"ok":true}"#,
+    );
+    journal::write_snapshot(
+        d.dir.path(),
+        "a1",
+        1,
+        &snapshot_name(Phase::Start, EV_DS),
+        &s.to_bytes(),
+    )
+    .unwrap();
+    d.round().await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(evidence_events(&j, "start").0.contains(&EV_DS.to_owned()));
+    assert!(
+        !d.attestor.models().contains(&EV_DS.to_owned()),
+        "the stored report was fetched again: {:?}",
+        d.attestor.calls()
+    );
+}
+
+/// A start report lost after the `run_start` intent is never fetched
+/// again: delivery declines `failed` with `evidence_missing` (spec
+/// `run-evidence`, Start evidence lost after the start).
+#[tokio::test]
+async fn a_start_report_lost_after_the_run_start_declines_evidence_missing() {
+    use nearbee_core::evidence::{Phase, snapshot_name};
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "running", "succeeded"])
+        .attested(FakeAttestor::default());
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.run_until(|o| matches!(o, HireOutcome::Working { row_id, .. } if row_id == "a1"))
+        .await;
+    let path = journal::snapshot_path(d.dir.path(), "a1", 1, &snapshot_name(Phase::Start, EV_DS));
+    std::fs::remove_file(path).unwrap();
+    let out = d
+        .run_until(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1"))
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(attention_of(&j, "evidence_missing"));
+    assert_eq!(
+        evidence_events(&j, "start").0.len(),
+        2,
+        "a start report was fetched again"
+    );
+    assert_eq!(
+        d.market.calls.count("submit a1"),
+        0,
+        "submitted without evidence"
+    );
+}
+
+/// The third failed end fetch declines `failed` and nothing is submitted
+/// (spec `run-evidence`, Cloud down at end).
+#[tokio::test]
+async fn three_failed_end_fetches_decline_failed_and_submit_nothing() {
+    let attestor = FakeAttestor::default();
+    {
+        let mut q = attestor.answers.lock().unwrap();
+        q.push_back(Ok(b"{}".to_vec()));
+        q.push_back(Ok(b"{}".to_vec()));
+        for _ in 0..3 {
+            q.push_back(Err("503 from the fake".into()));
+        }
+    }
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .attested(attestor);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    let out = d
+        .run_until(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1"))
+        .await;
+    assert!(
+        out.iter().any(
+            |o| matches!(o, HireOutcome::DeclinedFailed { row_id, reason }
+            if row_id == "a1" && reason == "the run evidence could not be collected")
+        ),
+        "{out:?}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert_eq!(evidence_events(&j, "end").1, 3);
+    assert!(attention_of(&j, "evidence_unavailable"));
+    assert_eq!(
+        d.market.calls.count("submit a1"),
+        0,
+        "submitted without end evidence"
+    );
+}
+
+/// A plain listing never calls the attestor.
+#[tokio::test]
+async fn plain_listings_never_call_the_attestor() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_s4(nearbee_core::listing::Tier::Plain);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.drive_to_delivery().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert!(d.attestor.calls().is_empty(), "{:?}", d.attestor.calls());
+}
+
+/// Another hire's wall clock due in 5 seconds blocks the report fetch
+/// in that round (spec `run-evidence`, Other hire's deadline).
+#[tokio::test]
+async fn another_hires_near_deadline_blocks_the_fetch() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running"])
+        .attested(FakeAttestor::default());
+    // Round 1: a1's statement snapshot is written; it waits for reports.
+    d.round().await;
+    assert!(d.attestor.calls().is_empty());
+    // Another hire, not in this round's reads, runs with its wall clock
+    // about 5 seconds away: an SLA deadline 6 seconds after its start
+    // minus the margin (a fifth of the window, under 10 minutes).
+    let deadline = BASE + time::Duration::seconds(6);
+    s3_journal(
+        d.dir.path(),
+        "b1",
+        vec![
+            journal::Event::Received(journal::Received::from_brief("b")),
+            journal::Event::Intent(journal::Intent {
+                operation_id: uuid::Uuid::now_v7(),
+                kind: "run_start".into(),
+                execution: 1,
+                request_digest: "d".into(),
+                refs: BTreeMap::from([
+                    ("execution_id".into(), "b1-1".into()),
+                    (
+                        "sla_deadline_at".into(),
+                        deadline
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap(),
+                    ),
+                ]),
+            }),
+            journal::Event::RunObserved(journal::RunObserved {
+                run_id: "run-b1".into(),
+                execution: 1,
+                status: "running".into(),
+                playbook_version: Some("1.0.0".into()),
+                cost_usd: None,
+                cost_complete: None,
+                budget_usd: None,
+                attempts: Vec::new(),
+            }),
+        ],
+    );
+    d.round().await;
+    assert!(
+        d.attestor.calls().is_empty(),
+        "a fetch started under another hire's near deadline: {:?}",
+        d.attestor.calls()
+    );
 }

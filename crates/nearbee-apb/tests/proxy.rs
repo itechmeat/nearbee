@@ -80,5 +80,7 @@ fn opts_for(url: &str) -> nearbee_apb::ApbOptions {
         timing: fast_timing(),
         bin: std::path::PathBuf::from("apb"),
         config_dir: std::path::PathBuf::from("/tmp/nearbee-test-apb-config"),
+        systemctl_bin: std::path::PathBuf::from("systemctl"),
+        xdg_config_home: std::path::PathBuf::from("/nonexistent/xdg-config"),
     }
 }

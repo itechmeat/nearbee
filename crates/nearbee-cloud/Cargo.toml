@@ -1,0 +1,22 @@
+[package]
+name = "nearbee-cloud"
+description = "Nearbee NEAR AI Cloud client: endpoint attestation reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nearbee-core.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true

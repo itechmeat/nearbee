@@ -11,10 +11,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use nearbee_apb::install::{self, ApbCli, Script};
+use nearbee_apb::{ApbOptions, ApbRunner, Timing};
+use nearbee_core::catalog::Catalog;
 use nearbee_core::credentials::Store;
-use nearbee_core::listing::{self, Listing, ResolvedListing};
+use nearbee_core::journal::sha256_hex;
+use nearbee_core::listing::{self, Listing, ResolvedListing, Tier};
 use nearbee_core::market::{Market as _, MarketError};
+use nearbee_core::runner::{PlaybookId, Runner};
 use nearbee_core::secret::Secret;
+use nearbee_core::statement;
+use nearbee_core::tiers;
 use nearbee_market::NearAgentMarket;
 
 /// The settings `nearbee list` needs beyond the config file.
@@ -22,10 +28,23 @@ use nearbee_market::NearAgentMarket;
 pub struct PublishEnv {
     /// The market origin (MARKET_URL).
     pub market_url: String,
+    /// The apb instance's REST origin (the config's `apb.url`): the
+    /// inspection reads the facts from it.
+    pub apb_url: String,
+    /// The apb instance's API key (the config's `apb.api_key`).
+    pub apb_api_key: Option<Secret>,
+    /// The transport settings of the apb calls.
+    pub timing: Timing,
     /// The apb binary (APB_BIN or `apb`).
     pub apb_bin: PathBuf,
     /// The apb instance's config directory (the config's `apb.config_dir`).
     pub apb_config_dir: PathBuf,
+    /// The instance's expected `XDG_CONFIG_HOME` (the config's
+    /// `apb.xdg_config_home`).
+    pub apb_xdg_config_home: PathBuf,
+    /// The `systemctl` binary the inspection reads the instance
+    /// environment with.
+    pub systemctl_bin: PathBuf,
     /// The apb project Nearbee's playbooks live in.
     pub apb_workspace: PathBuf,
 }
@@ -123,6 +142,26 @@ fn read_source(
     Ok((text, scripts))
 }
 
+/// Runs the tier check on one set of facts; a breach stops the publish
+/// with every breach named (spec `listing-publish`, Tier check at
+/// publish).
+fn check_tier(
+    tier: Tier,
+    facts: &nearbee_core::tiers::ExecutionFacts,
+    catalog: &Catalog,
+    when: &str,
+) -> Result<(), PublishError> {
+    if let Err(breaches) = tiers::check(tier, facts, catalog) {
+        return Err(PublishError::Other(format!(
+            "the {} listing breaks the tier {}: {}",
+            tier.as_str(),
+            when,
+            breaches.join("; ")
+        )));
+    }
+    Ok(())
+}
+
 /// The publish. `apb` runs the materialisation and install; the market
 /// calls go through the agent's token from the credentials store.
 pub async fn publish(
@@ -131,6 +170,7 @@ pub async fn publish(
     store: &Store,
     state_dir: &Path,
     secrets: Vec<Secret>,
+    retention_days: u32,
 ) -> Result<(ResolvedListing, Vec<SettingRow>), PublishError> {
     let text = std::fs::read_to_string(listing_file)
         .map_err(|e| PublishError::Other(format!("{}: {e}", listing_file.display())))?;
@@ -145,6 +185,25 @@ pub async fn publish(
                 l.handle, l.handle
             ))
         })?;
+    let catalog: &Catalog = Catalog::embedded().map_err(|e| PublishError::Other(e.to_string()))?;
+    // The inspection reads the facts from Nearbee's own apb instance: its
+    // REST routes for the playbook and profiles, its workspace files for
+    // the routes and decisions, its health route for the version.
+    let runner = ApbRunner::connect(
+        ApbOptions {
+            url: pub_env.apb_url.clone(),
+            api_key: pub_env.apb_api_key.clone(),
+            redact: secrets.clone(),
+            timing: pub_env.timing.clone(),
+            bin: pub_env.apb_bin.clone(),
+            config_dir: pub_env.apb_config_dir.clone(),
+            systemctl_bin: pub_env.systemctl_bin.clone(),
+            xdg_config_home: pub_env.apb_xdg_config_home.clone(),
+        },
+        &pub_env.apb_workspace,
+    )
+    .await
+    .map_err(|e| PublishError::Other(format!("connect to the apb instance: {e}")))?;
     // Materialise and install first: no market call before the playbook is
     // in the apb instance with trial_candidates off.
     let (source, scripts) =
@@ -158,13 +217,47 @@ pub async fn publish(
         config_dir: pub_env.apb_config_dir.clone(),
     });
     let handle = l.handle.clone();
-    let source = source.clone();
+    let tier = l.tier;
+    // The listing's profile is the variant: two listings on one source
+    // install two playbooks with different defaults.profile values.
+    let profile = l.profile.clone();
+    // The publish order (design 4.4): the materialised source is checked
+    // before anything is installed, so a tier breach never reaches apb.
+    let materialised = install::materialise(&source, &handle, profile.as_deref(), &scripts)
+        .map_err(|e| PublishError::Other(e.to_string()))?;
+    let source_facts = runner
+        .inspect_source(&materialised)
+        .await
+        .map_err(|e| PublishError::Other(format!("the source facts cannot be read: {e}")))?;
+    check_tier(tier, &source_facts, catalog, "before installing")?;
+    let materialised_for_task = materialised.clone();
+    let scripts_for_task = scripts.clone();
     let installed = tokio::task::spawn_blocking(move || {
-        install::install_source(&cli, &source, &handle, &scripts)
+        install::install_playbook(&cli, &materialised_for_task, &scripts_for_task)
     })
     .await
     .map_err(|e| PublishError::Other(format!("install: {e}")))?
     .map_err(|e| PublishError::Other(e.to_string()))?;
+
+    // The installed version is read back from apb and checked again: the
+    // installed facts must pass the same tier and match the source's
+    // fingerprint (design 4.4).
+    let installed_facts = runner
+        .inspect(&PlaybookId::new(handle.clone()))
+        .await
+        .map_err(|e| PublishError::Other(format!("the installed facts cannot be read: {e}")))?;
+    check_tier(tier, &installed_facts, catalog, "after installing")?;
+    let source_fingerprint = statement::fingerprint(tier, &source_facts);
+    let fingerprint = statement::fingerprint(tier, &installed_facts);
+    if source_fingerprint != fingerprint {
+        return Err(PublishError::Other(
+            "installed facts differ from the source; nothing was recorded: run nearbee list again"
+                .into(),
+        ));
+    }
+    let stmt = statement::render(tier, &installed_facts, retention_days);
+    let statement_sha256 = sha256_hex(stmt.as_bytes());
+    let evidence_models = tiers::evidence_models(&installed_facts);
 
     // Market update: patch, then the pricing plan. The token travels only
     // as a bearer header to the market origin.
@@ -195,6 +288,13 @@ pub async fn publish(
         scope: Some(l.scope.clone().unwrap_or_else(|| l.description.clone())),
         protection: Some(l.protection),
         limits: l.limits.clone(),
+        tier: Some(tier),
+        intake_check: l.intake_check,
+        statement: Some(stmt),
+        statement_sha256: Some(statement_sha256),
+        statement_format: Some(statement::STATEMENT_FORMAT),
+        fingerprint: Some(fingerprint),
+        evidence_models,
         published_at: time::OffsetDateTime::now_utc(),
     };
     listing::write_resolved(state_dir, &resolved).map_err(PublishError::Other)?;
@@ -291,6 +391,7 @@ pub async fn publish_list(
         store,
         cfg.state_dir.as_path(),
         secrets,
+        cfg.retention.after_acceptance_days,
     )
     .await
     {
@@ -306,6 +407,20 @@ pub async fn publish_list(
                 r.playbook_version,
                 &r.playbook_sha256[..12.min(r.playbook_sha256.len())]
             );
+            if let Some(tier) = r.tier {
+                let _ = writeln!(out, "tier: {}", tier.as_str());
+            }
+            // The statement is what the owner pastes at the end of the
+            // bio in the web app (spec `listing-publish`, Statement in
+            // the settings report).
+            if let Some(stmt) = &r.statement {
+                let _ = writeln!(out);
+                let _ = writeln!(
+                    out,
+                    "paste this block at the end of the bio in the web app:"
+                );
+                let _ = writeln!(out, "{stmt}");
+            }
             let _ = writeln!(out);
             let _ = writeln!(
                 out,

@@ -1,0 +1,23 @@
+{
+  "apb": "1.0.0-beta.6",
+  "request": {
+    "method": "GET",
+    "path": "/api/profiles/nearbee-own",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ],
+      [
+        "scope",
+        "global"
+      ]
+    ],
+    "body": null
+  },
+  "response": {
+    "status": 404,
+    "body": "profile `nearbee-own` not found"
+  },
+  "recorded": "2026-11-11"
+}

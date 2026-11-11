@@ -7,6 +7,11 @@ use std::future::Future;
 use std::path::PathBuf;
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+/// The facts an inspection reports; the type lives in
+/// [`crate::tiers`] with the check that consumes it.
+pub use crate::tiers::ExecutionFacts;
 
 macro_rules! id_type {
     ($(#[$m:meta])* $name:ident) => {
@@ -120,6 +125,30 @@ pub struct StartRequest {
     /// The run this one continues (a rework or a redo); the engine sees
     /// the earlier run's context.
     pub continued_from: Option<RunId>,
+}
+
+/// The model identity of one attempt, as apb reported it (design 7). A
+/// missing reported model stays empty: it is never filled from the
+/// requested one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Reported {
+    /// No task of the attempt reported a model.
+    None,
+    /// Every task reported a model and all name the same one.
+    One(String),
+    /// Reported models differ, or only some tasks reported one.
+    Mixed,
+}
+
+/// One attempt of a run, with the models it was asked for and reported
+/// (spec `apb-runner`, Requested models per attempt).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptModel {
+    pub node: String,
+    pub attempt: u32,
+    pub agent: String,
+    pub requested_model: Option<String>,
+    pub reported: Reported,
 }
 
 /// A run's status. Unknown statuses are kept and are neither terminal nor
@@ -244,6 +273,8 @@ pub struct RunDetail {
     pub usage: Usage,
     /// The run's budget gate holds it (it is paused for its budget).
     pub budget_paused: bool,
+    /// Per-attempt model records; empty when the engine gave none.
+    pub attempts: Vec<AttemptModel>,
 }
 
 /// A run lookup by search field.
@@ -371,6 +402,23 @@ pub trait Runner: Send + Sync {
         limit: std::time::Duration,
     ) -> impl Future<Output = Result<DecideOutcome, RunnerError>> + Send;
     fn find(&self, q: RunQuery) -> impl Future<Output = Result<RunLookup, RunnerError>> + Send;
+    /// The execution facts of an installed playbook: its profile
+    /// references and nodes from the engine's playbook detail, the named
+    /// profiles from the profile detail routes, the provider routes and
+    /// the project configuration from the workspace files. Every fact the
+    /// engine or the files do not provide is reported unknown with the
+    /// reason, never guessed (spec `apb-runner`, Playbook inspection).
+    fn inspect(
+        &self,
+        id: &PlaybookId,
+    ) -> impl Future<Output = Result<ExecutionFacts, RunnerError>> + Send;
+    /// The same facts for a playbook YAML that is not installed: the
+    /// playbook structure comes from the given source, everything else as
+    /// in [`Runner::inspect`].
+    fn inspect_source(
+        &self,
+        source: &str,
+    ) -> impl Future<Output = Result<ExecutionFacts, RunnerError>> + Send;
 }
 
 #[cfg(test)]

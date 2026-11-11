@@ -21,6 +21,10 @@ pub const DEFAULT_WORKSPACE_PATH: &str = "~/.local/share/nearbee/apb-workspace";
 /// Default `APB_CONFIG_DIR` of Nearbee's own apb instance, used by the apb
 /// CLI calls (abort, decide).
 pub const DEFAULT_APB_CONFIG_DIR: &str = "~/.local/share/nearbee/apb-config";
+/// Default `XDG_CONFIG_HOME` of Nearbee's own apb instance: a directory
+/// Nearbee owns that holds no OpenCode configuration, so OpenCode in an
+/// attested run reads no global config (`scripts/apb-instance.sh start`).
+pub const DEFAULT_APB_XDG_CONFIG_HOME: &str = "~/.local/share/nearbee/xdg-config";
 /// Default state directory.
 pub const DEFAULT_STATE_DIR: &str = ".nearbee";
 
@@ -133,6 +137,9 @@ pub struct ApbConfig {
     /// The `APB_CONFIG_DIR` of Nearbee's own apb instance, for the apb CLI
     /// calls (abort, decide). Never the operator's everyday instance.
     pub config_dir: PathBuf,
+    /// The `XDG_CONFIG_HOME` the instance's unit must carry (the
+    /// inspection makes the model routes unknown otherwise).
+    pub xdg_config_home: PathBuf,
     pub api_key: Option<Secret>,
 }
 
@@ -177,6 +184,7 @@ struct FileApb {
     url: Option<String>,
     workspace_path: Option<PathBuf>,
     config_dir: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
 }
 
 /// A configuration loading failure.
@@ -305,6 +313,14 @@ pub fn load(
         &base_dir,
         home.as_deref(),
     )?;
+    let xdg_config_home = resolve_path(
+        file_apb
+            .xdg_config_home
+            .as_deref()
+            .unwrap_or(Path::new(DEFAULT_APB_XDG_CONFIG_HOME)),
+        &base_dir,
+        home.as_deref(),
+    )?;
     // The operator's everyday apb instance is never Nearbee's (rule 6).
     if config_dir == resolve_path(Path::new("~/.config/apb"), &base_dir, home.as_deref())? {
         return Err(ConfigError::EverydayConfigDir {
@@ -337,6 +353,7 @@ pub fn load(
             url,
             workspace_path,
             config_dir,
+            xdg_config_home,
             api_key: var("APB_API_KEY").map(Secret::new),
         },
         limits: file_cfg.limits.unwrap_or_default(),
@@ -819,6 +836,11 @@ mod tests {
         assert_eq!(
             cfg.apb.config_dir,
             PathBuf::from("/home/u/.local/share/nearbee/apb-config")
+        );
+        assert_eq!(
+            cfg.apb.xdg_config_home,
+            PathBuf::from("/home/u/.local/share/nearbee/xdg-config"),
+            "the instance's XDG_CONFIG_HOME defaults to Nearbee's own directory"
         );
         // A file value resolves `~` and relative paths against the file.
         let sub = dir.path().join("srv");

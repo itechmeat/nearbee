@@ -44,6 +44,35 @@ sees the data", and must not be sold as private.
   for a buyer reading a deliverable.
 - SDKs with built-in verification in JavaScript, Python, Rust, Go.
 
+### Attestation reports, measured 2026-11-11 (S4)
+
+`GET /v1/attestation/report?model=<URL-encoded id>&signing_algo=ecdsa&nonce=<64 hex>`
+answered 200 for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (304,174 bytes)
+and `Qwen/Qwen3.8-27B` (287,342 bytes) with an empty credit balance, so
+the call is not billed. The body is a JSON object with
+`gateway_attestation`, `model_attestations`, `ohttp_key_config` and
+`ohttp_attestation`. A request without the bearer key also answered 200,
+although the vendored skill says the key is required; Nearbee sends the
+key anyway. A trimmed copy is the replay fixture
+`crates/nearbee-cloud/tests/fixtures/attestation_report_live.json`.
+The Verification Center opens a model with
+`https://cloud.near.ai/verify?model=<URL-encoded id>` (docs.near.ai,
+verification-center page, read 2026-11-11).
+
+How Nearbee uses it (S4, `crates/nearbee-cloud`, `docs/privacy.md`
+"Evidence"): Nearbee always sends the bearer `NEARAI_API_KEY`, and treats
+the key as required for attested listings: `nearbee serve` with an attested
+listing and no key fails every report fetch with "NEARAI_API_KEY is not
+set" and sends no request, so attested hires are declined
+(`evidence_unavailable`) instead of delivered without evidence; plain
+listings never need the key. Each fetch sends a fresh random 32-byte hex
+`nonce`, follows no redirect, reads at most 2 MiB and makes at most two
+attempts (9 seconds each, 1 second apart, retried only on a timeout, a
+connect error or a 5xx) within 20 seconds; a 2xx with a JSON object body
+is a report. The deliverable links each model as
+`https://cloud.near.ai/verify?model=<id with / as %2F>`. `NEARAI_CLOUD_URL`
+overrides the API base (default `https://cloud-api.near.ai/v1`).
+
 ## End-to-end encryption
 
 Client encrypts each message with the model's attested public key before it

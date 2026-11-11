@@ -68,6 +68,53 @@ pub struct ListingLimits {
 /// The longest `scope`, in characters.
 pub const SCOPE_MAX: usize = 300;
 
+/// The longest profile name, in characters: 1 to 64 of `[a-z0-9-]`.
+pub const PROFILE_MAX: usize = 64;
+
+/// The privacy tier a listing declares (spec `privacy-tiers`, Tiers):
+/// `plain` promises only the data statement, `attested` promises TEE
+/// models with collected endpoint evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    Plain,
+    Attested,
+}
+
+impl Tier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Plain => "plain",
+            Tier::Attested => "attested",
+        }
+    }
+}
+
+/// The deterministic intake check a listing may ask for. Only the
+/// GitHub repository scan exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntakeCheck {
+    #[serde(rename = "github_repo")]
+    GithubRepo,
+}
+
+impl IntakeCheck {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntakeCheck::GithubRepo => "github_repo",
+        }
+    }
+}
+
+/// A profile name: 1 to 64 characters of `[a-z0-9-]`.
+pub fn profile_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= PROFILE_MAX
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// A listing file as written in the repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
@@ -85,6 +132,13 @@ pub struct Listing {
     pub scope: Option<String>,
     pub protection: Protection,
     pub limits: Option<ListingLimits>,
+    /// The privacy tier; required.
+    pub tier: Tier,
+    /// The apb profile the listing installs instead of the source's
+    /// `defaults.profile`.
+    pub profile: Option<String>,
+    /// The deterministic intake check run before the scope check.
+    pub intake_check: Option<IntakeCheck>,
 }
 
 /// A listing file failure. Errors never carry a token value.
@@ -145,6 +199,9 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         scope: Option<String>,
         protection: Option<Protection>,
         limits: Option<ListingLimits>,
+        tier: Option<String>,
+        profile: Option<String>,
+        intake_check: Option<String>,
     }
     /// A price that accepts only a YAML string, never a number.
     #[derive(Deserialize)]
@@ -209,6 +266,51 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         None => None,
     };
     let protection = raw.protection.unwrap_or(Protection::On);
+    // The tier is required and only `plain` or `attested` are accepted
+    // (spec `privacy-tiers`, Tiers).
+    let tier = match raw.tier.as_deref() {
+        Some("plain") => Tier::Plain,
+        Some("attested") => Tier::Attested,
+        Some(other) => {
+            return Err(ListingError::Parse {
+                message: format!(
+                    "tier `{other}` is not one of the allowed values: plain, attested"
+                ),
+                path: path.clone(),
+            });
+        }
+        None => {
+            return Err(ListingError::Parse {
+                message: "tier is required and must be one of the allowed values: plain, attested"
+                    .into(),
+                path: path.clone(),
+            });
+        }
+    };
+    // A profile name is 1 to 64 characters of [a-z0-9-].
+    if let Some(p) = &raw.profile
+        && !profile_name_ok(p)
+    {
+        return Err(ListingError::Parse {
+            message: format!(
+                "profile `{p}` is not a profile name (1 to {PROFILE_MAX} characters of [a-z0-9-])"
+            ),
+            path: path.clone(),
+        });
+    }
+    // Only the GitHub repository intake check exists.
+    let intake_check = match raw.intake_check.as_deref() {
+        Some("github_repo") => Some(IntakeCheck::GithubRepo),
+        Some(other) => {
+            return Err(ListingError::Parse {
+                message: format!(
+                    "intake_check `{other}` is not one of the allowed values: github_repo"
+                ),
+                path: path.clone(),
+            });
+        }
+        None => None,
+    };
     // With protection on the per-hire ceiling must be above zero
     // (spec `listing-publish`, Listing file; the formula, not a cent rule).
     if protection == Protection::On {
@@ -237,6 +339,9 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         scope,
         protection,
         limits: raw.limits,
+        tier,
+        profile: raw.profile,
+        intake_check,
     })
 }
 
@@ -273,8 +378,45 @@ pub struct ResolvedListing {
     pub protection: Option<Protection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ListingLimits>,
+    /// The privacy tier (an S2 or S3 record has none and is not
+    /// serveable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intake_check: Option<IntakeCheck>,
+    /// The data statement snapshot as rendered at publish time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    /// SHA-256 of the statement text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_sha256: Option<String>,
+    /// The statement format this record was written for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_format: Option<u32>,
+    /// The execution facts fingerprint at publish time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// The model ids endpoint evidence is collected for, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_models: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub published_at: time::OffsetDateTime,
+}
+
+impl ResolvedListing {
+    /// Whether serve may run hires for this record: it needs the tier,
+    /// the fingerprint and the statement, a statement hash that matches
+    /// the statement, and the current statement format (design 1.3).
+    pub fn serveable(&self) -> bool {
+        let hash_matches = match (&self.statement, &self.statement_sha256) {
+            (Some(s), Some(h)) => *h == crate::journal::sha256_hex(s.as_bytes()),
+            _ => false,
+        };
+        self.tier.is_some()
+            && self.fingerprint.is_some()
+            && hash_matches
+            && self.statement_format == Some(crate::statement::STATEMENT_FORMAT)
+    }
 }
 
 /// Reads and writes resolved listings under `<state_dir>/listings/`.
@@ -348,13 +490,14 @@ mod tests {
         r#"
 handle: repo-audit-fast
 name: "Repo audit (fast)"
-source_playbook: playbooks/first-hire/repo-audit-fast.yaml
+source_playbook: playbooks/repo-audit/playbook.yaml
 price_usd: "0.50"
 sla_seconds: 86400
 category: dev_tools
 tags: ["nearbee", "example"]
 description: "Audits a public repository and returns a short Markdown report."
 bio_markdown: "A Nearbee example agent."
+tier: plain
 "#
         .to_owned()
     }
@@ -521,6 +664,160 @@ bio_markdown: "A Nearbee example agent."
         assert_eq!(l.to_string(), "repo-audit-fast (dev_tools, 0.50 USD)");
     }
 
+    /// The tier is required (spec `listing-publish`, Listing file, "Tier
+    /// missing"): loading fails naming the field and the allowed values.
+    #[test]
+    fn a_listing_without_a_tier_is_refused_naming_the_field() {
+        let bad = text().replace("tier: plain\n", "");
+        let err = parse(&bad, Path::new("l.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ListingError::Parse { .. }), "{msg}");
+        assert!(msg.contains("tier"), "{msg}");
+        assert!(msg.contains("plain") && msg.contains("attested"), "{msg}");
+    }
+
+    /// An unknown tier value is refused naming the field and the allowed
+    /// values (spec `privacy-tiers`, Tiers, "Unknown tier").
+    #[test]
+    fn an_unknown_tier_is_refused_naming_the_field_and_the_allowed_values() {
+        let bad = text().replace("tier: plain", "tier: blind");
+        let err = parse(&bad, Path::new("l.yaml")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("tier"), "{msg}");
+        assert!(msg.contains("blind"), "{msg}");
+        assert!(msg.contains("plain") && msg.contains("attested"), "{msg}");
+        // Only the two values parse.
+        let l = parse(
+            &text().replace("tier: plain", "tier: attested"),
+            Path::new("l.yaml"),
+        )
+        .unwrap();
+        assert_eq!(l.tier, Tier::Attested);
+        assert_eq!(
+            parse(&text(), Path::new("l.yaml")).unwrap().tier,
+            Tier::Plain
+        );
+    }
+
+    /// An optional `profile` must be 1 to 64 characters of
+    /// `[a-z0-9-]`; anything else is refused.
+    #[test]
+    fn a_profile_outside_the_allowed_shape_is_refused() {
+        let ok = text().replace("tier: plain", "tier: attested\nprofile: nearbee-near");
+        let l = parse(&ok, Path::new("l.yaml")).unwrap();
+        assert_eq!(l.profile.as_deref(), Some("nearbee-near"));
+        // No profile key: none.
+        assert_eq!(parse(&text(), Path::new("l.yaml")).unwrap().profile, None);
+        // 64 characters of the allowed alphabet parse, 65 do not.
+        let long = format!("profile: {}\ntier: plain", "a".repeat(64));
+        let with = text().replace("tier: plain", &long);
+        assert!(parse(&with, Path::new("l.yaml")).is_ok());
+        let toolong = text().replace(
+            "tier: plain",
+            &format!("profile: {}\ntier: plain", "a".repeat(65)),
+        );
+        let err = parse(&toolong, Path::new("l.yaml")).unwrap_err();
+        assert!(err.to_string().contains("profile"), "{err}");
+        // A bad character and an empty name are refused.
+        for bad_name in ["Nearbee", "near bee", "near_bee", ""] {
+            let bad = text()
+                .replace("tier: plain", "profile: x\ntier: plain")
+                .replace("profile: x", &format!("profile: \"{bad_name}\""));
+            let err = parse(&bad, Path::new("l.yaml")).unwrap_err();
+            assert!(err.to_string().contains("profile"), "{bad_name}: {err}");
+        }
+    }
+
+    /// An `intake_check` accepts only `github_repo`; any other value is
+    /// refused naming the allowed value.
+    #[test]
+    fn an_intake_check_other_than_github_repo_is_refused() {
+        let ok = text().replace("tier: plain", "tier: plain\nintake_check: github_repo");
+        let l = parse(&ok, Path::new("l.yaml")).unwrap();
+        assert_eq!(l.intake_check, Some(IntakeCheck::GithubRepo));
+        // No key: none.
+        assert_eq!(
+            parse(&text(), Path::new("l.yaml")).unwrap().intake_check,
+            None
+        );
+        for bad in ["github", "gitlab_repo", "repo", "GITHUB_REPO"] {
+            let bad_text = text()
+                .replace("tier: plain", "intake_check: x\ntier: plain")
+                .replace("intake_check: x", &format!("intake_check: {bad}"));
+            let err = parse(&bad_text, Path::new("l.yaml")).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("intake_check"), "{bad}: {msg}");
+            assert!(msg.contains("github_repo"), "{bad}: {msg}");
+        }
+    }
+
+    /// An S3 resolved record without the new fields still parses (they
+    /// default) and is not serveable: it has no tier, statement or
+    /// fingerprint.
+    #[test]
+    fn an_s3_record_without_the_new_fields_parses_and_is_not_serveable() {
+        let s3 = r#"{
+  "handle": "repo-audit-fast",
+  "agent_id": "ag_1",
+  "playbook_id": "repo-audit-fast",
+  "playbook_version": "1.0.12345",
+  "playbook_sha256": "ab",
+  "price_usd": "0.50",
+  "sla_seconds": 86400,
+  "scope": "An audit of one public repository.",
+  "protection": "on",
+  "published_at": "1970-01-01T00:00:00Z"
+}"#;
+        let r: ResolvedListing = serde_json::from_str(s3).unwrap();
+        assert_eq!(r.tier, None);
+        assert_eq!(r.intake_check, None);
+        assert_eq!(r.statement, None);
+        assert_eq!(r.statement_sha256, None);
+        assert_eq!(r.statement_format, None);
+        assert_eq!(r.fingerprint, None);
+        assert!(r.evidence_models.is_empty());
+        assert!(!r.serveable(), "an S3 record is not serveable");
+        // Round trip: a record with everything set keeps it.
+        let full = ResolvedListing {
+            tier: Some(Tier::Attested),
+            intake_check: Some(IntakeCheck::GithubRepo),
+            statement: Some("## Data handling\n".into()),
+            statement_sha256: Some(crate::journal::sha256_hex(b"## Data handling\n")),
+            statement_format: Some(1),
+            fingerprint: Some("sha256:ab".into()),
+            evidence_models: vec!["DeepSeek-V4.1-Flash-1017".into()],
+            handle: "repo-audit-fast".into(),
+            agent_id: "ag_1".into(),
+            playbook_id: "repo-audit-fast".into(),
+            playbook_version: "1.0.1".into(),
+            playbook_sha256: "ab".into(),
+            price_usd: "0.50".into(),
+            sla_seconds: 3600,
+            scope: None,
+            protection: None,
+            limits: None,
+            published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
+        };
+        assert!(full.serveable(), "a full record is serveable");
+        let text = serde_json::to_string(&full).unwrap();
+        let back: ResolvedListing = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, full);
+        assert!(back.serveable());
+        // A corrupted statement hash or another format is not serveable.
+        let mut bad = full.clone();
+        bad.statement_sha256 = Some("00".into());
+        assert!(!bad.serveable());
+        let mut bad = full.clone();
+        bad.statement_format = Some(99);
+        assert!(!bad.serveable());
+        let mut bad = full.clone();
+        bad.fingerprint = None;
+        assert!(!bad.serveable());
+        let mut bad = full.clone();
+        bad.tier = None;
+        assert!(!bad.serveable());
+    }
+
     #[test]
     fn resolved_listings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -535,6 +832,13 @@ bio_markdown: "A Nearbee example agent."
             scope: None,
             protection: None,
             limits: None,
+            tier: Some(Tier::Plain),
+            intake_check: None,
+            statement: Some("## Data handling\n".into()),
+            statement_sha256: Some(crate::journal::sha256_hex(b"## Data handling\n")),
+            statement_format: Some(1),
+            fingerprint: Some("sha256:ab".into()),
+            evidence_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
         };
         write_resolved(dir.path(), &r).unwrap();
@@ -566,6 +870,13 @@ mod resolved_tests {
             scope: None,
             protection: None,
             limits: None,
+            tier: Some(Tier::Plain),
+            intake_check: None,
+            statement: Some("## Data handling\n".into()),
+            statement_sha256: Some(crate::journal::sha256_hex(b"## Data handling\n")),
+            statement_format: Some(1),
+            fingerprint: Some("sha256:ab".into()),
+            evidence_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

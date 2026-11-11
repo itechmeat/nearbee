@@ -200,6 +200,23 @@ Statuses: `created`, `running`, `paused`, `interrupted` are not terminal;
 `succeeded`, `failed`, `aborted` are. Nearbee treats any other value as
 unknown: neither terminal nor successful.
 
+### Inspection routes (recorded 2026-11-11, S4)
+
+Recorded from Nearbee's instance (`1.0.0-beta.6`) into
+`crates/nearbee-apb/tests/fixtures/apb/*_live.json` (home paths replaced
+by `/home/user`):
+
+1. `GET /api/health`: `{build_id, status, version}`; `version` is the apb
+   release the compaction fact depends on.
+2. `GET /api/playbooks/{id}?workspace=<ws>`: `id`, `version`, `yaml` (the
+   installed text), `playbook` (parsed), `validation`, `frozen`,
+   `assumed_effects`, `effective_effects`, `edge_addresses`, `layout`.
+3. `GET /api/profiles/{name}?workspace=<ws>&scope=project|global`: `name`,
+   `scope`, `profile_yaml`, `soul_md`, `profile_digest`, `bundle_digest`.
+   A profile missing in that scope answers 404 with the plain text
+   `profile `<name>` not found`. Nearbee's profiles are all project scope;
+   the instance has no global profiles.
+
 ## Params and the brief
 
 A playbook declares `params` (text, with labels and defaults; `secret: true`
@@ -324,9 +341,51 @@ OpenAI-compatible provider: OpenCode (`opencode.json` provider with
 `config.toml`). apb passes the provider's environment to the executor
 (`PROFILES.md`, environment table). DSH will support NEAR AI Cloud natively in a
 coming apb release (owner's statement, 2026-11-09). Nearbee ships profile
-templates `nearbee-own` (owner's subscription) and `nearbee-near` (OpenCode on
-NEAR AI Cloud TEE models); `nearbee-near-vision` is an unsupported placeholder
+templates `nearbee-own` (owner's subscription), `nearbee-own-premium` (Claude
+Opus on the owner's subscription, since S4) and `nearbee-near` (OpenCode on
+NEAR AI Cloud TEE models: DeepSeek V4.1 Flash first, Qwen3.8-27B as
+fallback since S4); `nearbee-near-vision` is an unsupported placeholder
 (the TEE vision model has no tool calls). See `playbooks/README.md`.
+
+### What S4 relies on (read at `v1.0.0-beta.6`)
+
+1. Script nodes run in the run's worktree, inherit the dashboard's
+   environment (no `env_clear`) and get `APB_RUN_DIR`, `APB_RUN_ID` and
+   `APB_NODE_ID` (`crates/apb-engine/src/script.rs`, `run_env` and
+   `run_script_with_env_removed`). `nearbee audit fetch` reads the run's
+   params from `$APB_RUN_DIR/run.yaml` (`crates/nearbee-apb/src/run_params.rs`),
+   and the scripts find the binary through `NEARBEE_BIN`, which
+   `scripts/apb-instance.sh start` sets in the unit.
+2. The project's `.apb/config.yaml` carries `decisions: { enabled: false }`
+   (`scripts/apb-instance.sh install`); the tier check reads it, and the
+   intake scope check is skipped while it is off (`docs/privacy.md`).
+3. No `OPENCODE_` variable may reach the instance: OpenCode reads them over
+   `opencode.json`, so the tier check treats them as unknown routes, and
+   `scripts/apb-instance.sh start` refuses to pass or inherit one.
+4. The unit runs with `XDG_CONFIG_HOME` set to Nearbee's own empty directory
+   (`~/.local/share/nearbee/xdg-config`, `NEARBEE_APB_XDG_CONFIG_HOME`; the
+   config key `apb.xdg_config_home` must name the same path), so OpenCode
+   merges no global config of the owner: apb passes the `XDG_*_HOME`
+   variables under a `process_env` allowlist (`docs/PROFILES.md` at the
+   tag), and apb's own OpenCode code writes `$XDG_CONFIG_HOME/opencode/opencode.json`
+   (`crates/apb-core/src/agents/opencode/mcp.rs`). The inspection reads the
+   unit environment (`SYSTEMCTL_BIN` names another `systemctl`) and makes the
+   routes unknown unless that directory is set and holds no `opencode`
+   entry, the workspace has no `.opencode/`, `/etc/opencode` is absent and
+   no directory above the workspace holds OpenCode configuration
+   (`docs/privacy.md`, OpenCode configuration). OpenCode still loads skills
+   and instructions from `~/.claude` and `~/.agents`; that gap is recorded
+   there.
+5. apb's opencode adapter declares no sandbox needs at the tag
+   (`Capabilities::NONE`, no `HostSetup` needs), so `isolation: full`
+   refuses an opencode node (`agent_needs_unknown`) and `best_effort` runs it
+   without a sandbox in a scratch directory without the project tree
+   (`docs/ISOLATION.md`). The repo-audit `audit` node therefore declares
+   only `writes`, `max_changed_files` and `protect`, which apb enforces
+   after every attempt (`docs/privacy.md`, Repository audit).
+6. A failed read of the instance during the inspection (a transport error,
+   a 5xx, a failed `systemctl`) fails the inspection; `serve` holds the
+   listing for that round instead of declining its hires.
 
 ### OpenCode on NEAR AI Cloud (verified 2026-11-09, OpenCode 2.2.5)
 

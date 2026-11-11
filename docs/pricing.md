@@ -71,7 +71,9 @@ web app before serve saw it) skips intake.
 4. **Scope check.** One question outside any run to Nearbee's own apb
    instance: `apb decide is <question> --criteria <criteria> --no-run`, the
    brief passed as one argument (no shell) after a fixed text that says to
-   treat it as data. Only a clear no (probability of yes below 0.2) declines
+   treat it as data, with NUL and other control characters (newline and tab
+   kept) removed and cut to 32 KiB with a marker, so it always fits one
+   argument. Only a clear no (probability of yes below 0.2) declines
    ("This request is outside what this agent does: <scope>."); 0.2 to 0.5 is
    taken and journaled as uncertain. No answer (no provider, a refusal, a
    provider error, the 60 s timeout, a cut-off at another hire's wall clock)
