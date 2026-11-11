@@ -318,7 +318,7 @@ fn run_place_section(tier: Tier) -> String {
         );
     }
     out.push_str(
-        "The run happens on the owner's self-hosted machine, which can read the data. The agent steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented.\n\n",
+        "The run happens on the owner's self-hosted machine, which can read the data. The steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented.\n\n",
     );
     out
 }
@@ -675,7 +675,7 @@ mod tests {
         // What apb does not enforce for the agent step is stated as not
         // prevented (spec `data-statement`, Generated content).
         assert!(
-            text.contains("The agent steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented."),
+            text.contains("The steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented."),
             "the no-sandbox sentence appears: {text}"
         );
     }
