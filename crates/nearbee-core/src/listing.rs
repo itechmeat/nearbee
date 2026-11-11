@@ -139,6 +139,13 @@ pub struct Listing {
     pub profile: Option<String>,
     /// The deterministic intake check run before the scope check.
     pub intake_check: Option<IntakeCheck>,
+    /// The NEAR AI Cloud models Nearbee's own commands may call from the
+    /// playbook's script nodes, bare catalog ids in order (spec
+    /// `listing-publish`, Direct and signed models).
+    pub direct_models: Vec<String>,
+    /// The direct models whose call carries a response signature; a
+    /// subset of `direct_models`.
+    pub signed_models: Vec<String>,
 }
 
 /// A listing file failure. Errors never carry a token value.
@@ -202,6 +209,8 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         tier: Option<String>,
         profile: Option<String>,
         intake_check: Option<String>,
+        direct_models: Option<Vec<String>>,
+        signed_models: Option<Vec<String>>,
     }
     /// A price that accepts only a YAML string, never a number.
     #[derive(Deserialize)]
@@ -311,6 +320,14 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         }
         None => None,
     };
+    let direct_models = raw.direct_models.unwrap_or_default();
+    let signed_models = raw.signed_models.unwrap_or_default();
+    if let Err(message) = check_direct_models(&direct_models, &signed_models) {
+        return Err(ListingError::Parse {
+            path: path.clone(),
+            message,
+        });
+    }
     // With protection on the per-hire ceiling must be above zero
     // (spec `listing-publish`, Listing file; the formula, not a cent rule).
     if protection == Protection::On {
@@ -342,7 +359,38 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         tier,
         profile: raw.profile,
         intake_check,
+        direct_models,
+        signed_models,
     })
+}
+
+/// The shape rules of `direct_models` and `signed_models` (spec
+/// `listing-publish`, Direct and signed models): bare ids, no duplicate,
+/// signed models a subset of the direct ones. Catalog membership is the
+/// tier check's.
+fn check_direct_models(direct: &[String], signed: &[String]) -> Result<(), String> {
+    for (i, m) in direct.iter().enumerate() {
+        if m.trim().is_empty() || m.trim() != m {
+            return Err(format!("direct_models entry `{m}` is not a model id"));
+        }
+        if m.starts_with("nearai/") {
+            return Err(format!(
+                "direct_models entry `{m}` carries the nearai/ prefix; list the bare catalog id"
+            ));
+        }
+        if direct[..i].contains(m) {
+            return Err(format!("direct_models lists `{m}` twice"));
+        }
+    }
+    for (i, m) in signed.iter().enumerate() {
+        if !direct.contains(m) {
+            return Err(format!("signed_models entry `{m}` is not in direct_models"));
+        }
+        if signed[..i].contains(m) {
+            return Err(format!("signed_models lists `{m}` twice"));
+        }
+    }
+    Ok(())
 }
 
 /// A market handle: 3 to 30 characters, `[a-z][a-z0-9-]*`.
@@ -399,6 +447,12 @@ pub struct ResolvedListing {
     /// The model ids endpoint evidence is collected for, sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_models: Vec<String>,
+    /// The listing's direct models, in order (absent: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub direct_models: Vec<String>,
+    /// The listing's signed models, in order (absent: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_models: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub published_at: time::OffsetDateTime,
 }
@@ -610,6 +664,53 @@ tier: plain
     }
 
     #[test]
+    fn direct_and_signed_models_keep_their_order() {
+        let t = text().replace(
+            "bio_markdown:",
+            "direct_models: [Qwen/Qwen3-VL-30B-A3B-Instruct, openai/privacy-filter, deepseek-ai/DeepSeek-V4.1-Flash-1017]\nsigned_models: [deepseek-ai/DeepSeek-V4.1-Flash-1017]\nbio_markdown:",
+        );
+        let l = parse(&t, Path::new("l.yaml")).unwrap();
+        assert_eq!(
+            l.direct_models,
+            [
+                "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "openai/privacy-filter",
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+            ]
+        );
+        assert_eq!(l.signed_models, ["deepseek-ai/DeepSeek-V4.1-Flash-1017"]);
+        let plain = parse(&text(), Path::new("l.yaml")).unwrap();
+        assert!(plain.direct_models.is_empty() && plain.signed_models.is_empty());
+    }
+
+    #[test]
+    fn a_prefixed_duplicated_or_unlisted_model_is_refused_naming_it() {
+        let with =
+            |extra: &str| text().replace("bio_markdown:", &format!("{extra}\nbio_markdown:"));
+        let err = parse(
+            &with("direct_models: [nearai/openai/privacy-filter]"),
+            Path::new("l.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nearai/openai/privacy-filter"), "{err}");
+        let err = parse(
+            &with("direct_models: [openai/privacy-filter, openai/privacy-filter]"),
+            Path::new("l.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`openai/privacy-filter` twice"), "{err}");
+        let err = parse(
+            &with("direct_models: [openai/privacy-filter]\nsigned_models: [Qwen/Qwen3.8-27B]"),
+            Path::new("l.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Qwen/Qwen3.8-27B"), "{err}");
+    }
+
+    #[test]
     fn unknown_keys_are_refused() {
         let bad = text().replace("bio_markdown:", "bio_markdown_x:");
         let err = parse(&bad, Path::new("listing.yaml")).unwrap_err();
@@ -786,6 +887,8 @@ tier: plain
             statement_format: Some(1),
             fingerprint: Some("sha256:ab".into()),
             evidence_models: vec!["DeepSeek-V4.1-Flash-1017".into()],
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
             handle: "repo-audit-fast".into(),
             agent_id: "ag_1".into(),
             playbook_id: "repo-audit-fast".into(),
@@ -839,6 +942,8 @@ tier: plain
             statement_format: Some(1),
             fingerprint: Some("sha256:ab".into()),
             evidence_models: Vec::new(),
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
         };
         write_resolved(dir.path(), &r).unwrap();
@@ -877,6 +982,8 @@ mod resolved_tests {
             statement_format: Some(1),
             fingerprint: Some("sha256:ab".into()),
             evidence_models: Vec::new(),
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

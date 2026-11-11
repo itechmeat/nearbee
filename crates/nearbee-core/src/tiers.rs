@@ -91,6 +91,27 @@ pub struct ExecutionFacts {
     pub routes: Known<Vec<ProviderRoute>>,
     pub decisions_enabled: Known<bool>,
     pub compaction_enabled: Known<bool>,
+    /// The listing's direct models, in order. Never filled by the runner:
+    /// the caller copies them from the listing or its record with
+    /// [`ExecutionFacts::with_direct_models`]. Left out of the serialized
+    /// facts when empty, so an S4 fingerprint is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub direct_models: Vec<String>,
+    /// The listing's signed models, in order; same rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signed_models: Vec<String>,
+}
+
+impl ExecutionFacts {
+    /// The facts with the listing's direct and signed models, which the
+    /// runner never reports (design 5.1): used at `nearbee list` and in
+    /// the drift pass, before the check, the fingerprint, the statement
+    /// and the evidence set.
+    pub fn with_direct_models(mut self, direct: &[String], signed: &[String]) -> Self {
+        self.direct_models = direct.to_vec();
+        self.signed_models = signed.to_vec();
+        self
+    }
 }
 
 /// The node kinds the check knows (design 3); any other kind is a breach.
@@ -248,6 +269,30 @@ pub fn check(tier: Tier, facts: &ExecutionFacts, catalog: &Catalog) -> Result<()
             }
         }
     }
+    // Direct models (spec `privacy-tiers`, Direct models): attested needs
+    // catalog `nearai` models, plain catalog models.
+    for model in &facts.direct_models {
+        if model.starts_with("nearai/") {
+            breaches.push(format!(
+                "direct model `{model}` carries the nearai/ prefix; list the bare catalog id"
+            ));
+        } else if tier == Tier::Attested && !catalog.is_nearai(model) {
+            attested_breaches.push(format!(
+                "direct model `{model}` is not a NEAR AI Cloud TEE model in the catalog; an attested listing calls only those"
+            ));
+        } else if catalog.owned_by(model).is_none() {
+            breaches.push(format!(
+                "direct model `{model}` is not in the NEAR AI Cloud catalog snapshot"
+            ));
+        }
+    }
+    for model in &facts.signed_models {
+        if !facts.direct_models.contains(model) {
+            breaches.push(format!(
+                "signed model `{model}` is not one of the direct models"
+            ));
+        }
+    }
     if tier == Tier::Attested {
         for node in &facts.nodes {
             for connector in &node.connectors {
@@ -327,9 +372,14 @@ pub fn check(tier: Tier, facts: &ExecutionFacts, catalog: &Catalog) -> Result<()
 }
 
 /// The sorted, distinct model ids (without the `nearai/` prefix) of every
-/// usable profile's executor, fallbacks and tiers (design 3).
+/// usable profile's executor, fallbacks and tiers (design 3), and the
+/// listing's direct models (design 5.4).
 pub fn evidence_models(facts: &ExecutionFacts) -> Vec<String> {
-    let mut models: Vec<String> = Vec::new();
+    let mut models: Vec<String> = facts
+        .direct_models
+        .iter()
+        .map(|m| strip_nearai(m).to_string())
+        .collect();
     for reference in usable_references(facts) {
         if let Some(fact) = profile_fact(facts, &reference) {
             models.push(strip_nearai(&fact.executor.model).to_string());
@@ -404,6 +454,8 @@ mod tests {
             routes: Known::Yes(vec![]),
             decisions_enabled: Known::Yes(false),
             compaction_enabled: Known::Yes(false),
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
         }
     }
 
@@ -411,6 +463,56 @@ mod tests {
         Catalog::embedded()
             .expect("the checked-in catalog parses")
             .clone()
+    }
+
+    fn with_direct(facts: ExecutionFacts, direct: &[&str], signed: &[&str]) -> ExecutionFacts {
+        let d: Vec<String> = direct.iter().map(|s| s.to_string()).collect();
+        let s: Vec<String> = signed.iter().map(|s| s.to_string()).collect();
+        facts.with_direct_models(&d, &s)
+    }
+
+    /// Attested refuses a direct model that is not `nearai`; plain
+    /// refuses one absent from the catalog and accepts any catalog model
+    /// (task 3.1).
+    #[test]
+    fn direct_models_follow_the_tier() {
+        let (facts, catalog) = attested_setup();
+        let ok = with_direct(
+            facts.clone(),
+            &["Qwen/Qwen3-VL-30B-A3B-Instruct", "openai/privacy-filter"],
+            &[],
+        );
+        assert_eq!(check(Tier::Attested, &ok, &catalog), Ok(()));
+        let bad = with_direct(facts.clone(), &["anthropic/claude-sonnet-5"], &[]);
+        let err = check(Tier::Attested, &bad, &catalog)
+            .unwrap_err()
+            .join("\n");
+        assert!(err.contains("anthropic/claude-sonnet-5"), "{err}");
+        let plain = with_direct(base_facts(), &["anthropic/claude-sonnet-5"], &[]);
+        assert_eq!(check(Tier::Plain, &plain, &catalog), Ok(()));
+        let off = with_direct(base_facts(), &["no-such/model"], &[]);
+        let err = check(Tier::Plain, &off, &catalog).unwrap_err().join("\n");
+        assert!(err.contains("no-such/model"), "{err}");
+        let unlisted = with_direct(
+            base_facts(),
+            &["openai/privacy-filter"],
+            &["Qwen/Qwen3.8-27B"],
+        );
+        let err = check(Tier::Plain, &unlisted, &catalog)
+            .unwrap_err()
+            .join("\n");
+        assert!(err.contains("Qwen/Qwen3.8-27B"), "{err}");
+    }
+
+    /// The evidence set includes the direct models (task 3.1).
+    #[test]
+    fn evidence_models_include_direct_models() {
+        let (facts, _) = attested_setup();
+        let before = evidence_models(&facts);
+        let facts = with_direct(facts, &["openai/privacy-filter"], &[]);
+        let after = evidence_models(&facts);
+        assert!(after.contains(&"openai/privacy-filter".to_string()));
+        assert_eq!(after.len(), before.len() + 1);
     }
 
     /// A passing `attested` case built like the shipped profiles (task

@@ -17,7 +17,9 @@ use nearbee_core::secret::Secret;
 use nearbee_market::NearAgentMarket;
 
 pub mod audit;
+pub mod digest;
 pub mod publish;
+pub mod signed_call;
 
 /// Exit code for an error that is not a finding (unreadable config,
 /// unreachable apb).
@@ -70,6 +72,37 @@ pub enum Command {
         #[command(subcommand)]
         action: AuditAction,
     },
+    /// Send one exact-bytes NEAR AI Cloud completion and keep its response
+    /// and its `provider_tee` signature (run by a script node).
+    SignedCall(SignedCallArgs),
+    /// Agent B's steps, run by the `doc-digest` playbook's script nodes in
+    /// the run's worktree.
+    Digest {
+        #[command(subcommand)]
+        action: DigestAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum DigestAction {
+    /// Render the attached PDF and image files into page images.
+    Pages,
+    /// Transcribe every page on the vision model.
+    Extract,
+    /// Count personal data per page with the privacy classifier.
+    Classify,
+    /// Make the signed digest call and write the deliverable.
+    Compose,
+}
+
+#[derive(Debug, Args)]
+pub struct SignedCallArgs {
+    /// The request file, sent unchanged.
+    #[arg(long)]
+    pub request: PathBuf,
+    /// The state and evidence directory.
+    #[arg(long)]
+    pub out: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -247,6 +280,152 @@ pub async fn run(cli: Cli, env: &Env<'_>, out: &mut dyn Write) -> i32 {
         Command::Audit {
             action: AuditAction::Finish,
         } => audit_finish(env, out),
+        Command::SignedCall(args) => signed_call_command(env, &args.request, &args.out, out).await,
+        Command::Digest { action } => digest_command(env, action, out).await,
+    }
+}
+
+/// `nearbee digest <step>` in the current directory, against
+/// [`nearbee_cloud::PRODUCTION_BASE`].
+pub async fn digest_command(env: &Env<'_>, action: DigestAction, out: &mut dyn Write) -> i32 {
+    let mut lines = Lines::new(out);
+    let step = format!("{action:?}").to_lowercase();
+    let result = digest_step(env, action, &mut lines).await;
+    match result {
+        Ok(text) => {
+            lines.line(&format!("digest {step}: {text}"));
+            0
+        }
+        Err(e) => {
+            lines.line(&format!("error: digest {step}: {e}"));
+            EXIT_ERROR
+        }
+    }
+}
+
+async fn digest_step(
+    env: &Env<'_>,
+    action: DigestAction,
+    lines: &mut Lines<'_>,
+) -> Result<String, String> {
+    let params = script_params(env)?;
+    if let DigestAction::Pages = action {
+        let tools = digest::Tools::resolve((env.var)("PATH").as_deref())?;
+        let p = digest::pages(env.cwd, &params, &tools)?;
+        return Ok(format!(
+            "{} pages rendered, {} skipped, {} files unusable",
+            p.pages.len(),
+            p.skipped,
+            p.unusable
+        ));
+    }
+    let key = cloud_key(env)?;
+    lines.secrets.push(key.clone());
+    let client = nearbee_cloud::CloudClient::new(nearbee_cloud::PRODUCTION_BASE, key.clone())?;
+    match action {
+        DigestAction::Pages => unreachable!("handled above"),
+        DigestAction::Extract => {
+            let n = digest::extract(env.cwd, &params, &client).await?;
+            Ok(format!("{n} pages extracted"))
+        }
+        DigestAction::Classify => {
+            let p = digest::classify(env.cwd, &params, &client).await?;
+            Ok(format!("{} pages classified", p.pages.len()))
+        }
+        DigestAction::Compose => {
+            let attestor = nearbee_cloud::CloudAttestor::new(nearbee_cloud::PRODUCTION_BASE, key)?
+                .with_provider("near");
+            let c = digest::compose(
+                env.cwd,
+                &params,
+                &client,
+                &attestor,
+                &signed_call::Timing::default(),
+            )
+            .await?;
+            Ok(format!(
+                "deliverable written: {} pages digested, {} figures kept, {} dropped",
+                c.digest.pages.digested,
+                c.digest.figures.len(),
+                c.digest.dropped_figures
+            ))
+        }
+    }
+}
+
+/// The NEAR AI Cloud key of Nearbee's commands (`NEARAI_API_KEY`).
+fn cloud_key(env: &Env<'_>) -> Result<Secret, String> {
+    match (env.var)("NEARAI_API_KEY") {
+        Some(k) if !k.trim().is_empty() => Ok(Secret::new(k.trim())),
+        _ => Err(nearbee_cloud::NO_KEY.to_owned()),
+    }
+}
+
+/// The run params of a script node (`APB_RUN_DIR`).
+fn script_params(env: &Env<'_>) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let run_dir = (env.var)("APB_RUN_DIR").map(PathBuf::from);
+    nearbee_apb::run_params::from_run_dir(run_dir.as_deref())
+}
+
+/// `nearbee signed-call --request <file> --out <dir>` against
+/// [`nearbee_cloud::PRODUCTION_BASE`].
+pub async fn signed_call_command(
+    env: &Env<'_>,
+    request: &Path,
+    out_dir: &Path,
+    out: &mut dyn Write,
+) -> i32 {
+    let mut lines = Lines::new(out);
+    let key = match cloud_key(env) {
+        Ok(k) => k,
+        Err(e) => {
+            lines.line(&format!("error: signed-call: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    lines.secrets.push(key.clone());
+    let allowed = match script_params(env).and_then(|p| signed_call::parse_direct_models(&p)) {
+        Ok(m) => m,
+        Err(e) => {
+            lines.line(&format!("error: signed-call: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    let built = nearbee_cloud::CloudClient::new(nearbee_cloud::PRODUCTION_BASE, key.clone())
+        .and_then(|c| {
+            nearbee_cloud::CloudAttestor::new(nearbee_cloud::PRODUCTION_BASE, key)
+                .map(|a| (c, a.with_provider("near")))
+        });
+    let (client, attestor) = match built {
+        Ok(p) => p,
+        Err(e) => {
+            lines.line(&format!("error: signed-call: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    let request = env.cwd.join(request);
+    let out_dir = env.cwd.join(out_dir);
+    match signed_call::signed_call(
+        &client,
+        &attestor,
+        &request,
+        &out_dir,
+        &allowed,
+        &signed_call::Timing::default(),
+    )
+    .await
+    {
+        Ok(s) => {
+            lines.line(&format!(
+                "signed call done: completion {} on {}",
+                s.completion_id, s.model
+            ));
+            0
+        }
+        Err(e) => {
+            lines.line(&format!("error: signed-call: {e}"));
+            EXIT_ERROR
+        }
     }
 }
 

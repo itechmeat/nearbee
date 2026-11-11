@@ -60,25 +60,57 @@ project's decisions are off, `docs/privacy.md`).
   responses (`docs/privacy.md`).
 - Why: dev_tools is the second largest category and apb's home turf.
 
-## B. `doc-digest-private` (data, privacy track)
+## B. `doc-digest-private` (data, privacy track, built in S5)
 
-Buyer attaches up to 10 documents or images (PDF, PNG, JPEG, DOCX, up to 25 MB
-total, up to 40 pages) and asks for a digest: summary, extracted entities, key
-figures with source page references, a machine-readable `digest.json`, and a
-list of questions the documents leave open. Pipeline, in this order:
+Playbook `playbooks/doc-digest/`, listing
+`playbooks/doc-digest/listing.doc-digest-private.yaml` (attested, 1.00
+USD, category `data`). The buyer attaches up to 10 PDF, PNG or JPEG files
+(`file_types: [pdf, png, jpg, jpeg]`, at most 25 MiB in total; intake
+declines a hire whose declared sizes sum above that, `rejected`, because
+`max_attachment_bytes` bounds the sum) and asks
+for a digest: summary, entities, key figures with their source page, open
+questions, and a machine-readable `digest.json`. No DOCX: a buyer converts
+it to PDF first. Every step is a Nearbee command in a script node (D-026);
+there is no agent step, and the playbook sets no default profile (apb
+validates it without one), so the statement lists no agent model.
 
-1. Local conversion in the worktree: PDF and DOCX pages to PNG at a fixed
-   resolution (no model involved; pixel and page limits enforced here).
-2. Vision extraction: each page image as an image content part to
-   `Qwen/Qwen3-VL-30B-A3B-Instruct` (no tools; one call per page, TEE).
-3. PII classification of the extracted text through `/v1/privacy/classify`
-   (`openai/privacy-filter` is not a chat model); categories are reported,
-   values are never quoted in the digest.
-4. Digest by `deepseek-ai/DeepSeek-V4.1-Flash-1017` or `Qwen/Qwen3.8-27B` (TEE).
+1. `nearbee digest pages`: the files are read under `inputs/` without
+   following links and sniffed by their leading bytes; PDF pages render
+   with `pdftoppm` (long side 2000 px) and every page goes through
+   ImageMagick with resource limits to at most 2 megapixels. Every tool
+   runs under `prlimit` (1 GiB address space, 60 s CPU) with a 60 s wall
+   clock. At most 40 pages: the rest are skipped and counted; an
+   encrypted or unreadable PDF is skipped and counted as unusable.
+2. `nearbee digest extract`: one call per page to
+   `Qwen/Qwen3-VL-30B-A3B-Instruct` with the page as an image part and a
+   fixed transcription prompt; a page is retried once; an answer cut at
+   its token bound is marked `truncated`.
+3. `nearbee digest classify`: `/v1/privacy/classify` with
+   `openai/privacy-filter`; only counts per category are kept, never the
+   span texts.
+4. `nearbee digest compose`: the signed call (`nearbee signed-call`) to
+   `deepseek-ai/DeepSeek-V4.1-Flash-1017` with the page texts, the counts
+   and the buyer's change request as labelled data, at most 900 KiB
+   (pages cut last first and counted once, as skipped). The answer must
+   match the digest schema exactly; a figure is kept only when its value
+   is on the cited page. The schema allows only organisations, document
+   types, dates and amounts as entities and the prompt forbids names and
+   contact details, but the prompt is not relied on: every free-text value
+   of the answer (summary, entity values, figure values and labels, open
+   questions) then goes through `/v1/privacy/classify` again, each span is
+   replaced by `[redacted: <category>]`, and a figure whose value held
+   one is dropped and counted. The personal data section shows categories
+   and counts from the page classification only.
+5. Extraction and classify calls send `x-no-aliasing: true` and fail on
+   an answer that names another model; an error names the field, never
+   document or model text.
 
-Step 4 is the **signed step** (D-008): a trusted `script` node makes the one
-Cloud API call itself, keeps the exact bytes and fetches the `provider_tee`
-response signature, which goes into the deliverable's evidence block.
+State lives in `digest/<execution_id>/` of the hire's worktree, so a
+retried node resumes and a rework starts fresh with a new signed call.
+The deliverable carries the `Response signature` section with the
+Verification Center receipt link (docs/privacy.md). Not live yet: the
+owner's Cloud credits (O-3) and the draft agent (O-2) are needed for the
+first hire.
 
 - Variant: `doc-digest-private` only (attested tier, signed digest step). A
   `blind` variant for x402 callers is a separate design after the hackathon.

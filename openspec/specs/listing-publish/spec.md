@@ -6,7 +6,7 @@ Defines how a listing file becomes a draft agent on the market backed by a mater
 ## Requirements
 
 ### Requirement: Listing file
-A listing file SHALL be YAML with `handle`, `name`, `source_playbook`, `price_usd` (decimal string), `sla_seconds`, `category`, `tags` (at most 10, 1 to 40 characters), `description` (at most 200), `bio_markdown` and `tier` (`plain`, `attested`), and optionally `profile`, `intake_check` (`github_repo`), `scope` (at most 300), `protection` (`on` by default, or `off`) and `limits` (`max_brief_bytes`, `max_attachments`, `max_attachment_bytes`, `file_types`); unknown keys SHALL be refused.
+A listing file SHALL be YAML with `handle`, `name`, `source_playbook`, `price_usd` (decimal string), `sla_seconds`, `category`, `tags` (at most 10, 1 to 40 characters), `description` (at most 200), `bio_markdown` and `tier` (`plain`, `attested`), and optionally `profile`, `direct_models`, `signed_models`, `intake_check` (`github_repo`), `scope` (at most 300), `protection` (`on` by default, or `off`) and `limits` (spec `hire-intake`); unknown keys SHALL be refused.
 
 #### Scenario: Category outside the enum
 - **WHEN** `category` is `games`
@@ -97,3 +97,18 @@ The web-app settings report SHALL print the generated data statement as the bloc
 #### Scenario: Report of an attested listing
 - **WHEN** an attested listing is published
 - **THEN** the report shows `tier: attested` and the `Data handling` block
+
+### Requirement: Direct and signed models
+`direct_models` SHALL be a list of bare catalog ids (no `nearai/` prefix) kept in order; a prefixed or duplicated entry SHALL be refused naming it. `signed_models` SHALL be a subset of `direct_models`; any other entry SHALL be refused naming it. Both are recorded with the listing and frozen with each generation's statement snapshot.
+
+#### Scenario: Direct models listed
+- **WHEN** a listing sets `direct_models: [Qwen/Qwen3-VL-30B-A3B-Instruct, openai/privacy-filter]`
+- **THEN** loading keeps the list in that order
+
+#### Scenario: Duplicate direct model
+- **WHEN** a listing lists `openai/privacy-filter` twice in `direct_models`
+- **THEN** loading fails naming the duplicated entry
+
+#### Scenario: Signed model not direct
+- **WHEN** `signed_models` names a model absent from `direct_models`
+- **THEN** loading fails naming it

@@ -44,6 +44,9 @@ is files under `.nearbee/` (one durable journal per hire) and the market itself.
 | `runner/` | `Runner` interface and its implementation `ApbRunner` (`crates/nearbee-apb`): REST client to Nearbee's own apb instance pinned to one workspace, run start with params, worktree and budget, run lookup by the `hire_id` and `execution_id` search fields with completeness, polling, `decide`; since S4 `inspect` and `inspect_source` (the execution facts, `inspect.rs`), the per-attempt models of a run (`attempt_models`), materialisation with the listing's profile; `run_params` reads a script node's run params from `APB_RUN_DIR` | fetch, child process |
 | `cloud/` (S4) | `CloudAttestor` (`crates/nearbee-cloud`): the NEAR AI Cloud attestation report client behind `Attestor` (no redirects, 2 MiB cap, two attempts within 20 s, the key never in an error) | fetch |
 | `cli/audit` (S4) | `nearbee audit fetch` (the GitHub snapshot of the one repository the brief names) and `nearbee audit finish` (the citation check, `findings.json`, the Markdown deliverable, the manifest), run by the `repo-audit` playbook's script nodes in the run's worktree | fetch, the local filesystem |
+| `cloud/client` (S5) | `CloudClient` (`crates/nearbee-cloud/src/client.rs`): the model calls of Nearbee's own commands on `https://cloud-api.near.ai/v1` (exact-bytes completion, signature fetch, privacy classify, JSON completion); no proxy, no redirects, capped bodies | fetch |
+| `cli/signed_call`, `cli/digest` (S5) | `nearbee signed-call` (one exact-bytes completion with its `provider_tee` signature, state in its out directory) and `nearbee digest pages\|extract\|classify\|compose` (agent B), run by the `doc-digest` playbook's script nodes | fetch, child process (`pdfinfo`, `pdftoppm`, `magick` under `prlimit`), the local filesystem |
+| `core/signature` (S5) | the delivery recheck of a `tee_signature` manifest entry and the `Response signature` section with the Verification Center receipt link | none (pure) |
 | `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check`, `nearbee audit`, `nearbee replay` (fixture walkthrough) | all of the above |
 | `config` | `nearbee.yaml` (committed example) + `.env` secrets | |
 
@@ -141,7 +144,15 @@ through its own market client and token. No step of a round waits for a run:
 
 One worktree per hire, `<apb workspace>/work/<safe hire id>/`, shared by its
 generations (`inputs/` and the previous `out/`); an S2 hire keeps the
-per-execution path its run intent journaled.
+per-execution path its run intent journaled. A script node that keeps
+state of its own keeps it per execution inside the worktree: agent B's
+commands use `digest/<execution_id>/` (`src/`, `pages/`, `pages.json`,
+`pii.json`, `signed/`, `usage.json`), so a retried node of the same
+execution resumes and a rework or redo (a new execution id) starts fresh
+and never reads an earlier execution's directory; `nearbee cleanup`
+deletes it with the worktree. The generation's frozen direct models reach
+the run as the `direct_models` param (reserved like `hire_id` and
+`execution_id`).
 
 **Generations.** Every journal record carries `generation` (absent reads as
 1, so S2 journals stay valid). A generation's state is derived from its own

@@ -44,8 +44,8 @@ use crate::runner::{
     Budget, ExecutionId, HireId, PlaybookId, RunDetail, RunId, RunQuery, RunStatus, Runner,
     RunnerError, SearchField, StartRequest,
 };
-use crate::statement;
 use crate::{attachments, cost, intake};
+use crate::{signature, statement};
 use uuid::Uuid;
 
 /// Settings of one serve process.
@@ -2187,6 +2187,44 @@ struct StatementSnapshot {
     fingerprint: Option<String>,
     #[serde(default)]
     evidence_models: Vec<String>,
+    /// The listing's direct models, frozen with the statement (change
+    /// `doc-digest-and-paid-demo`, design 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    direct_models: Vec<String>,
+    /// The listing's signed models, frozen with the statement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    signed_models: Vec<String>,
+}
+
+/// The direct and signed models a generation's statement snapshot froze.
+/// Never taken from the live record, so a republish does not change a
+/// started generation. An absent snapshot reads as no models only when
+/// the generation has none to freeze (`required` false: a legacy
+/// generation); every other read or parse error is `Err`, so a lost
+/// snapshot never drops the signature requirement (fail closed, code
+/// review round, Opus 5).
+fn frozen_models(
+    state_dir: &Path,
+    row_id: &str,
+    generation: u32,
+    required: bool,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let bytes = match journal::read_snapshot(state_dir, row_id, generation, STATEMENT_SNAPSHOT) {
+        Ok(b) => b,
+        Err(journal::SnapshotError::Io { source, .. })
+            if !required && source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(Default::default());
+        }
+        Err(e) => {
+            return Err(format!(
+                "the generation's statement snapshot is unreadable: {e}"
+            ));
+        }
+    };
+    serde_json::from_slice::<StatementSnapshot>(&bytes)
+        .map(|s| (s.direct_models, s.signed_models))
+        .map_err(|_| "the generation's statement snapshot does not parse".to_owned())
 }
 
 /// The drift pass of design 4.5, run once per round before the intake
@@ -2306,6 +2344,8 @@ fn prepare_statement_snapshot(
         statement_format: record.statement_format,
         fingerprint: record.fingerprint.clone(),
         evidence_models: record.evidence_models.clone(),
+        direct_models: record.direct_models.clone(),
+        signed_models: record.signed_models.clone(),
     };
     journal::write_snapshot(
         state_dir,
@@ -3846,6 +3886,20 @@ async fn finish_terminal(
         _ => None,
     });
     let legacy = run_intent.is_none_or(|i| !i.refs.contains_key("statement_sha256"));
+    // The direct and signed models the generation froze (change
+    // `doc-digest-and-paid-demo`, design 6); an unreadable snapshot
+    // declines `failed` rather than reading as no models.
+    let frozen = match frozen_models(state_dir, row.id.as_str(), generation, !legacy) {
+        Ok(f) => f,
+        Err(detail) => {
+            append_attention(w, records, "statement_missing", &detail)?;
+            open_decline_intent(w, row.id.as_str(), "failed", &detail, BUYER_INVALID_RESULT)?;
+            return Ok(HireOutcome::DeclinedFailed {
+                row_id: row.id.clone(),
+                reason: BUYER_INVALID_RESULT.to_owned(),
+            });
+        }
+    };
     let mut footer = if legacy {
         None
     } else {
@@ -3867,11 +3921,14 @@ async fn finish_terminal(
     if let Some(statement) = &footer
         && let Some(models) = attested_set(state_dir, row.id.as_str(), generation)
     {
-        if let Err((journal_reason, buyer)) = validate_deliverable(&wt, limits, opts, None) {
-            open_decline_intent(w, row.id.as_str(), "failed", &journal_reason, buyer)?;
+        if let Err(r) = validate_deliverable(&wt, limits, opts, None, &frozen) {
+            if let Some(code) = r.attention {
+                append_attention(w, records, code, &r.journal)?;
+            }
+            open_decline_intent(w, row.id.as_str(), "failed", &r.journal, r.buyer)?;
             return Ok(HireOutcome::DeclinedFailed {
                 row_id: row.id.clone(),
-                reason: buyer.to_owned(),
+                reason: r.buyer.to_owned(),
             });
         }
         match end_evidence(
@@ -3915,8 +3972,19 @@ async fn finish_terminal(
             }
         }
     }
-    match validate_deliverable(&wt, limits, opts, footer.as_deref()) {
+    match validate_deliverable(&wt, limits, opts, footer.as_deref(), &frozen) {
         Ok(submission) => {
+            // The signed call's private files are kept with the
+            // generation, only now that the submit intent opens.
+            if let Some((request, response)) = &submission.signed_private {
+                for (name, bytes) in [
+                    (SIGNED_REQUEST_SNAPSHOT, request),
+                    (SIGNED_RESPONSE_SNAPSHOT, response),
+                ] {
+                    journal::write_snapshot(state_dir, row.id.as_str(), generation, name, bytes)
+                        .map_err(|e| ServeError::Other(e.to_string()))?;
+                }
+            }
             let execution_id = intent_execution_id(records, &row.id, observed.execution);
             open_submit_intent(
                 w,
@@ -3934,7 +4002,14 @@ async fn finish_terminal(
                 why: "submission ready",
             })
         }
-        Err((journal_reason, buyer)) => {
+        Err(DeliveryRefusal {
+            journal: journal_reason,
+            buyer,
+            attention,
+        }) => {
+            if let Some(code) = attention {
+                append_attention(w, records, code, &journal_reason)?;
+            }
             if journal_reason.contains(UNSUPPORTED_OUTPUT) {
                 // The operator is told: output files are not delivered by
                 // this version (spec `hire-serving`, Delivery).
@@ -4589,6 +4664,22 @@ async fn admit<M: Market, R: Runner>(
             None,
         )?));
     }
+    // The direct models the generation froze, read before anything is
+    // journaled: a generation of a listing with a record always has a
+    // statement snapshot, so an unreadable one declines `failed` without
+    // a run (fail closed).
+    let direct_models = match frozen_models(state_dir, &row.id, generation, v.ctx.record.is_some())
+    {
+        Ok(f) => f.0,
+        Err(detail) => {
+            append_attention(&mut w, &fresh_records, "statement_missing", &detail)?;
+            open_decline_intent(&mut w, &row.id, "failed", &detail, BUYER_RUN_FAILED)?;
+            return Ok(Some(HireOutcome::DeclinedFailed {
+                row_id: row.id.clone(),
+                reason: BUYER_RUN_FAILED.to_owned(),
+            }));
+        }
+    };
     let record = v.ctx.record.clone();
     // The run request snapshot precedes the intent (design 2).
     let budget_json = budget
@@ -4664,6 +4755,7 @@ async fn admit<M: Market, R: Runner>(
     if let Some(f) = feedback {
         req.params.insert("feedback".into(), f);
     }
+    req.direct_models = direct_models;
     match runner.start(req).await {
         Ok(id) => {
             w.append(Event::RunObserved(RunObserved {
@@ -5490,6 +5582,7 @@ fn start_request(
         execution_id: execution_id.clone(),
         budget,
         continued_from,
+        direct_models: Vec::new(),
     }
 }
 
@@ -5546,6 +5639,9 @@ struct Submission {
     markdown: String,
     digest: String,
     deliverable: String,
+    /// The signed call's request and response bytes, snapshotted only
+    /// when the submit intent opens.
+    signed_private: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Validates the manifest, appends the statement footer (design 5.4)
@@ -5558,9 +5654,10 @@ fn validate_deliverable(
     limits: &Limits,
     opts: &ServeOptions,
     statement: Option<&str>,
-) -> Result<Submission, (String, &'static str)> {
+    frozen: &(Vec<String>, Vec<String>),
+) -> Result<Submission, DeliveryRefusal> {
     let validated = manifest::validate(wt, limits).map_err(|e| {
-        (
+        DeliveryRefusal::new(
             format!("invalid result manifest: {e}"),
             BUYER_INVALID_RESULT,
         )
@@ -5568,7 +5665,7 @@ fn validate_deliverable(
     // Output files besides the Markdown are not delivered yet: the run is
     // declined rather than delivered incompletely (C11).
     if !validated.files.is_empty() {
-        return Err((
+        return Err(DeliveryRefusal::new(
             format!(
                 "the manifest lists {} output files, which this version does not deliver ({UNSUPPORTED_OUTPUT})",
                 validated.files.len()
@@ -5576,24 +5673,43 @@ fn validate_deliverable(
             BUYER_INVALID_RESULT,
         ));
     }
+    // The response signature recheck (change `doc-digest-and-paid-demo`,
+    // design 6) against the generation's frozen direct and signed models.
+    let signed =
+        signature::recheck(&validated, &frozen.0, &frozen.1).map_err(|e| DeliveryRefusal {
+            journal: e.to_string(),
+            buyer: BUYER_INVALID_RESULT,
+            attention: Some(e.code()),
+        })?;
     let mut markdown = validated.markdown_text;
+    let mut appended = false;
+    // The signature section goes between the playbook Markdown and the
+    // evidence section.
+    if let Some(section) = &signed {
+        markdown.push_str("\n\n");
+        markdown.push_str(&section.markdown);
+        appended = true;
+    }
     // The footer: a horizontal rule, then the snapshotted statement
     // (design 5.4). The assembled text is what the limit and the secret
     // scan see, and what the submission snapshot freezes.
     if let Some(statement) = statement {
         markdown.push_str("\n\n---\n\n");
         markdown.push_str(statement);
-        if let Err(e) = manifest::check_final_markdown(&markdown, limits) {
-            return Err((
-                format!("the deliverable with its statement does not pass the final check: {e}"),
-                BUYER_INVALID_RESULT,
-            ));
-        }
+        appended = true;
+    }
+    if appended && let Err(e) = manifest::check_final_markdown(&markdown, limits) {
+        return Err(DeliveryRefusal::new(
+            format!(
+                "the deliverable with its appended sections does not pass the final check: {e}"
+            ),
+            BUYER_INVALID_RESULT,
+        ));
     }
     // Secret scan before anything leaves the process: an `aat_` token, a
     // configured secret or a stored agent token refuses the deliverable.
     if let Some(offender) = scan_secrets(&markdown, opts) {
-        return Err((
+        return Err(DeliveryRefusal::new(
             format!("the deliverable contains {offender}"),
             BUYER_REFUSED_SECRET,
         ));
@@ -5602,8 +5718,32 @@ fn validate_deliverable(
         digest: sha_of(&markdown),
         deliverable: validated.markdown.path,
         markdown,
+        signed_private: signed.map(|s| (s.request, s.response)),
     })
 }
+
+/// Why a deliverable is not delivered: the journal-only reason, the buyer
+/// reason and, for a signature recheck, the attention code.
+#[derive(Debug)]
+struct DeliveryRefusal {
+    journal: String,
+    buyer: &'static str,
+    attention: Option<&'static str>,
+}
+
+impl DeliveryRefusal {
+    fn new(journal: String, buyer: &'static str) -> Self {
+        Self {
+            journal,
+            buyer,
+            attention: None,
+        }
+    }
+}
+
+/// The flat snapshot names of a signed call's private files.
+const SIGNED_REQUEST_SNAPSHOT: &str = "signed-request.bin";
+const SIGNED_RESPONSE_SNAPSHOT: &str = "signed-response.bin";
 
 /// Announces the submit intent for a validated deliverable: the Markdown
 /// is snapshotted into the generation's private directory (flushed and
@@ -6017,5 +6157,50 @@ mod tests {
             warnings.iter().any(|w| w.contains("cannot parse")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn frozen_models_fail_closed_on_an_unreadable_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path();
+        // Absent: no models for a legacy generation, an error otherwise.
+        assert_eq!(
+            frozen_models(state, "a1", 1, false).unwrap(),
+            (Vec::new(), Vec::new())
+        );
+        let err = frozen_models(state, "a1", 1, true).unwrap_err();
+        assert!(err.contains("unreadable"), "{err}");
+        // Present and valid: the frozen lists.
+        let snapshot = StatementSnapshot {
+            tier: Some("attested".into()),
+            statement: Some("s".into()),
+            statement_sha256: None,
+            statement_format: None,
+            fingerprint: None,
+            evidence_models: Vec::new(),
+            direct_models: vec!["m/direct".into()],
+            signed_models: vec!["m/direct".into()],
+        };
+        journal::write_snapshot(
+            state,
+            "a1",
+            1,
+            STATEMENT_SNAPSHOT,
+            &serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        for required in [false, true] {
+            assert_eq!(
+                frozen_models(state, "a1", 1, required).unwrap(),
+                (vec!["m/direct".to_owned()], vec!["m/direct".to_owned()])
+            );
+        }
+        // Present but unparseable: an error whatever `required` says,
+        // never empty lists that would drop the signature requirement.
+        journal::write_snapshot(state, "a1", 2, STATEMENT_SNAPSHOT, b"not json").unwrap();
+        for required in [false, true] {
+            let err = frozen_models(state, "a1", 2, required).unwrap_err();
+            assert!(err.contains("does not parse"), "{err}");
+        }
     }
 }

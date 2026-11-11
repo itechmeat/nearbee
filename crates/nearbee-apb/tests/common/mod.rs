@@ -128,6 +128,7 @@ pub fn start_request(f: &Value, playbook: &str) -> (StartRequest, Value, tempfil
             on_no_estimate,
         }),
         continued_from: None,
+        direct_models: Vec::new(),
     };
     (req, body, dir)
 }

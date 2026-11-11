@@ -8,6 +8,18 @@
 //! error or a 5xx) inside a 20-second bound for the whole fetch. A 2xx
 //! with a JSON object body is a report; anything else is a failure whose
 //! text never holds the key. Reports are collected, never verified.
+//!
+//! [`CloudClient`] (module `client`, design 1 of the change
+//! `doc-digest-and-paid-demo`) makes the model calls of Nearbee's own
+//! commands: the exact-bytes completion, its signature, the privacy
+//! classifier and a plain JSON completion.
+
+mod client;
+
+pub use client::{
+    CLASSIFY_MODEL, ChatAnswer, CloudClient, CloudError, MAX_RESPONSE_BYTES, RawResponse,
+    SignatureAnswer, Span, Usage, parse_chat,
+};
 
 use std::time::Duration;
 
@@ -36,6 +48,7 @@ pub const NO_KEY: &str = "NEARAI_API_KEY is not set";
 pub struct CloudAttestor {
     base: String,
     key: Secret,
+    provider: Option<String>,
     client: reqwest::Client,
 }
 
@@ -58,30 +71,45 @@ enum Attempt {
 
 impl CloudAttestor {
     /// A client for `base_url` (production: [`PRODUCTION_BASE`]) with the
-    /// configured key. Redirects are never followed.
+    /// configured key. Redirects are never followed and no system proxy
+    /// is used.
     pub fn new(base_url: impl Into<String>, key: Secret) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .user_agent("nearbee")
             .build()
             .map_err(|e| format!("the HTTP client cannot be built: {e}"))?;
         Ok(Self {
             base: base_url.into().trim_end_matches('/').to_owned(),
             key,
+            provider: None,
             client,
         })
     }
 
+    /// Asks for the reports of one provider only (`provider=near`: the
+    /// NEAR model attestations a `provider_tee` signature is matched
+    /// against, design 1.3).
+    pub fn with_provider(mut self, provider: &str) -> Self {
+        self.provider = Some(provider.to_owned());
+        self
+    }
+
     async fn attempt(&self, model: &str, nonce: &str) -> Attempt {
         let url = format!("{}/attestation/report", self.base);
+        let mut query = vec![
+            ("model", model),
+            ("signing_algo", "ecdsa"),
+            ("nonce", nonce),
+        ];
+        if let Some(p) = &self.provider {
+            query.push(("provider", p));
+        }
         let sent = self
             .client
             .get(&url)
-            .query(&[
-                ("model", model),
-                ("signing_algo", "ecdsa"),
-                ("nonce", nonce),
-            ])
+            .query(&query)
             .bearer_auth(self.key.expose())
             .send()
             .await;

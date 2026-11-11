@@ -6,7 +6,7 @@ Defines the endpoint attestation evidence an attested hire collects and disclose
 ## Requirements
 
 ### Requirement: Which models
-For an attested hire Nearbee SHALL collect one attestation report per model id of the generation's frozen evidence model set (the distinct models of every usable profile's executor, fallbacks and tiers, snapshotted with the generation's statement), at two points: before the market start and apb start of the generation, and after its run is observed terminal and succeeded. Both points SHALL use the same frozen set.
+For an attested hire Nearbee SHALL collect one attestation report per model id of the generation's frozen evidence model set (the distinct models of every usable profile's executor, fallbacks and tiers, and the listing's direct models, snapshotted with the generation's statement), at two points: before the market start and apb start of the generation, and after its run is observed terminal and succeeded. Both points SHALL use the same frozen set.
 
 #### Scenario: Two models
 - **WHEN** the frozen set is DeepSeek V4.1 Flash and Qwen3.8-27B
@@ -15,6 +15,10 @@ For an attested hire Nearbee SHALL collect one attestation report per model id o
 #### Scenario: Profile edited mid-run
 - **WHEN** a fallback model is added to the profile while the run is active
 - **THEN** the end collection still uses the frozen two-model set
+
+#### Scenario: Agent B set
+- **WHEN** a `doc-digest-private` generation starts
+- **THEN** its evidence model set holds Qwen3-VL, the privacy filter and DeepSeek
 
 ### Requirement: The report request
 Each report SHALL be fetched with `GET https://cloud-api.near.ai/v1/attestation/report` with the URL-encoded `model`, `signing_algo=ecdsa` and a fresh random 32-byte hex `nonce`, bearer authentication from the configured `NEARAI_API_KEY`, no redirects, a 2 MiB response cap, and at most 2 attempts within a 20-second bound for the whole fetch. A 2xx with a JSON object body is a report; anything else is a failure.

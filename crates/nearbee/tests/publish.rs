@@ -626,6 +626,8 @@ async fn a_market_failure_after_the_install_leaves_the_record_on_the_installed_v
             statement_format: None,
             fingerprint: None,
             evidence_models: Vec::new(),
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         },
     )

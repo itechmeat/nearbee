@@ -172,8 +172,8 @@ printed for the bio, recorded with a fingerprint, snapshotted per
 generation and appended to every deliverable. Attested hires collect
 endpoint attestation reports before the start and after the run and
 disclose them with the models apb requested per node (`crates/nearbee-cloud`).
-The signed step of D-008 is specified as a contract for S5
-(`docs/privacy.md`, "Attested, signed").
+The signed step of D-008 was specified as a contract for S5 and is built
+there (`docs/privacy.md`, "Direct models and the signed call").
 
 Owner items: O-2 (variant `repo-audit-premium`), O-3 (the fast variant's
 live run on Cloud credits), O-6 (setting both listings live).
@@ -193,7 +193,7 @@ not done by an agent.
 Delivers: example agent B, `doc-digest-private` (local conversion, Qwen3-VL
 per page, `/v1/privacy/classify`, the digest through the signed step,
 `digest.json`), its limits and live listing; the signed step of D-008 built
-to the contract in `docs/privacy.md` ("Attested, signed") as a reusable
+to the contract in `docs/privacy.md` ("Direct models and the signed call") as a reusable
 node; the paid agent-to-agent hire of `repo-audit-fast` from the demo caller
 account, with task id, settlement and the later payout in
 `docs/demo-log.md`.
@@ -203,6 +203,18 @@ hire's spend).
 
 Done when: native gate green; the paid hire is accepted and recorded; the
 digest's response signature verifies in the Verification Center.
+
+Status (2026-11-11): built and tested against local `wiremock` servers and
+recorded fixtures, no billed call: the Cloud client, `nearbee signed-call`,
+direct and signed models through the listing, tier check, statement,
+fingerprint, evidence set and run params (D-026), the four `nearbee
+digest` commands, the delivery recheck with the `Response signature`
+section, and `playbooks/doc-digest/` with
+`listing.doc-digest-private.yaml`. Both new direct models answered a live
+attestation report with one model attestation (`docs/near-ai-cloud.md`).
+Open: the live answers as replay fixtures, the listing of
+`doc-digest-private`, a live agent B hire and the paid A2A hire (tasks 7.1
+to 7.3, owner items O-2, O-3, O-5, O-6).
 
 ## S6. `judges-path-and-submission`
 

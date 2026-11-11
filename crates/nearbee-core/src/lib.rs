@@ -21,6 +21,7 @@ pub mod retention;
 pub mod runner;
 pub mod secret;
 pub mod serve;
+pub mod signature;
 pub mod statement;
 pub mod tiers;
 
