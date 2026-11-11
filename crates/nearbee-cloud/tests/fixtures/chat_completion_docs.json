@@ -1,0 +1,33 @@
+{
+  "note": "The \"Expected Response\" of the NEAR AI Cloud quickstart copied verbatim; read 2026-11-11.",
+  "recorded": "2026-11-11",
+  "source": "https://docs.near.ai/cloud/quickstart",
+  "request": "POST /v1/chat/completions",
+  "status": 200,
+  "body": {
+    "id": "f47b4647911249f7a94468f6c2b95832",
+    "object": "chat.completion",
+    "created": 1780405025,
+    "model": "zai-org/GLM-5.1-FP8",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Hello there! 👋 Welcome to NEAR AI! I'm here to help you with whatever you need — whether it's answering questions, brainstorming ideas, writing code, or just having a conversation. How can I assist you today?",
+          "reasoning_content": "The user is greeting me. I should respond warmly and introduce myself as a NEAR AI assistant."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 11,
+      "completion_tokens": 70,
+      "completion_tokens_details": {
+        "reasoning_tokens": 21
+      },
+      "reasoning_tokens": 21,
+      "total_tokens": 81
+    }
+  }
+}

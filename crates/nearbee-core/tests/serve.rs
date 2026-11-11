@@ -614,6 +614,8 @@ fn facts() -> nearbee_core::runner::ExecutionFacts {
         routes: nearbee_core::tiers::Known::Unknown("not inspected in this test".into()),
         decisions_enabled: nearbee_core::tiers::Known::Yes(false),
         compaction_enabled: nearbee_core::tiers::Known::Yes(false),
+        direct_models: Vec::new(),
+        signed_models: Vec::new(),
     }
 }
 
@@ -865,6 +867,8 @@ fn s4_record(tier: nearbee_core::listing::Tier) -> nearbee_core::listing::Resolv
         statement_format: Some(statement::STATEMENT_FORMAT),
         fingerprint: Some(statement::fingerprint(tier, &facts)),
         evidence_models: nearbee_core::tiers::evidence_models(&facts),
+        direct_models: Vec::new(),
+        signed_models: Vec::new(),
         published_at: BASE,
     }
 }
@@ -7874,6 +7878,8 @@ fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
         }]),
         decisions_enabled: Known::Yes(false),
         compaction_enabled: Known::Yes(false),
+        direct_models: Vec::new(),
+        signed_models: Vec::new(),
     }
 }
 
@@ -8285,5 +8291,346 @@ async fn another_hires_near_deadline_blocks_the_fetch() {
         d.attestor.calls().is_empty(),
         "a fetch started under another hire's near deadline: {:?}",
         d.attestor.calls()
+    );
+}
+
+/// An S4 record whose listing has direct models (change
+/// `doc-digest-and-paid-demo`), consistent with the fake runner's facts.
+fn direct_record(
+    tier: nearbee_core::listing::Tier,
+    direct: &[&str],
+    signed: &[&str],
+) -> nearbee_core::listing::ResolvedListing {
+    use nearbee_core::statement;
+    let d: Vec<String> = direct.iter().map(|s| s.to_string()).collect();
+    let s: Vec<String> = signed.iter().map(|s| s.to_string()).collect();
+    let facts = facts().with_direct_models(&d, &s);
+    let text = statement::render(tier, &facts, RETENTION);
+    let mut r = s4_record(tier);
+    r.statement_sha256 = Some(nearbee_core::journal::sha256_hex(text.as_bytes()));
+    r.statement = Some(text);
+    r.fingerprint = Some(statement::fingerprint(tier, &facts));
+    r.evidence_models = nearbee_core::tiers::evidence_models(&facts);
+    r.direct_models = d;
+    r.signed_models = s;
+    r
+}
+
+/// The run request carries the generation's frozen direct models, and a
+/// republish after the run started leaves the frozen list as it was
+/// (task 3.1; design 3).
+#[tokio::test]
+async fn the_run_gets_the_frozen_direct_models_and_a_republish_keeps_them() {
+    const A: [&str; 2] = ["Qwen/Qwen3-VL-30B-A3B-Instruct", "openai/privacy-filter"];
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "running", "running"])
+        .with_record(direct_record(Tier::Plain, &A, &[]));
+    d.round().await;
+    d.round().await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 1, "{:?}", d.runner.calls.all());
+    assert_eq!(starts[0].direct_models, A);
+    // The listing is republished with another list while the run runs.
+    d.ctx.record = Some(direct_record(Tier::Plain, &["openai/privacy-filter"], &[]));
+    d.round().await;
+    let snap = journal::read_snapshot(d.dir.path(), "a1", 1, "statement.json").unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&snap).unwrap();
+    assert_eq!(v["direct_models"], serde_json::json!(A));
+    assert_eq!(d.runner.starts.lock().unwrap().len(), 1);
+}
+
+/// A listing without direct models sends none (an S4 run request is
+/// unchanged).
+#[tokio::test]
+async fn a_listing_without_direct_models_sends_none() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "running"])
+        .with_s4(Tier::Plain);
+    d.round().await;
+    d.round().await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 1);
+    assert!(starts[0].direct_models.is_empty());
+    let snap = journal::read_snapshot(d.dir.path(), "a1", 1, "statement.json").unwrap();
+    assert!(!String::from_utf8_lossy(&snap).contains("direct_models"));
+}
+
+// ---------------------------------------------------------------------------
+// Response signature at delivery (change `doc-digest-and-paid-demo`, task
+// 5.1; spec `hire-serving`, Response signature recheck)
+// ---------------------------------------------------------------------------
+
+const SIGNED_MODEL: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+const SIGNED_REQUEST: &[u8] = b"{\"model\":\"deepseek\",\"private\":\"buyer document text\"}";
+const SIGNED_RESPONSE: &[u8] = b"{\"id\":\"chatcmpl-9\",\"reasoning\":\"private reasoning\"}";
+
+fn signature_json(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let (r, p) = (
+        journal::sha256_hex(SIGNED_REQUEST),
+        journal::sha256_hex(SIGNED_RESPONSE),
+    );
+    let mut v = serde_json::json!({
+        "version": 1,
+        "completion_id": "chatcmpl-9",
+        "model": SIGNED_MODEL,
+        "signature_kind": "provider_tee",
+        "signing_algo": "ecdsa",
+        "signing_address": format!("0x{}", "fe".repeat(20)),
+        "signed_text": format!("{SIGNED_MODEL}:{r}:{p}"),
+        "signature": format!("0x{}", "1b".repeat(65)),
+        "request_sha256": r,
+        "response_sha256": p,
+    });
+    edit(&mut v);
+    serde_json::to_vec(&v).unwrap()
+}
+
+/// A digest worktree: the Markdown and, unless `evidence` is empty, the
+/// signed call's evidence files under `out/evidence/`.
+fn signed_worktree(ws: &Path, row_id: &str, evidence: &[(&str, &[u8], &str, &str)]) {
+    let markdown = "# Document digest\n\nA summary.\n";
+    let wt = hire_worktree(ws, row_id);
+    std::fs::create_dir_all(wt.join("out/evidence")).unwrap();
+    std::fs::write(wt.join("out/deliverable.md"), markdown).unwrap();
+    let mut entries = Vec::new();
+    for (name, bytes, kind, visibility) in evidence {
+        std::fs::write(wt.join("out/evidence").join(name), bytes).unwrap();
+        entries.push(serde_json::json!({
+            "path": format!("evidence/{name}"),
+            "size": bytes.len(),
+            "sha256": journal::sha256_hex(bytes),
+            "kind": kind,
+            "visibility": visibility,
+        }));
+    }
+    let manifest = serde_json::json!({
+        "version": 1,
+        "markdown": {"path": "deliverable.md", "size": markdown.len(), "sha256": journal::sha256_hex(markdown.as_bytes())},
+        "evidence": entries,
+    });
+    std::fs::write(
+        wt.join("out/result.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+fn full_evidence(sig: &[u8]) -> Vec<(&'static str, Vec<u8>, &'static str, &'static str)> {
+    vec![
+        ("signature.json", sig.to_vec(), "tee_signature", "public"),
+        (
+            "request.bin",
+            SIGNED_REQUEST.to_vec(),
+            "tee_request",
+            "private",
+        ),
+        (
+            "response.bin",
+            SIGNED_RESPONSE.to_vec(),
+            "tee_response",
+            "private",
+        ),
+        ("report.json", b"{}".to_vec(), "tee_model_report", "private"),
+    ]
+}
+
+fn signed_driver() -> Driver {
+    Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "succeeded"])
+        .with_record(direct_record(
+            Tier::Plain,
+            &["openai/privacy-filter", SIGNED_MODEL],
+            &[SIGNED_MODEL],
+        ))
+}
+
+fn place(d: &Driver, evidence: &[(&'static str, Vec<u8>, &'static str, &'static str)]) {
+    let refs: Vec<(&str, &[u8], &str, &str)> = evidence
+        .iter()
+        .map(|(n, b, k, v)| (*n, b.as_slice(), *k, *v))
+        .collect();
+    signed_worktree(&d.ws(), "a1", &refs);
+}
+
+fn private_snapshot(d: &Driver) -> PathBuf {
+    journal::snapshot_path(d.dir.path(), "a1", 1, "signed-request.bin")
+}
+
+/// Drives the hire and asserts it was declined `failed` with `code`,
+/// with nothing submitted and no private snapshot.
+async fn assert_declined(mut d: Driver, code: &str) {
+    let out = d
+        .run_until(|o| {
+            matches!(
+                o,
+                HireOutcome::Delivered { .. } | HireOutcome::DeclinedFailed { .. }
+            )
+        })
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+    assert!(attention_of(
+        &read_journal_records(d.dir.path(), "a1"),
+        code
+    ));
+    assert_eq!(d.market.calls.count("submit a1"), 0);
+    assert!(!private_snapshot(&d).exists());
+}
+
+#[tokio::test]
+async fn a_valid_signature_entry_renders_the_section_before_the_footer() {
+    let mut d = signed_driver();
+    place(&d, &full_evidence(&signature_json(|_| {})));
+    d.drive_to_delivery().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    let md = d.market.submitted_markdown(0);
+    let sig_at = md.find("## Response signature").expect("the section");
+    let rule_at = md.find("\n\n---\n\n").expect("the footer");
+    assert!(
+        md.find("A summary.").unwrap() < sig_at && sig_at < rule_at,
+        "{md}"
+    );
+    assert!(md.contains("`chatcmpl-9`"), "{md}");
+    assert!(md.contains("stay with the owner"), "{md}");
+    assert!(md.contains(
+        "https://cloud.near.ai/verify?model=deepseek-ai%2FDeepSeek-V4.1-Flash-1017#receipt="
+    ));
+    // The private bytes never reach the buyer.
+    assert!(!md.contains("buyer document text") && !md.contains("private reasoning"));
+    // They are kept with the generation.
+    assert_eq!(std::fs::read(private_snapshot(&d)).unwrap(), SIGNED_REQUEST);
+    assert_eq!(
+        std::fs::read(journal::snapshot_path(
+            d.dir.path(),
+            "a1",
+            1,
+            "signed-response.bin"
+        ))
+        .unwrap(),
+        SIGNED_RESPONSE
+    );
+}
+
+#[tokio::test]
+async fn an_edited_response_declines_signature_mismatch() {
+    let d = signed_driver();
+    let mut ev = full_evidence(&signature_json(|_| {}));
+    ev[2].1 = b"{\"edited\":true}".to_vec();
+    place(&d, &ev);
+    assert_declined(d, "signature_mismatch").await;
+}
+
+#[tokio::test]
+async fn a_gateway_signature_declines_signature_mismatch() {
+    let d = signed_driver();
+    place(
+        &d,
+        &full_evidence(&signature_json(|v| v["signature_kind"] = "gateway".into())),
+    );
+    assert_declined(d, "signature_mismatch").await;
+}
+
+#[tokio::test]
+async fn a_model_outside_the_frozen_direct_models_declines() {
+    let d = signed_driver();
+    let other = "Qwen/Qwen3.8-27B";
+    let (r, p) = (
+        journal::sha256_hex(SIGNED_REQUEST),
+        journal::sha256_hex(SIGNED_RESPONSE),
+    );
+    place(
+        &d,
+        &full_evidence(&signature_json(|v| {
+            v["model"] = other.into();
+            v["signed_text"] = format!("{other}:{r}:{p}").into();
+        })),
+    );
+    assert_declined(d, "signature_mismatch").await;
+}
+
+#[tokio::test]
+async fn a_markdown_link_in_the_completion_id_declines() {
+    let d = signed_driver();
+    place(
+        &d,
+        &full_evidence(&signature_json(|v| {
+            v["completion_id"] = "[x](https://evil.example)".into()
+        })),
+    );
+    assert_declined(d, "signature_mismatch").await;
+}
+
+#[tokio::test]
+async fn a_signed_listing_without_the_entry_declines_signature_missing() {
+    let d = signed_driver();
+    place(&d, &[]);
+    assert_declined(d, "signature_missing").await;
+}
+
+#[tokio::test]
+async fn the_limit_and_the_secret_scan_see_the_section() {
+    // The Markdown and the statement fit; with the section they do not.
+    let mut d = signed_driver();
+    place(&d, &full_evidence(&signature_json(|_| {})));
+    let statement = d.ctx.record.as_ref().unwrap().statement.clone().unwrap();
+    d.limits.markdown_bytes =
+        ("# Document digest\n\nA summary.\n".len() + statement.len() + 200) as u64;
+    let out = d
+        .run_until(|o| {
+            matches!(
+                o,
+                HireOutcome::Delivered { .. } | HireOutcome::DeclinedFailed { .. }
+            )
+        })
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { .. })),
+        "{out:?}"
+    );
+    assert_eq!(d.market.calls.count("submit a1"), 0);
+    assert!(journal_text(d.dir.path(), "a1").contains("appended sections"));
+    // A configured secret that only the section holds is caught.
+    let mut d = signed_driver();
+    place(&d, &full_evidence(&signature_json(|_| {})));
+    d.opts.forbidden = vec![format!("0x{}", "fe".repeat(20))];
+    let out = d
+        .run_until(|o| {
+            matches!(
+                o,
+                HireOutcome::Delivered { .. } | HireOutcome::DeclinedFailed { .. }
+            )
+        })
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { .. })),
+        "{out:?}"
+    );
+    assert_eq!(d.market.calls.count("submit a1"), 0);
+    assert!(journal_text(d.dir.path(), "a1").contains("a configured secret"));
+}
+
+/// A restart after the submit intent resends the snapshot, signature
+/// section included, without assembling it again.
+#[tokio::test]
+async fn a_restart_resends_the_signed_snapshot() {
+    let mut d = signed_driver();
+    place(&d, &full_evidence(&signature_json(|_| {})));
+    d.run_until(|o| matches!(o, HireOutcome::Left { why, .. } if *why == "submission ready"))
+        .await;
+    let snap = journal::read_snapshot(d.dir.path(), "a1", 1, journal::SUBMISSION_SNAPSHOT).unwrap();
+    // The worktree changes after the snapshot: the resend ignores it.
+    place(&d, &[]);
+    d.drive_to_delivery().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert_eq!(d.market.submitted_markdown(0).as_bytes(), snap.as_slice());
+    assert!(
+        d.market
+            .submitted_markdown(0)
+            .contains("## Response signature")
     );
 }

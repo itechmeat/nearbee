@@ -95,6 +95,7 @@ async fn smoke(playbook: &str) {
                 on_no_estimate: OnNoEstimate::Continue,
             }),
             continued_from: None,
+            direct_models: Vec::new(),
         })
         .await
         .unwrap();

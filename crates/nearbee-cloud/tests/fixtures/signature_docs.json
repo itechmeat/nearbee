@@ -1,0 +1,14 @@
+{
+  "note": "The \"Response\" example of .agents/skills/near-ai-cloud/references/chat-verification.md copied verbatim (source https://docs.near.ai/cloud/verification/chat), plus signature_kind provider_tee as the same page and https://docs.near.ai/cloud/verification/cloud-api/response-signatures describe it; read 2026-11-11. The placeholders {request_hash}, {response_hash} and 0x... are filled by the tests that need real values.",
+  "recorded": "2026-11-11",
+  "source": "https://docs.near.ai/cloud/verification/chat",
+  "request": "GET /v1/signature/<chat id>?model=<model id>&signing_algo=ecdsa",
+  "status": 200,
+  "body": {
+    "text": "Qwen/Qwen3.5-122B-A10B:{request_hash}:{response_hash}",
+    "signature": "0x...",
+    "signing_address": "0x...",
+    "signing_algo": "ecdsa",
+    "signature_kind": "provider_tee"
+  }
+}

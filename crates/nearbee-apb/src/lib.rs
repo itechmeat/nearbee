@@ -970,6 +970,12 @@ pub fn sent_params(req: &StartRequest) -> BTreeMap<String, String> {
     let mut p = req.params.clone();
     p.insert("hire_id".into(), req.hire_id.as_str().to_owned());
     p.insert("execution_id".into(), req.execution_id.as_str().to_owned());
+    if !req.direct_models.is_empty() {
+        p.insert(
+            "direct_models".into(),
+            serde_json::to_string(&req.direct_models).expect("a string list serializes"),
+        );
+    }
     p
 }
 

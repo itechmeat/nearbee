@@ -222,8 +222,9 @@ without the footer.
 
 1. Which models: the frozen evidence model set of the generation, the
    distinct `nearai` model ids of every usable profile's executor,
-   fallbacks and tiers (for `repo-audit-fast`: DeepSeek V4.1 Flash and
-   Qwen3.8-27B).
+   fallbacks and tiers, and since S5 the listing's direct models (for
+   `repo-audit-fast`: DeepSeek V4.1 Flash and Qwen3.8-27B; for
+   `doc-digest-private`: Qwen3-VL, the privacy filter and DeepSeek).
 2. When: one report per model before the generation's market start and apb
    start, and one after its run succeeded, from
    `GET https://cloud-api.near.ai/v1/attestation/report?model=<id>&signing_algo=ecdsa&nonce=<64 hex>`
@@ -257,20 +258,83 @@ binding this job's responses to a TEE.
 Journal hashes: `<state_dir>/hires/<id>/journal.jsonl` holds hashes of every
 input, output and deletion with timestamps. Anchoring on NEAR is a stretch.
 
-## Attested, signed (contract for S5)
+## Direct models and the signed call (as built in S5)
 
-Not built in S4; this is the contract the S5 step implements (D-008):
-`nearbee signed-call --request <file> --out <dir>` sends the request file's
-exact bytes with `stream: false` to `POST /v1/chat/completions`, stores the
-response bytes before parsing them, then fetches
-`GET /v1/signature/{completion id}?model={id}&signing_algo=ecdsa`. It
-requires `signature_kind: "provider_tee"` and a signed text equal to
-`model + ":" + sha256(request) + ":" + sha256(response)`. Only the signature
-fetch is retried, never the completion; the step journals its own
-operation state so a node retry resumes the signature fetch; it bounds
-tokens and wall clock; and it writes manifest evidence entries (`kind:
-tee_signature`): the bytes private, their hashes and the signature public.
-Verifying the signature is not part of the step.
+A listing may declare `direct_models`: the NEAR AI Cloud models Nearbee's
+own commands call from the playbook's script nodes, without an agent
+(D-026). Agent B (`doc-digest-private`) declares
+`Qwen/Qwen3-VL-30B-A3B-Instruct` (page transcription),
+`openai/privacy-filter` (personal data counts) and
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` (the digest), and signs the digest
+call (`signed_models`).
+
+1. Tier check: an attested listing refuses a direct model the catalog
+   snapshot does not list with owner `nearai`; a plain listing refuses one
+   absent from the snapshot. The model routes count as unknown, so an
+   attested listing is refused and the drift pass reports it, when the apb
+   instance environment sets `NEARAI_CLOUD_URL`, any `NEARBEE_CLOUD_`
+   variable or a proxy variable (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+   any case); `scripts/apb-instance.sh start` refuses the same names. The
+   commands call only `https://cloud-api.near.ai/v1`, with no system proxy
+   and no redirect.
+2. Statement and evidence: the statement lists every direct model in a
+   "Direct model calls" section and names the signed step; the
+   fingerprint covers the lists in order (a listing without them keeps
+   its S4 fingerprint); the evidence model set adds the direct models, so
+   attestation reports are collected for them too. The lists are frozen
+   with the generation's statement snapshot and reach the run as the
+   `direct_models` param; a command refuses any model outside the frozen
+   list before sending.
+3. The signed call: `nearbee signed-call` sends the request file's exact
+   bytes (`stream: false`, `max_tokens` at most 16,384, at most 1 MiB)
+   with `x-no-aliasing: true` and `Accept-Encoding: identity`, after it
+   stored a fresh model attestation report (`provider=near`) with a
+   non-empty `model_attestations` in which at least one attestation
+   carries a signing address. It keeps the response bytes before
+   parsing them, sends the completion at most once per state directory
+   (no idempotency key exists; a lost answer fails the hire rather than
+   paying twice), refuses a compressed or cut answer, and fetches
+   `GET /v1/signature/{id}?model=..&signing_algo=ecdsa` for up to 60 s. It
+   accepts only `signature_kind: provider_tee`, a signed text equal to
+   `model:sha256(request):sha256(response)` and a signing address that
+   matches at least one model attestation of the preflight report (case
+   insensitive; instances of one model share one key). It writes
+   `signature.json` (public) and `request.bin`, `response.bin`,
+   `report.json` (private) as manifest evidence entries.
+4. Delivery: serve rechecks the entry from the validated bytes (hashes,
+   signed text, `provider_tee`, a frozen direct model, every field's
+   format) and declines `failed` with attention `signature_mismatch`, or
+   `signature_missing` when a signed listing's run has no entry. A
+   statement snapshot that cannot be read or parsed declines `failed`
+   with `statement_missing` (at the run start too), so it never reads as
+   a generation without signed models. A valid
+   entry adds a `Response signature` section before the evidence section:
+   every field in a code span and a receipt link
+   `https://cloud.near.ai/verify?model=<id>#receipt=<base64url JSON>` the
+   buyer opens in the Verification Center. The two private files are
+   snapshotted with the generation when the submit intent opens and are
+   never delivered.
+
+What the buyer can verify: that a NEAR AI Cloud model TEE with the shown
+signing address signed a response with the shown hash for the shown
+request hash. What the buyer cannot verify: the hashes themselves, because
+the request and response bytes stay with the owner (the response may
+carry the model's reasoning, which quotes the documents beyond the
+checked digest), nor that the deliverable was derived from that response;
+the section says so. Nearbee does not verify the signature itself.
+
+Personal data in the digest: the digest's own text (summary, entity
+values, figure values and labels, open questions) goes through
+`openai/privacy-filter` once more before it is written; every span is
+replaced by `[redacted: <category>]` and a figure whose value held one is
+dropped and counted. This holds whatever the prompt or an injected page
+instruction made the model write; it is as good as the classifier.
+
+Cost: the direct calls are billed to the owner's NEAR AI Cloud key outside
+apb, so the spent-cost figure and the daily loss limit do not include them
+yet; each execution records their token usage in
+`digest/<execution_id>/usage.json` (worst case under 0.20 USD per hire,
+design 8).
 
 ## Deletion inventory (as built in S3)
 

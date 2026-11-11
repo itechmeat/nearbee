@@ -201,7 +201,7 @@ async fn reserved_param_is_refused_before_sending() {
         .expect(0)
         .mount(&server)
         .await;
-    for name in ["hire_id", "execution_id"] {
+    for name in ["hire_id", "execution_id", "direct_models"] {
         let (mut req, _, _dir) = start_request(&fixture("start"), "smoke-own");
         req.params.insert(name.into(), "x".into());
         let err = runner.start(req).await.unwrap_err();
@@ -210,6 +210,22 @@ async fn reserved_param_is_refused_before_sending() {
             "{err:?}"
         );
     }
+}
+
+/// The frozen direct models travel as the `direct_models` param, compact
+/// JSON in order; none, no param (task 3.1).
+#[test]
+fn sent_params_carry_the_direct_models() {
+    let (mut req, _, _dir) = start_request(&fixture("start"), "smoke-own");
+    assert!(!nearbee_apb::sent_params(&req).contains_key("direct_models"));
+    req.direct_models = vec![
+        "Qwen/Qwen3-VL-30B-A3B-Instruct".into(),
+        "openai/privacy-filter".into(),
+    ];
+    assert_eq!(
+        nearbee_apb::sent_params(&req)["direct_models"],
+        r#"["Qwen/Qwen3-VL-30B-A3B-Instruct","openai/privacy-filter"]"#
+    );
 }
 
 #[tokio::test]
@@ -1249,6 +1265,44 @@ async fn an_opencode_variable_in_the_instance_environment_makes_the_routes_unkno
         panic!("{:?}", f.routes)
     };
     assert!(reason.contains("OPENCODE_"), "{reason}");
+}
+
+/// `NEARAI_CLOUD_URL`, a `NEARBEE_CLOUD_` variable or a proxy variable in
+/// any case makes the routes unknown (task 3.1, spec `privacy-tiers`,
+/// Direct call route).
+#[tokio::test]
+async fn a_redirecting_variable_in_the_instance_environment_makes_the_routes_unknown() {
+    for var in [
+        "NEARAI_CLOUD_URL=http://x",
+        "NEARBEE_CLOUD_BASE=http://x",
+        "https_proxy=http://p:3128",
+        "HTTP_PROXY=http://p:3128",
+        "All_Proxy=socks5://p",
+    ] {
+        let server = MockServer::start().await;
+        let ws = workspace_with(Some(OPENCODE_JSON), None);
+        let sys = systemctl(ws.path(), &format!("Environment=\"{var}\" \"HOME=/h\""));
+        let runner = connected_at(&server, ws.path(), Some(&sys)).await;
+        let source = source_yaml(None, None);
+        Mock::given(method("GET"))
+            .and(path("/api/playbooks/smoke-own"))
+            .and(wiremock::matchers::query_param("workspace", WS))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": "smoke-own", "yaml": source})),
+            )
+            .mount(&server)
+            .await;
+        recorded(&fixture("health_live"), false)
+            .mount(&server)
+            .await;
+        let f = runner.inspect(&PlaybookId::new("smoke-own")).await.unwrap();
+        let Known::Unknown(reason) = &f.routes else {
+            panic!("{var}: {:?}", f.routes)
+        };
+        let name = var.split('=').next().unwrap();
+        assert!(reason.contains(name), "{reason}");
+    }
 }
 
 /// Mounts a playbook detail answer for `smoke-own` with `source` and,

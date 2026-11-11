@@ -42,6 +42,26 @@ Both carry `intake_check: github_repo`. The repo-audit playbook is
 installed by `nearbee list`, not by `scripts/apb-instance.sh install`.
 `docs/showcase-agents.md` describes the agent as built.
 
+## Agent B (`doc-digest/`)
+
+`playbook.yaml` (id `doc-digest`) runs four script nodes, each one Nearbee
+command (`scripts/<step>.sh` runs `${NEARBEE_BIN:-nearbee} digest <step>`):
+`pages`, `extract`, `classify`, `compose` (`expected_duration: 6m`, the
+signed call is bounded by 360 s), then `done`. There is no agent step and
+no `defaults.profile` (apb 1.0.0-beta.6 validates the playbook without
+one). The params add `direct_models`, which Nearbee sets from the
+generation's frozen list; the commands also need `NEARAI_API_KEY` from the
+instance's environment and `pdfinfo`, `pdftoppm` (poppler-utils), `magick`
+(ImageMagick 7) and `prlimit` (util-linux) on `PATH`.
+
+| Listing | Tier | Direct models | Signed | Price |
+| --- | --- | --- | --- | --- |
+| `listing.doc-digest-private.yaml` | attested | Qwen3-VL-30B-A3B-Instruct, privacy-filter, DeepSeek-V4.1-Flash-1017 | DeepSeek | 1.00 |
+
+Its limits take at most 10 files of `pdf`, `png`, `jpg` or `jpeg`. It is
+installed by `nearbee list`. `docs/showcase-agents.md` describes the agent
+as built.
+
 ## Workspace files (`workspace/`)
 
 `opencode.json` goes to the root of Nearbee's apb workspace: the OpenCode

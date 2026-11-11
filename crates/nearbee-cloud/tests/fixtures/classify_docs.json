@@ -1,0 +1,32 @@
+{
+  "note": "The Classify answer of the specialized endpoints page copied verbatim; read 2026-11-11.",
+  "recorded": "2026-11-11",
+  "source": "https://docs.near.ai/cloud/guides/specialized-endpoints",
+  "request": "POST /v1/privacy/classify {\"model\":\"openai/privacy-filter\",\"input\":\"My name is John Smith and my email is john@example.com\"}",
+  "status": 200,
+  "body": {
+    "id": "pt-9d83003f2d164dde9edcc0f7",
+    "model": "openai/privacy-filter",
+    "data": [
+      {
+        "index": 0,
+        "spans": [
+          {
+            "category": "private_person",
+            "start": 10,
+            "end": 21,
+            "text": " John Smith",
+            "score": 0.999
+          },
+          {
+            "category": "private_email",
+            "start": 37,
+            "end": 54,
+            "text": " john@example.com",
+            "score": 0.999
+          }
+        ]
+      }
+    ]
+  }
+}

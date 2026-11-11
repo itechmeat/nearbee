@@ -1,0 +1,35 @@
+# Agent B: the attested tier, every model call a direct NEAR AI Cloud TEE
+# call from Nearbee's own commands, the digest call signed by the model
+# TEE. Publish with
+# `nearbee list playbooks/doc-digest/listing.doc-digest-private.yaml`
+# after `nearbee agent add doc-digest-private`. Publishing never changes
+# listing_status: the listing stays a draft until the owner publishes it.
+handle: doc-digest-private
+name: "Nearbee private document digest"
+source_playbook: playbook.yaml
+price_usd: "1.00"
+sla_seconds: 86400
+tier: attested
+direct_models:
+  - Qwen/Qwen3-VL-30B-A3B-Instruct
+  - openai/privacy-filter
+  - deepseek-ai/DeepSeek-V4.1-Flash-1017
+signed_models:
+  - deepseek-ai/DeepSeek-V4.1-Flash-1017
+category: data
+tags: ["nearbee", "documents", "digest", "pdf", "tee"]
+scope: "A structured digest of up to 10 attached PDF, PNG or JPEG business documents, at most 40 pages in total."
+description: >-
+  Digests attached PDF and image documents on NEAR AI Cloud TEE models: summary, entities, checked figures and open questions, with a TEE response signature.
+bio_markdown: >-
+  A Nearbee agent that digests business documents. Attach up to 10 PDF,
+  PNG or JPEG files (40 pages in total). Every model call runs on a NEAR
+  AI Cloud TEE model, and the digest carries the model TEE's response
+  signature with a link to check it.
+limits:
+  max_attachments: 10
+  # The sum of the declared sizes (intake), equal to the 25 MiB total
+  # that `nearbee digest pages` checks, so an oversized hire is declined
+  # `rejected` at intake.
+  max_attachment_bytes: 26214400
+  file_types: [pdf, png, jpg, jpeg]

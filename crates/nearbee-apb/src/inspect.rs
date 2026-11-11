@@ -214,9 +214,9 @@ const MODEL_METADATA_KEYS: [&str; 9] = [
     "release_date",
 ];
 
-/// The value of `name` in `systemctl show -p Environment` output
-/// (`Environment=A=1 "B=two words"`), unquoted; `None` when unset.
-pub(crate) fn env_value(show: &str, name: &str) -> Option<String> {
+/// The `NAME=value` items of `systemctl show -p Environment` output
+/// (`Environment=A=1 "B=two words"`), unquoted.
+fn env_items(show: &str) -> Vec<String> {
     let body = show
         .trim()
         .strip_prefix("Environment=")
@@ -244,11 +244,32 @@ pub(crate) fn env_value(show: &str, name: &str) -> Option<String> {
     if !cur.is_empty() {
         items.push(cur);
     }
-    let prefix = format!("{name}=");
     items
+}
+
+/// The value of `name` in `systemctl show -p Environment` output
+/// (`Environment=A=1 "B=two words"`), unquoted; `None` when unset.
+pub(crate) fn env_value(show: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    env_items(show)
         .into_iter()
         .rev()
         .find_map(|item| item.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// The first variable of the instance environment that could redirect a
+/// Nearbee command's direct model call (spec `privacy-tiers`, Direct call
+/// route): `NEARAI_CLOUD_URL`, any `NEARBEE_CLOUD_` variable or a proxy
+/// variable, in any case.
+pub(crate) fn redirecting_variable(show: &str) -> Option<String> {
+    env_items(show).into_iter().find_map(|item| {
+        let name = item.split('=').next().unwrap_or_default().to_owned();
+        let upper = name.to_ascii_uppercase();
+        let hit = upper == "NEARAI_CLOUD_URL"
+            || upper.starts_with("NEARBEE_CLOUD_")
+            || ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].contains(&upper.as_str());
+        hit.then_some(name)
+    })
 }
 
 /// The provider routes of an `opencode.json` text, sorted by name; `Err`
@@ -413,7 +434,10 @@ impl ApbRunner {
     /// (`provider.<name>.options.baseURL`, `options.apiKey` and the model
     /// entries that alias or override a model). Unknown when the file is
     /// missing or unreadable, when the instance environment carries any
-    /// `OPENCODE_` variable (design 2.3), or when OpenCode would merge
+    /// `OPENCODE_` variable (design 2.3) or a variable that could redirect
+    /// a direct model call (`NEARAI_CLOUD_URL`, `NEARBEE_CLOUD_*`, a proxy
+    /// variable; change `doc-digest-and-paid-demo`, design 5.2), or when
+    /// OpenCode would merge
     /// another configuration over the workspace file (OpenCode 2.2.5's
     /// config discovery, read at the installed release): the instance's
     /// `XDG_CONFIG_HOME` is not Nearbee's own directory or that directory
@@ -428,6 +452,11 @@ impl ApbRunner {
             return Ok(Known::Unknown(
                 "the apb instance environment sets an OPENCODE_ variable".into(),
             ));
+        }
+        if let Some(name) = redirecting_variable(&env) {
+            return Ok(Known::Unknown(format!(
+                "the apb instance environment sets {name}, which could redirect a direct model call"
+            )));
         }
         if let Some(reason) = self.foreign_opencode_config(&env) {
             return Ok(Known::Unknown(reason));
@@ -579,6 +608,8 @@ impl ApbRunner {
             routes: self.routes().await?,
             decisions_enabled: self.decisions(),
             compaction_enabled: self.compaction().await?,
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
         })
     }
 }

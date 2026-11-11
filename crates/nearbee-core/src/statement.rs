@@ -28,6 +28,7 @@ pub fn render(tier: Tier, facts: &ExecutionFacts, retention_days: u32) -> String
     let mut out = String::from(HEADING);
     out.push_str("\n\n");
     out.push_str(&models_section(facts));
+    out.push_str(&direct_section(facts));
     out.push('\n');
     out.push_str(&channels_section(facts));
     out.push_str(&run_place_section(tier));
@@ -53,6 +54,11 @@ pub fn drift(
     facts: &ExecutionFacts,
     retention_days: u32,
 ) -> Option<String> {
+    // The runner never reports the direct models: they come from the
+    // record, as at `nearbee list` (design 5.1).
+    let facts = &facts
+        .clone()
+        .with_direct_models(&record.direct_models, &record.signed_models);
     let mut reasons: Vec<String> = Vec::new();
     if !record.serveable() {
         if record.tier.is_none() {
@@ -197,6 +203,11 @@ fn models_section(facts: &ExecutionFacts) -> String {
             push_model(&mut out, &mut seen, agent, model, catalog);
         }
     }
+    // A playbook of script steps only (agent B) names no agent model; a
+    // listing with a profile never reaches this line, so S4 text stays.
+    if seen.is_empty() {
+        out.push_str("No agent step runs a model.\n");
+    }
     out.push('\n');
     out
 }
@@ -215,6 +226,44 @@ fn push_model(
     }
     seen.push(key);
     out.push_str(&model_line(agent, model, checked_nearai(catalog, model)));
+}
+
+/// The direct model calls of Nearbee's commands (design 5.3); empty when
+/// the listing has none, so an S4 statement is unchanged.
+fn direct_section(facts: &ExecutionFacts) -> String {
+    if facts.direct_models.is_empty() {
+        return String::new();
+    }
+    let catalog = Catalog::embedded().ok();
+    let mut out = String::from("### Direct model calls\n\n");
+    out.push_str(
+        "Nearbee's own commands in the playbook's script steps call these models directly on NEAR AI Cloud (`https://cloud-api.near.ai/v1`, no proxy), without an agent:\n\n",
+    );
+    for model in &facts.direct_models {
+        let owner = catalog.and_then(|c| c.owned_by(model));
+        match owner {
+            Some("nearai") => out.push_str(&format!(
+                "- `{model}`: NEAR AI Cloud Confidential TEE model `{model}`.\n"
+            )),
+            Some(owner) => out.push_str(&format!(
+                "- `{model}`: NEAR AI Cloud model from `{owner}`, not a TEE model.\n"
+            )),
+            None => out.push_str(&format!("- `{model}`: not in the catalog snapshot.\n")),
+        }
+    }
+    if !facts.signed_models.is_empty() {
+        let names: Vec<String> = facts
+            .signed_models
+            .iter()
+            .map(|m| format!("`{m}`"))
+            .collect();
+        out.push_str(&format!(
+            "\nThe signed step: the call to {} carries a response signature from the model TEE (`provider_tee`), shown in the deliverable with a link to check it.\n",
+            names.join(", ")
+        ));
+    }
+    out.push('\n');
+    out
 }
 
 fn channels_section(facts: &ExecutionFacts) -> String {
@@ -334,6 +383,8 @@ mod tests {
             routes: Known::Yes(vec![]),
             decisions_enabled: Known::Yes(false),
             compaction_enabled: Known::Yes(false),
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
         }
     }
 
@@ -398,6 +449,87 @@ mod tests {
         facts
     }
 
+    const QWEN_VL: &str = "Qwen/Qwen3-VL-30B-A3B-Instruct";
+    const FILTER: &str = "openai/privacy-filter";
+    const DS: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+
+    fn digest_facts() -> ExecutionFacts {
+        attested_facts()
+            .with_direct_models(&[QWEN_VL.into(), FILTER.into(), DS.into()], &[DS.into()])
+    }
+
+    /// The fingerprint S4 computed for `attested_facts` (recorded before
+    /// the direct model fields existed, printed at the S4 commit): a
+    /// listing without direct models
+    /// keeps it (task 3.1).
+    const S4_ATTESTED_FINGERPRINT: &str =
+        "sha256:cdb3c2264d4aa3c8bc4b8152f321877d7747c7f6e34e807e9ed1247459984c68";
+
+    #[test]
+    fn a_listing_without_direct_models_keeps_the_s4_fingerprint() {
+        assert_eq!(
+            fingerprint(Tier::Attested, &attested_facts()),
+            S4_ATTESTED_FINGERPRINT
+        );
+        assert_eq!(
+            render(Tier::Attested, &attested_facts(), 7),
+            render(
+                Tier::Attested,
+                &attested_facts().with_direct_models(&[], &[]),
+                7
+            )
+        );
+    }
+
+    #[test]
+    fn reordering_direct_models_moves_the_fingerprint() {
+        let reordered = attested_facts()
+            .with_direct_models(&[FILTER.into(), QWEN_VL.into(), DS.into()], &[DS.into()]);
+        assert_ne!(
+            fingerprint(Tier::Attested, &digest_facts()),
+            fingerprint(Tier::Attested, &reordered)
+        );
+        assert_ne!(
+            fingerprint(Tier::Attested, &digest_facts()),
+            fingerprint(Tier::Attested, &attested_facts())
+        );
+    }
+
+    /// Spec `data-statement`, Agent B statement.
+    #[test]
+    fn the_statement_names_direct_models_and_the_signed_step() {
+        let text = render(Tier::Attested, &digest_facts(), 7);
+        let section = text
+            .split("### Direct model calls")
+            .nth(1)
+            .expect("the section is there");
+        for m in [QWEN_VL, FILTER, DS] {
+            assert!(
+                section.contains(&format!("NEAR AI Cloud Confidential TEE model `{m}`")),
+                "{text}"
+            );
+        }
+        assert!(section.contains("The signed step"), "{text}");
+        assert!(section.contains(&format!("`{DS}` carries a response signature")));
+        let unsigned = attested_facts().with_direct_models(&[FILTER.into()], &[]);
+        assert!(!render(Tier::Attested, &unsigned, 7).contains("signed step"));
+    }
+
+    /// The drift pass gets facts without direct models from the runner;
+    /// a record with them is still clean (spec `data-statement`, No drift
+    /// from direct models).
+    #[test]
+    fn the_drift_pass_adds_the_records_direct_models() {
+        let facts = digest_facts();
+        let mut rec = record(Tier::Attested, &facts);
+        rec.direct_models = facts.direct_models.clone();
+        rec.signed_models = facts.signed_models.clone();
+        assert_eq!(drift(&rec, &attested_facts(), 7), None);
+        // A record whose lists differ from the published facts drifts.
+        rec.signed_models.clear();
+        assert!(drift(&rec, &attested_facts(), 7).is_some());
+    }
+
     fn record(tier: Tier, facts: &ExecutionFacts) -> ResolvedListing {
         let statement = render(tier, facts, 7);
         ResolvedListing {
@@ -418,6 +550,8 @@ mod tests {
             statement_format: Some(STATEMENT_FORMAT),
             fingerprint: Some(fingerprint(tier, facts)),
             evidence_models: Vec::new(),
+            direct_models: Vec::new(),
+            signed_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

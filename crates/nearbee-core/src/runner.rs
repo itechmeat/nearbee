@@ -58,7 +58,7 @@ id_type!(
 );
 
 /// Param names the runner sets itself; a caller may not pass them.
-pub const RESERVED_PARAMS: [&str; 2] = ["hire_id", "execution_id"];
+pub const RESERVED_PARAMS: [&str; 3] = ["hire_id", "execution_id", "direct_models"];
 
 /// A playbook as listed by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +125,9 @@ pub struct StartRequest {
     /// The run this one continues (a rework or a redo); the engine sees
     /// the earlier run's context.
     pub continued_from: Option<RunId>,
+    /// The generation's frozen direct models (design 3), sent as the
+    /// `direct_models` param when not empty.
+    pub direct_models: Vec<String>,
 }
 
 /// The model identity of one attempt, as apb reported it (design 7). A

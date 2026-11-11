@@ -60,17 +60,31 @@ nearbee_bin() {
   command -v nearbee 2>/dev/null || true
 }
 
-# OpenCode reads OPENCODE_ variables over its config files; the tier check
-# treats any of them in the instance's environment as unknown routes, so
-# none may reach apb.
+# OpenCode reads OPENCODE_ variables over its config files, and
+# NEARAI_CLOUD_URL, NEARBEE_CLOUD_* or a proxy variable could redirect a
+# direct model call of Nearbee's commands; the tier check treats any of
+# them in the instance's environment as unknown routes, so none may reach
+# apb (proxy and cloud names in any case).
+redirecting_name() {
+  local upper="${1^^}"
+  case "$upper" in
+    OPENCODE_*|NEARAI_CLOUD_URL|NEARBEE_CLOUD_*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY) return 0 ;;
+  esac
+  return 1
+}
+
 refuse_opencode_vars() {
   local name
   for name in $ENV_VARS; do
-    case "$name" in OPENCODE_*) die "NEARBEE_APB_ENV_VARS names $name; no OPENCODE_ variable may reach apb" ;; esac
+    if redirecting_name "$name"; then
+      die "NEARBEE_APB_ENV_VARS names $name; no OPENCODE_, NEARAI_CLOUD_URL, NEARBEE_CLOUD_ or proxy variable may reach apb"
+    fi
   done
   if have_systemd; then
-    local found
-    found="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^\(OPENCODE_[A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')"
+    local found="" var
+    for var in $(systemctl --user show-environment 2>/dev/null | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+      if redirecting_name "$var"; then found="$found$var "; fi
+    done
     [ -z "$found" ] || die "the systemd user manager's environment sets $found; unset it (systemctl --user unset-environment) before starting"
   fi
 }

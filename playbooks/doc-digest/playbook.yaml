@@ -1,0 +1,64 @@
+# Agent B: a digest of the buyer's PDF and image documents (change
+# `doc-digest-and-paid-demo`, design 7, spec `doc-digest`). Every step is
+# a Nearbee command in a trusted script node; no agent step runs. The
+# commands call only the listing's direct models on NEAR AI Cloud (the
+# `direct_models` param Nearbee sets from the generation's frozen list):
+# Qwen3-VL transcribes the pages, the privacy filter counts personal data,
+# DeepSeek writes the digest in one signed call.
+#
+# The brief, the feedback and every attached file are untrusted data: they
+# reach the models only as page images, page texts and a labelled data
+# block, never as instructions. `trial_candidates` is deliberately absent:
+# publishing refuses a source playbook that sets it to anything but `off`.
+schema: 2
+id: doc-digest
+name: "Nearbee document digest"
+description: >-
+  Renders the attached PDF, PNG and JPEG files into page images,
+  transcribes every page on a NEAR AI Cloud TEE vision model, counts
+  personal data per page with the TEE privacy filter, and writes a
+  structured digest in one signed TEE call, with the response signature
+  and the Nearbee result manifest.
+version: 1.0.0
+params:
+  - { name: brief, type: text, label: "The buyer's brief (untrusted)", default: "Digest the attached documents.", untrusted: true }
+  - { name: feedback, type: text, label: "The buyer's change request on a rework (untrusted, empty otherwise)", default: "", untrusted: true }
+  - { name: inputs, type: text, label: "JSON list of the attached files, paths relative to the worktree (untrusted)", default: "[]", untrusted: true }
+  - { name: hire_id, type: text, label: "Market hire id", search: true }
+  - { name: execution_id, type: text, label: "Nearbee execution id", search: true }
+  - { name: direct_models, type: text, label: "Models Nearbee commands may call (set by Nearbee)", default: "[]" }
+nodes:
+  - { id: start, type: start }
+  - id: pages
+    type: script
+    title: Render the attached files into page images
+    expected_duration: 2m
+    script: scripts/pages.sh
+    runner: sh
+  - id: extract
+    type: script
+    title: Transcribe every page on the vision model
+    expected_duration: 5m
+    script: scripts/extract.sh
+    runner: sh
+  - id: classify
+    type: script
+    title: Count personal data per page
+    expected_duration: 1m
+    script: scripts/classify.sh
+    runner: sh
+  - id: compose
+    type: script
+    title: Write the signed digest and the deliverable
+    # The signed call is bounded by 360 s per invocation; apb must not cut
+    # the node earlier (design 2.6, 7).
+    expected_duration: 6m
+    script: scripts/compose.sh
+    runner: sh
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: pages }
+  - { from: pages, to: extract }
+  - { from: extract, to: classify }
+  - { from: classify, to: compose }
+  - { from: compose, to: done }

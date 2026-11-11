@@ -649,6 +649,28 @@ fn start_refuses_to_pass_an_opencode_variable() {
     assert!(!key_file.exists(), "a key file was written");
 }
 
+/// No variable that could redirect a direct model call may reach apb
+/// (task 3.2, spec `privacy-tiers`, Direct call route).
+#[cfg(unix)]
+#[test]
+fn start_refuses_to_pass_a_redirecting_variable() {
+    for name in [
+        "NEARAI_CLOUD_URL",
+        "NEARBEE_CLOUD_BASE",
+        "https_proxy",
+        "ALL_PROXY",
+    ] {
+        let (out, _f, key_file) = start_with_dotenv(
+            &format!("NEARAI_API_KEY=synthetic-key\n{name}=http://x\n"),
+            &format!("NEARAI_API_KEY {name}"),
+        );
+        assert!(!out.status.success(), "{name}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(name), "{stderr}");
+        assert!(!key_file.exists(), "a key file was written");
+    }
+}
+
 /// `start` gives the instance Nearbee's own `XDG_CONFIG_HOME`, created
 /// empty and private, so OpenCode merges no global config (spec
 /// `privacy-tiers`, OpenCode configuration).
