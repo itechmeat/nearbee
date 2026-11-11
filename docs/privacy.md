@@ -6,7 +6,7 @@ makes the listing a contract. Nearbee answers the question with tiers it
 validates, statements it generates, and evidence it attaches. The claims below
 are deliberately no stronger than what the adapter can show.
 
-## Tiers (as built in S4)
+## Tiers (as built in S4, attested narrowed in S6)
 
 A listing file names its `tier`, `plain` or `attested` (required; no other
 value parses). The tier is a checked property of the listing: `nearbee list`
@@ -16,8 +16,8 @@ new work for a listing whose facts drifted.
 | Tier | Who can read the buyer's data | Model steps | Other channels | In the deliverable |
 | --- | --- | --- | --- | --- |
 | **plain** | the owner's machine, the owner's model providers (any) | any profile | any connector, decisions and compaction allowed and named | the data statement |
-| **attested** | the owner's machine, NEAR AI Cloud Confidential TEE models | every executor, fallback and tier of every usable profile runs `opencode` on a `nearai/<id>` model owned by `nearai` in Nearbee's dated catalog snapshot | no connector, decisions off, compaction off | the endpoint attestation disclosure, then the data statement |
-| **attested, signed** (approved for `doc-digest-private`, D-008) | as attested | one bounded model step done by a trusted `script` node that calls the Cloud API itself (contract below, built in S5) | as attested | as attested, plus the response signature and the bytes' hashes |
+| **attested** | the owner's machine, NEAR AI Cloud Confidential TEE models | no agent at all (since S6, D-027): script nodes only, every model call a direct call of Nearbee's own commands to a model owned by `nearai` in Nearbee's dated catalog snapshot (the listing's `direct_models`) | no connector, decisions off, compaction off | the endpoint attestation disclosure, then the data statement |
+| **attested, signed** (`doc-digest-private` since S5, `repo-audit-fast` since S6) | as attested | as attested, and one bounded model call signed by the model TEE (the listing's `signed_models`; contract below) | as attested | as attested, plus the response signature and the bytes' hashes |
 | **blind** | NEAR AI Cloud TEE models only; the owner's machine relays ciphertext | one E2EE model step | no connectors; scripts touch only ciphertext | out of scope for the hackathon: a separate design (`docs/open-questions.md`) |
 
 ### The execution facts
@@ -44,12 +44,19 @@ statement states them too).
 
 `attested`, in addition:
 
-1. A usable profile (the default profile and every node's profile, by its
-   exact name and scope) that apb cannot resolve, or whose executor, a
-   fallback or a tier is not the agent `opencode` (another agent on a TEE
-   model id, such as `claude`, is refused too), or not on a `nearai/<id>`
-   catalog model owned by `nearai`. Incognito gateway models (Claude, GPT,
-   Gemini) and third-party TEE models are refused.
+1. Any agent (since S6, "Attested tier without agents" below): an
+   `agent_task` or `prompt` node, whatever its profile (a node with no
+   profile and no default profile is refused naming the node), and any
+   usable profile (the default profile and every node's profile, by its
+   exact name and scope) whose executor, a fallback or a tier runs an
+   agent. `opencode` is refused because it runs its sessions in a shared
+   background service with the starting user's configuration (apb starts
+   it without `--standalone`); any other agent because it is not a
+   verified attested route. A profile apb cannot resolve is refused for
+   every tier. The S4 model checks still run and name a non-TEE model
+   (an incognito gateway model such as Claude, GPT or Gemini, a
+   third-party TEE model, a model the snapshot does not list) when one is
+   there.
 2. A `nearai` provider whose base URL is not exactly
    `https://cloud-api.near.ai/v1`, whose `apiKey` is not exactly
    `{env:NEARAI_API_KEY}`, or that declares a model entry with any key
@@ -95,6 +102,10 @@ agents, commands, MCP servers), plus `OPENCODE_CONFIG`,
 The fetched repository's own `opencode.json` and `.opencode/` are renamed
 with `.repo-data` in the snapshot, so they are not configuration.
 
+Since S6 an attested listing runs no OpenCode at all, so this section
+matters only for a plain listing that uses OpenCode (none ships); its
+checks stay as facts.
+
 Not covered, and so not prevented: OpenCode 2.2.5 also loads instructions
 and skills from `~/.claude` and `~/.agents` (and from `.claude/` and
 `.agents/` directories above the working directory) whatever
@@ -114,9 +125,32 @@ check `github_repo` replaces it: a brief must name exactly one public GitHub
 repository by its `https://github.com` URL, else the hire is declined
 `rejected` before anything else happens.
 
-Compaction is read from the apb version: apb `1.0.0-beta.6` compacts only
-when a run's `context_max_bytes` is set, and no REST, CLI or MCP surface
-sets it, so the fact is "off" on that version and unknown on any other.
+Compaction is read from the apb version: apb compacts only when a run's
+`context_max_bytes` is set, and at `1.0.0-beta.6` and `1.0.0-beta.7` no
+REST, CLI or MCP surface sets it (re-read for beta.7 on 2026-11-11,
+`docs/apb.md`), so the fact is "off" on those two versions and unknown on
+any other, which refuses every tier until that release is read too.
+
+### Attested tier without agents (S6, D-027)
+
+The S4 attested route was an agent: `opencode` on NEAR AI Cloud TEE
+models, with the configuration checks above. A probe on 2026-11-11
+(OpenCode 2.2.5, `docs/apb.md`, "apb 1.0.0-beta.7") showed that OpenCode
+2.x, started as apb starts it (without `--standalone`), hands the session
+to a shared background service that runs with the environment of whoever
+started it: on this machine the owner's home and configuration, with the
+owner's MCP server connected. With `--standalone` it still loads
+`~/.agents/skills` and `~/.opencode/skills`. Nearbee cannot fix that from
+its side, and apb's native `nearai/` route on `dsh` reads the same home
+sources. So an attested listing now runs no agent: its playbook has script
+nodes only, and its model calls are the direct and signed calls of
+Nearbee's own commands (`nearbee digest`, `nearbee audit review`), which
+send exact bytes to the models the listing names and nothing else. The
+tier check refuses any agent node and any agent profile; the fast
+repository audit moved to its own playbook for this
+(`playbooks/repo-audit/playbook.fast.yaml`, `docs/showcase-agents.md`).
+The owner's shared OpenCode service stays as it is; Nearbee only stops
+relying on it.
 
 ### When the check runs
 
@@ -152,6 +186,12 @@ egress control; that is post-hackathon work.
 
 ### Repository audit: what apb enforces on the agent step
 
+Since S6 only the premium listing (`repo-audit-premium`, plain, `claude`)
+runs this agent step. The fast listing runs `playbook.fast.yaml`, whose
+`review` step is `nearbee audit review`: a script node that packs the
+snapshot as labelled data and makes one signed call, so no agent reads
+the repository and nothing below applies to it (next section).
+
 The `audit` node of `playbooks/repo-audit/playbook.yaml` reads
 attacker-chosen content (any buyer names the repository). Read at apb
 1.0.0-beta.6 (`crates/apb-core/src/schema.rs`, `docs/ISOLATION.md`), the
@@ -181,6 +221,35 @@ What apb cannot enforce for this node, and so is not prevented:
    instruction files are renamed, and the write scope and the hash check
    bound what an injected agent can change, but not what it can read or
    send.
+
+### Repository audit, fast variant: one signed review call (S6)
+
+`nearbee audit review` reads only the snapshot's listed files whose bytes
+still match the SHA-256 that `fetch` recorded and that are valid UTF-8,
+packs them in a fixed order (manifests and build files, source, config,
+tests, docs, other files; lock files, minified files, source maps and
+files under `dist/`, `build/`, `vendor/` or `node_modules/` last; ties by
+path) with numbered lines and JSON-quoted paths in the file headers, and
+omits every file that would take the request past 768 KiB while packing
+the smaller ones after it. The omitted files are counted per reason in
+`audit/review-coverage.json` (with at most 1,000 paths) and listed in the
+deliverable's "Not reported" section (at most 50 paths, grouped by
+reason). A pack with no manifest, source, config or test file fails the
+step with `nothing_packed` before any request. The request carries only the model, the two
+messages, `stream: false` and `max_tokens: 16384`; the brief, the buyer's
+change request and the files are labelled data blocks under a system
+message that forbids following them; the brief's and the change request's
+lines are numbered like the files', so a buyer cannot close a block. The model must be in the hire's
+frozen `direct_models`, else nothing is sent. The call is the S5 signed
+call (state in `audit/signed/<execution_id>/`, a rework makes a new call),
+and `finish` copies the four evidence files into `out/evidence/` (only
+for a run with direct models, so never for the premium variant), so the
+deliverable carries the response signature section and its receipt link.
+An answer that is not the candidates object, or has more than 40
+findings, fails the step with `review_unparsed` and the hire is declined
+`failed`. Every citation is still checked against the snapshot by
+`finish`. What it gives up: one packed call reviews less than an agent
+that reads files on demand, and a large repository is cut and says so.
 
 A further limitation (live-audit finding b): the deliverable's secret scan
 matches configured secrets and `aat_` tokens as plain text only; an
@@ -223,7 +292,7 @@ without the footer.
 1. Which models: the frozen evidence model set of the generation, the
    distinct `nearai` model ids of every usable profile's executor,
    fallbacks and tiers, and since S5 the listing's direct models (for
-   `repo-audit-fast`: DeepSeek V4.1 Flash and Qwen3.8-27B; for
+   `repo-audit-fast` since S6: DeepSeek V4.1 Flash only; for
    `doc-digest-private`: Qwen3-VL, the privacy filter and DeepSeek).
 2. When: one report per model before the generation's market start and apb
    start, and one after its run succeeded, from
@@ -379,8 +448,8 @@ nothing.
 
 Not covered, listed by name in every `deleted` record and in the dry run:
 
-1. apb's run directories of the hire's run ids (apb `1.0.0-beta.6` has no run
-   deletion, `docs/apb.md`);
+1. apb's run directories of the hire's run ids (apb `1.0.0-beta.6` and
+   `1.0.0-beta.7` have no run deletion, `docs/apb.md`);
 2. apb's `.apb/decisions.jsonl` entries of the scope check (digests and
    metadata of the question, never deleted by Nearbee);
 3. caches the executors wrote (agent CLI memory and session files).
@@ -391,10 +460,45 @@ everyday apb. apb itself learns from every run today with no switch to turn it
 off (S1 finding); apb's `near-ai-cloud-models` change adds an `external_data`
 run flag that excludes a run from every learning and reuse path (corrections,
 known problems, stats and estimates, judge examples, scenario capture, run
-memory) and keeps it visible on the run (D-023). Nearbee sets that flag on
-every market run once apb ships it and checks it on the run detail; until then
-only the owner's own test hires run. The flag does not cover an agent CLI's
-own memory and session files: those are the executor caches above.
+memory) and keeps it visible on the run (D-023). It shipped in apb
+`1.0.0-beta.7`; Nearbee uses it since S6 (next section). The flag does not
+cover an agent CLI's own memory and session files: those are the executor
+caches above.
+
+## External-data runs (as built in S6)
+
+1. Before any market start of a new first-time hire, serve asks the apb
+   instance whether it takes external-data runs (its version is at least
+   `1.0.0-beta.7`). An older apb declines the hire `rejected` within the
+   first hour with "the agent cannot take hires right now" and the
+   attention `apb_too_old`; an unreadable answer writes nothing and is
+   asked again next round.
+2. Before every run start (first run, rework, redo) serve asks again; no
+   or an error starts nothing, the hire keeps its state with `apb_too_old`
+   and its deadline declines it later; an unreadable answer is told to
+   the operator once per hire. Every run serve starts carries
+   `external_data: true`, and its run start intent records it.
+3. The incident path: on every observed run detail of a market run whose
+   start intent recorded the flag (the first observation, reworks and
+   redos included) serve checks that the run reports the flag. A run
+   started before the intent recorded it (a hire in flight across the
+   upgrade) is not checked, so the upgrade does not abort it. When it does not, buyer data has reached apb's
+   learning state: serve aborts the run, journals `privacy_flag_missing`
+   with the run id, declines the hire `failed` with "the run could not be
+   isolated" and raises the operator attention `privacy_incident`. The
+   owner then clears what apb learned from that run by hand (its
+   corrections, memory and examples of the playbook); Nearbee cannot.
+4. Earlier unflagged runs: the owner's own test hires and smoke runs
+   before S6 ran without the flag, so apb may have learned from them.
+   They carried synthetic briefs only; the flag does not undo what apb
+   learned then.
+5. What the flag does not reach: what an agent CLI keeps itself. The
+   premium repository audit runs Claude Code, which keeps its session
+   files under the owner's home; the data statement says so for every
+   listing with a `claude` executor, and says that no agent session files
+   exist for a listing without agents.
+6. `nearbee config check` prints the apb version with `ok` from
+   `1.0.0-beta.7` on and `failed`, naming the minimum, below it.
 
 ## What is honestly not guaranteed
 

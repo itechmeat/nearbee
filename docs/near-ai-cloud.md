@@ -166,7 +166,9 @@ in the dedicated workspace's `opencode.json` (`docs/apb.md`, "OpenCode on
 NEAR AI Cloud") lists `nearai/Qwen/Qwen3.8-27B` and
 `nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017`. The profiles are
 `playbooks/profiles/nearbee-near.yaml` (Qwen, DeepSeek fallback) and the
-smoke-only `nearbee-near-deepseek.yaml`.
+smoke-only `nearbee-near-deepseek.yaml`. Since S6 no attested listing
+runs this OpenCode route (D-027: the attested tier refuses every agent);
+the smoke playbooks stay as a development check of the provider route.
 
 | Model | apb | OpenCode | Run | Status | Manifest | Usage | Cost |
 | --- | --- | --- | --- | --- | --- | --- | --- |

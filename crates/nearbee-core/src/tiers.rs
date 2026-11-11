@@ -121,9 +121,12 @@ const KNOWN_NODE_KINDS: [&str; 5] = ["start", "finish", "agent_task", "script", 
 /// may name (spec `privacy-tiers`, Attested side channels).
 const ATTESTED_ENV_ALLOWED: [&str; 1] = ["NEARAI_API_KEY"];
 
-/// The only agent an attested profile's executor, fallbacks and tiers may
-/// run (spec `privacy-tiers`, Attested model route).
-const ATTESTED_AGENT: &str = "opencode";
+/// The node kinds that run an agent: an attested listing has none of them
+/// (S6 design 4.1).
+const AGENT_NODE_KINDS: [&str; 2] = ["agent_task", "prompt"];
+
+/// Why an attested listing may not run `opencode` (S6 design 4.1).
+const OPENCODE_BREACH: &str = "the opencode agent runs in a shared background service with the starting user's configuration (apb starts it without --standalone); attested listings use Nearbee's direct calls only";
 
 /// The exact base URL the `nearai` provider must point at (spec
 /// `privacy-tiers`, Attested model route).
@@ -198,11 +201,25 @@ pub fn check(tier: Tier, facts: &ExecutionFacts, catalog: &Catalog) -> Result<()
         }
     }
     let mut attested_breaches: Vec<String> = Vec::new();
+    // An attested listing runs script nodes only: its model calls are
+    // Nearbee's own direct and signed calls (S6 design 4.1).
+    if tier == Tier::Attested {
+        for node in &facts.nodes {
+            if AGENT_NODE_KINDS.contains(&node.kind.as_str()) {
+                attested_breaches.push(format!(
+                    "node `{}` is an `{}` node, which runs an agent; attested listings use Nearbee's direct calls only",
+                    node.id, node.kind
+                ));
+            }
+        }
+    }
     let check_executor = |breaches: &mut Vec<String>, executor: &ExecutorFact, profile: &str| {
-        if executor.agent != ATTESTED_AGENT {
+        if executor.agent == "opencode" {
+            breaches.push(format!("profile `{profile}`: {OPENCODE_BREACH}"));
+        } else {
             breaches.push(format!(
-                "profile `{}`: executor `{}` on model `{}` is not the agent `{}`; an attested listing runs only `{}`",
-                profile, executor.agent, executor.model, ATTESTED_AGENT, ATTESTED_AGENT
+                "profile `{profile}`: {} is not a verified attested route; attested listings use Nearbee's direct calls only",
+                executor.agent
             ));
         }
         if !model_ok(catalog, &executor.model) {
@@ -363,6 +380,10 @@ pub fn check(tier: Tier, facts: &ExecutionFacts, catalog: &Catalog) -> Result<()
             reason
         ));
     }
+    // One line per distinct breach: an executor and its fallbacks on the
+    // same agent say the same thing.
+    let mut seen = std::collections::BTreeSet::new();
+    attested_breaches.retain(|b| seen.insert(b.clone()));
     breaches.append(&mut attested_breaches);
     if breaches.is_empty() {
         Ok(())
@@ -476,7 +497,7 @@ mod tests {
     /// (task 3.1).
     #[test]
     fn direct_models_follow_the_tier() {
-        let (facts, catalog) = attested_setup();
+        let (facts, catalog) = script_only_setup();
         let ok = with_direct(
             facts.clone(),
             &["Qwen/Qwen3-VL-30B-A3B-Instruct", "openai/privacy-filter"],
@@ -515,22 +536,61 @@ mod tests {
         assert_eq!(after.len(), before.len() + 1);
     }
 
-    /// A passing `attested` case built like the shipped profiles (task
-    /// 2.2): TEE executor, correct route, no side channels, decisions and
-    /// compaction off.
+    /// The S4 attested profile (`opencode` on a TEE model, correct route,
+    /// no side channels) is now refused: the opencode agent runs in a
+    /// shared background service (S6 design 4).
     #[test]
-    fn a_clean_attested_facts_passes() {
-        let catalog = catalog();
-        let mut facts = base_facts();
-        facts.default_profile = Some(profile_ref("nearbee-near", "project"));
-        facts.profiles = vec![attested_profile(profile_ref("nearbee-near", "project"))];
-        facts.routes = Known::Yes(vec![ProviderRoute {
-            name: "nearai".to_string(),
-            base_url: NEARAI_BASE_URL.to_string(),
-            api_key_ref: NEARAI_API_KEY_REF.to_string(),
-            model_overrides: vec![],
-        }]);
+    fn an_attested_opencode_profile_is_refused_as_a_shared_service() {
+        let (facts, catalog) = attested_setup();
+        let breaches = check(Tier::Attested, &facts, &catalog).expect_err("opencode is refused");
+        assert!(
+            breaches.iter().any(|b| b.contains("nearbee-near")
+                && b.contains("shared background service")
+                && b.contains("without --standalone")
+                && b.contains("attested listings use Nearbee's direct calls only")),
+            "{breaches:?}"
+        );
+        assert_eq!(check(Tier::Plain, &facts, &catalog), Ok(()));
+    }
+
+    /// An `agent_task` or `prompt` node refuses an attested listing even
+    /// with no profile and no default profile, naming the node.
+    #[test]
+    fn an_agent_node_without_a_profile_refuses_an_attested_listing() {
+        for kind in ["agent_task", "prompt"] {
+            let (mut facts, catalog) = script_only_setup();
+            facts.nodes.push(node("review", kind));
+            let breaches =
+                check(Tier::Attested, &facts, &catalog).expect_err("an agent node is refused");
+            assert!(
+                breaches
+                    .iter()
+                    .any(|b| b.contains("`review`") && b.contains(kind)),
+                "{kind}: {breaches:?}"
+            );
+            assert_eq!(check(Tier::Plain, &facts, &catalog), Ok(()), "{kind}");
+        }
+    }
+
+    /// A script-only attested playbook whose direct models are catalog
+    /// `nearai` models passes.
+    #[test]
+    fn a_script_only_attested_playbook_passes() {
+        let (facts, catalog) = script_only_setup();
+        let facts = with_direct(
+            facts,
+            &["deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+            &["deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        );
         assert_eq!(check(Tier::Attested, &facts, &catalog), Ok(()));
+    }
+
+    /// Every agent breach of an attested listing, for the S4 scenarios
+    /// that now end refused by the agent rule.
+    fn agent_refused(breaches: &[String]) -> bool {
+        breaches
+            .iter()
+            .any(|b| b.contains("attested listings use Nearbee's direct calls only"))
     }
 
     /// A passing `plain` case built like the shipped profiles (task 2.2):
@@ -689,6 +749,15 @@ mod tests {
         }
     }
 
+    /// An attested playbook of script nodes only, with the correct route.
+    fn script_only_setup() -> (ExecutionFacts, Catalog) {
+        let (mut facts, catalog) = attested_setup();
+        facts.default_profile = None;
+        facts.profiles = vec![];
+        facts.nodes.push(node("review", "script"));
+        (facts, catalog)
+    }
+
     fn attested_setup() -> (ExecutionFacts, Catalog) {
         let catalog = catalog();
         let mut facts = base_facts();
@@ -721,6 +790,7 @@ mod tests {
                 .any(|b| b.contains("nearbee-near") && b.contains("anthropic/claude-fable-5")),
             "the refusal names the profile and the model: {breaches:?}"
         );
+        assert!(agent_refused(&breaches), "{breaches:?}");
         assert_eq!(check(Tier::Plain, &facts, &catalog), Ok(()));
     }
 
@@ -745,9 +815,8 @@ mod tests {
             let breaches = check(Tier::Attested, &facts, &catalog)
                 .expect_err("a non-opencode agent is refused");
             assert!(
-                breaches
-                    .iter()
-                    .any(|b| b.contains("nearbee-near") && b.contains("agent `opencode`")),
+                breaches.iter().any(|b| b.contains("nearbee-near")
+                    && b.contains("is not a verified attested route")),
                 "{what}: the refusal names the profile and the agent: {breaches:?}"
             );
             assert_eq!(check(Tier::Plain, &facts, &catalog), Ok(()), "{what}");
@@ -762,6 +831,7 @@ mod tests {
             routes[0].base_url = "http://localhost:9999/v1".to_string();
         }
         let breaches = check(Tier::Attested, &facts, &catalog).expect_err("the route is refused");
+        assert!(agent_refused(&breaches), "{breaches:?}");
         assert!(
             breaches
                 .iter()
@@ -823,6 +893,7 @@ mod tests {
         facts.routes = Known::Unknown("the instance sets OPENCODE_CONFIG".to_string());
         let breaches =
             check(Tier::Attested, &facts, &catalog).expect_err("unknown routes are refused");
+        assert!(agent_refused(&breaches), "{breaches:?}");
         assert!(breaches.iter().any(|b| b.contains("OPENCODE_CONFIG")));
     }
 
@@ -836,6 +907,7 @@ mod tests {
             profile.executor = executor("opencode", "nearai/some-new-model");
         }
         let breaches = check(Tier::Attested, &facts, &catalog).expect_err("the model is refused");
+        assert!(agent_refused(&breaches), "{breaches:?}");
         assert!(
             breaches.iter().any(|b| b.contains("nearai/some-new-model")),
             "the refusal names the model: {breaches:?}"

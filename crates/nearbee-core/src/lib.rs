@@ -6,6 +6,7 @@
 
 pub mod attachments;
 pub mod catalog;
+pub mod clock;
 pub mod config;
 pub mod cost;
 pub mod credentials;

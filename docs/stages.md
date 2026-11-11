@@ -228,6 +228,20 @@ Owner items: O-4, O-8, O-9.
 Done when: a clean clone follows the README to green; the owner has confirmed
 the payload and sent the submission once (`docs/hackathon.md`).
 
+Status (2026-11-11, implementer): built and tested, no billed call and no
+market write: journal records stamped by the serve clock; apb
+`1.0.0-beta.7` required (semver gate at intake and before every run start,
+`external_data: true` on every market run, the `privacy_flag_missing`
+incident path, the `config check` version line; compaction known off for
+beta.6 and beta.7, D-023 lifted on merge); the attested tier refuses every
+agent (D-027); agent A fast is `playbook.fast.yaml` with the signed
+`nearbee audit review`; `nearbee replay` runs the five scenarios
+(success, a decline at intake for a brief that names no repository, redo,
+restart, cancellation) through the real `serve::round` and runs in CI;
+README, `docs/demo-script.md`. Open: acceptance, the clean-clone run, the
+quality cycle, the X post and submission drafts, relisting after the merge
+(tasks 7.1 to 7.5), and the owner's live runs and submission (7.6).
+
 ## Dependencies outside this repository
 
 1. **apb native NEAR AI Cloud support** (requested from the apb project on

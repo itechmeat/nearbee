@@ -520,7 +520,7 @@ fn a_grounded_finding_is_accepted_and_the_result_validates() {
             "  let key = \"sk-live-123\";\n\n println!(\"{}\", key);",
         )],
     );
-    let f = audit::finish(dir.path()).unwrap();
+    let f = audit::finish(dir.path(), None, &[]).unwrap();
     assert_eq!(f.accepted.len(), 1);
     assert!(f.rejected.is_empty());
     let validated =
@@ -577,7 +577,7 @@ fn a_finding_on_a_file_changed_after_fetch_is_rejected() {
             finding("Untouched", "src/ok.rs", 1, 1, "fn ok() {}"),
         ],
     );
-    let f = audit::finish(dir.path()).unwrap();
+    let f = audit::finish(dir.path(), None, &[]).unwrap();
     assert_eq!(f.accepted.len(), 1);
     assert_eq!(f.accepted[0].title, "Untouched");
     assert_eq!(f.rejected.len(), 1);
@@ -603,7 +603,7 @@ fn ungrounded_findings_are_rejected_with_reasons() {
             finding("Outside the lines", "src/main.rs", 1, 2, "fn main() {"),
         ],
     );
-    let f = audit::finish(dir.path()).unwrap();
+    let f = audit::finish(dir.path(), None, &[]).unwrap();
     assert!(f.accepted.is_empty());
     let reasons: Vec<&str> = f.rejected.iter().map(|r| r.reason.as_str()).collect();
     assert_eq!(
@@ -621,7 +621,7 @@ fn ungrounded_findings_are_rejected_with_reasons() {
 
 fn fails_without_result(dir: &Path, candidates: &[u8]) -> String {
     std::fs::write(dir.join("audit/candidates.json"), candidates).unwrap();
-    let err = audit::finish(dir).unwrap_err();
+    let err = audit::finish(dir, None, &[]).unwrap_err();
     assert!(
         !dir.join("out/result.json").exists(),
         "out/result.json remains"
@@ -667,7 +667,7 @@ fn a_linked_candidates_file_fails_with_no_result() {
         dir.path().join("audit/candidates.json"),
     )
     .unwrap();
-    let err = audit::finish(dir.path()).unwrap_err();
+    let err = audit::finish(dir.path(), None, &[]).unwrap_err();
     assert!(err.contains("symbolic link"), "{err}");
     assert!(!dir.path().join("out/result.json").exists());
 }
@@ -676,7 +676,7 @@ fn a_linked_candidates_file_fails_with_no_result() {
 fn a_failed_finish_after_a_successful_one_leaves_no_result() {
     let dir = snapshot_worktree();
     write_candidates(dir.path(), Vec::new());
-    audit::finish(dir.path()).unwrap();
+    audit::finish(dir.path(), None, &[]).unwrap();
     assert!(dir.path().join("out/result.json").exists());
     fails_without_result(dir.path(), b"{}");
 }
@@ -694,7 +694,7 @@ fn finding_text_is_escaped_and_the_json_fence_stays_closed() {
     f["detail"] = serde_json::json!("- list\n+ plus\n12. numbered\nplain");
     f["fix"] = serde_json::json!("before\n~~~\n  ~~~~ rust\nafter ~~~ inline");
     write_candidates(dir.path(), vec![f]);
-    audit::finish(dir.path()).unwrap();
+    audit::finish(dir.path(), None, &[]).unwrap();
     let md = read(dir.path(), "out/deliverable.md");
     assert!(md.contains("&lt;/details&gt;"), "{md}");
     // Raw only inside the JSON fence, where it is text.
@@ -731,7 +731,7 @@ fn json_without_backticks_gets_a_three_backtick_fence() {
     assert_eq!(audit::fence_for("a ``` b"), "````");
     let dir = snapshot_worktree();
     write_candidates(dir.path(), Vec::new());
-    audit::finish(dir.path()).unwrap();
+    audit::finish(dir.path(), None, &[]).unwrap();
     let md = read(dir.path(), "out/deliverable.md");
     assert!(md.contains("\n```json\n"), "{md}");
 }

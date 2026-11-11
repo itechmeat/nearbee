@@ -553,16 +553,14 @@ impl ApbRunner {
         }
     }
 
-    /// Whether apb compacts context: only the recorded beta.6 release can
-    /// not (design 2.5); any other version is unknown. A failed health
-    /// read fails the inspection.
+    /// Whether apb compacts context, by the instance version
+    /// ([`crate::compaction_for_version`]). A failed health read fails the
+    /// inspection.
     pub(crate) async fn compaction(&self) -> Result<Known<bool>, RunnerError> {
         let v = self.client.get("/api/health", &[], Kind::Read).await?;
-        Ok(match str_field(&v, "version") {
-            Some(version) if version == "1.0.0-beta.6" => Known::Yes(false),
-            Some(version) => Known::Unknown(format!("apb version {version}")),
-            None => Known::Unknown("the health answer has no version".into()),
-        })
+        Ok(crate::compaction_for_version(
+            str_field(&v, "version").as_deref(),
+        ))
     }
 
     /// The facts for a playbook YAML plus everything around it.

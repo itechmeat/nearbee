@@ -565,7 +565,7 @@ pub fn execute(p: &Plan) -> Result<Vec<String>, journal::WriterError> {
         what.push(format!("not covered: {n}"));
     }
     let journal_path = p.journal_dir.join("journal.jsonl");
-    let mut w = journal::Writer::open(journal_path, &p.hire_id)?;
+    let mut w = journal::Writer::open(journal_path, &p.hire_id, crate::clock::Clock::real())?;
     w.append(Event::Deleted(journal::Deleted {
         what: what.clone(),
         reason: "cleanup".into(),

@@ -67,6 +67,17 @@ async fn mount_projects(server: &MockServer, body: Value) {
         .await;
 }
 
+/// The recorded beta.7 health answer with `version` replaced.
+async fn mount_health(server: &MockServer, version: &str) {
+    let mut body = fixture("health_beta7_live")["response"]["body"].clone();
+    body["version"] = json!(version);
+    Mock::given(method("GET"))
+        .and(path("/api/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
 async fn run(args: &[&str], cwd: &Path, vars: &[(&str, &str)]) -> (i32, String) {
     let map: HashMap<String, String> = vars
         .iter()
@@ -104,6 +115,7 @@ async fn config_check_all_present() {
     let server = MockServer::start().await;
     let s = Setup::new(&server.uri());
     mount_projects(&server, s.projects()).await;
+    mount_health(&server, "1.0.0-beta.7").await;
     let cfg = s.config();
     let (code, out) = run(
         &["--config", cfg.to_str().unwrap(), "config", "check"],
@@ -121,6 +133,10 @@ async fn config_check_all_present() {
     }
     assert!(out.contains("NEARAI_API_KEY is set"), "{out}");
     assert!(out.contains(WS), "{out}");
+    assert!(
+        out.contains("ok      apb version 1.0.0-beta.7 (external data runs supported)"),
+        "{out}"
+    );
     assert!(!out.contains("sk-secret-value") && !out.contains("apb_secret"));
 }
 
@@ -129,6 +145,7 @@ async fn config_check_reports_missing_variables_by_name() {
     let server = MockServer::start().await;
     let s = Setup::new(&server.uri());
     mount_projects(&server, s.projects()).await;
+    mount_health(&server, "1.0.0-beta.7").await;
     let cfg = s.config();
     let (code, out) = run(
         &["--config", cfg.to_str().unwrap(), "config", "check"],
@@ -167,6 +184,7 @@ async fn config_check_missing_workspace() {
     let s = Setup::new(&server.uri());
     // apb knows only the recorded projects, not this workspace.
     mount_projects(&server, fixture("projects")["response"]["body"].clone()).await;
+    mount_health(&server, "1.0.0-beta.7").await;
     let cfg = s.config();
     let (code, out) = run(
         &["--config", cfg.to_str().unwrap(), "config", "check"],
@@ -183,6 +201,36 @@ async fn config_check_missing_workspace() {
     );
     assert!(line.contains(FIXTURE_WS_PATH), "{line}");
     assert!(line.contains("scratch-project"), "{line}");
+}
+
+/// An apb older than beta.7 fails the check, naming the minimum; an
+/// unparsable version fails it too.
+#[tokio::test]
+async fn config_check_fails_an_apb_without_external_data_runs() {
+    for (version, want) in [
+        (
+            "1.0.0-beta.6",
+            "failed  apb version 1.0.0-beta.6: Nearbee needs 1.0.0-beta.7 or newer",
+        ),
+        ("dev", "failed  apb version"),
+    ] {
+        let server = MockServer::start().await;
+        let s = Setup::new(&server.uri());
+        mount_projects(&server, s.projects()).await;
+        mount_health(&server, version).await;
+        let cfg = s.config();
+        let (code, out) = run(
+            &["--config", cfg.to_str().unwrap(), "config", "check"],
+            Path::new("/"),
+            &[("NEARAI_API_KEY", "sk-synthetic-test-key")],
+        )
+        .await;
+        assert_ne!(code, 0, "{version}: {out}");
+        assert!(out.contains(want), "{version}: {out}");
+        if version == "dev" {
+            assert!(out.contains("1.0.0-beta.7 or newer"), "{out}");
+        }
+    }
 }
 
 #[tokio::test]

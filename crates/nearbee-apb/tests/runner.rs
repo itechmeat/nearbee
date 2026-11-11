@@ -1709,3 +1709,133 @@ async fn attempts_are_read_from_the_run_answer() {
         .unwrap();
     assert!(d.attempts.is_empty());
 }
+
+// --- External-data runs and the instance version (S6 design 3) ---
+
+/// A health answer with the given version, on the recorded beta.7 route.
+async fn supported_with(version: Value) -> Result<bool, RunnerError> {
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    let f = fixture("health_beta7_live");
+    let mut body = f["response"]["body"].clone();
+    body["version"] = version;
+    recorded_with(&f, false, ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    runner.external_data_supported().await
+}
+
+#[tokio::test]
+async fn external_data_support_follows_the_prerelease_order() {
+    // The recorded beta.7 answer as it is.
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&fixture("health_beta7_live"), false)
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(runner.external_data_supported().await.unwrap());
+    assert!(!supported_with(json!("1.0.0-beta.6")).await.unwrap());
+    assert!(supported_with(json!("1.0.0-beta.10")).await.unwrap());
+    assert!(supported_with(json!("1.0.0")).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_unparsable_version_is_a_protocol_error_naming_the_field() {
+    for v in [json!("dev"), Value::Null] {
+        let err = supported_with(v).await.unwrap_err();
+        let RunnerError::Protocol { detail } = &err else {
+            panic!("{err:?}")
+        };
+        assert!(detail.contains("version"), "{detail}");
+    }
+}
+
+#[test]
+fn compaction_is_known_off_only_for_the_read_releases() {
+    use nearbee_apb::compaction_for_version;
+    assert_eq!(
+        compaction_for_version(Some("1.0.0-beta.6")),
+        Known::Yes(false)
+    );
+    assert_eq!(
+        compaction_for_version(Some("1.0.0-beta.7")),
+        Known::Yes(false)
+    );
+    assert!(matches!(
+        compaction_for_version(Some("1.0.0-beta.8")),
+        Known::Unknown(_)
+    ));
+    assert!(matches!(compaction_for_version(None), Known::Unknown(_)));
+}
+
+/// The comparison is by parsed version: build metadata is ignored, and a
+/// string that is not a version stays unknown.
+#[test]
+fn compaction_ignores_build_metadata() {
+    use nearbee_apb::compaction_for_version;
+    assert_eq!(
+        compaction_for_version(Some("1.0.0-beta.7+abc")),
+        Known::Yes(false)
+    );
+    assert!(matches!(
+        compaction_for_version(Some("1.0.0-beta.8+abc")),
+        Known::Unknown(_)
+    ));
+    assert!(matches!(
+        compaction_for_version(Some("not a version")),
+        Known::Unknown(_)
+    ));
+}
+
+#[tokio::test]
+async fn the_start_body_carries_the_flag_only_when_set() {
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    let f = fixture("start");
+    let (mut req, mut body, _dir) = start_request(&f, "smoke-own");
+    req.external_data = true;
+    body["external_data"] = json!(true);
+    builder(&f, false)
+        .and(body_json(body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"run_id": "flagged"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(runner.start(req).await.unwrap().as_str(), "flagged");
+    // Without the flag the body has no `external_data` key at all (the
+    // recorded body has none).
+    let (req2, body2, _dir2) = start_request(&f, "smoke-own");
+    assert!(!req2.external_data);
+    assert!(body2.get("external_data").is_none());
+    builder(&f, false)
+        .and(body_json(body2))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"run_id": "plain"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(runner.start(req2).await.unwrap().as_str(), "plain");
+}
+
+#[tokio::test]
+async fn the_detail_reports_the_flag_only_when_it_carries_it() {
+    // The recorded flagged run of a throwaway script-only playbook.
+    let server = MockServer::start().await;
+    let runner = connected(&server).await;
+    recorded(&fixture("run_external_data_live"), false)
+        .mount(&server)
+        .await;
+    let d = runner
+        .run(&RunId::new("s6-flag-probe-1794411151095"))
+        .await
+        .unwrap();
+    assert!(d.external_data);
+    assert_eq!(d.status, RunStatus::Succeeded);
+    // A beta.6 detail has no field: not an external-data run.
+    let body = fixture("run_succeeded")["response"]["body"].clone();
+    assert!(body.get("external_data").is_none());
+    assert!(!run_with(body.clone()).await.external_data);
+    let mut f = body;
+    f["external_data"] = json!(false);
+    assert!(!run_with(f).await.external_data);
+}

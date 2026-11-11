@@ -1,0 +1,59 @@
+# Agent A, fast variant (change `judges-path-and-submission`, design 5,
+# spec `repo-audit`): the attested tier without any agent. Every step is a
+# Nearbee command in a trusted script node: fetch takes the snapshot,
+# review packs it and makes one signed call to the listing's direct model
+# on NEAR AI Cloud (the `direct_models` param Nearbee sets from the
+# generation's frozen list), finish checks every citation and writes the
+# deliverable with the signed evidence.
+#
+# The brief, the feedback and every repository file are untrusted data:
+# they reach the model only as labelled data blocks, never as
+# instructions. No default profile: a default profile is a usable
+# profile reference and would refuse the attested listing.
+# `trial_candidates` is deliberately absent: publishing refuses a source
+# playbook that sets it to anything but `off`.
+schema: 2
+id: repo-audit
+name: "Nearbee repository audit (fast)"
+description: >-
+  Takes a snapshot of the one public GitHub repository the brief names,
+  reviews it in one signed call to a NEAR AI Cloud TEE model, checks every
+  citation against the snapshot, and writes the Markdown deliverable with
+  the findings JSON embedded, the response signature and the Nearbee
+  result manifest.
+version: 1.0.0
+params:
+  - { name: brief, type: text, label: "The buyer's brief (untrusted)", default: "Audit https://github.com/itechmeat/nearbee for problems.", untrusted: true }
+  - { name: feedback, type: text, label: "The buyer's change request on a rework (untrusted, empty otherwise)", default: "", untrusted: true }
+  - { name: inputs, type: text, label: "JSON list of the attached files, paths relative to the worktree (untrusted)", default: "[]", untrusted: true }
+  - { name: hire_id, type: text, label: "Market hire id", search: true }
+  - { name: execution_id, type: text, label: "Nearbee execution id", search: true }
+  - { name: direct_models, type: text, label: "Models Nearbee commands may call (set by Nearbee)", default: "[]" }
+nodes:
+  - { id: start, type: start }
+  - id: fetch
+    type: script
+    title: Take the repository snapshot
+    expected_duration: 1m
+    script: scripts/fetch.sh
+    runner: sh
+  - id: review
+    type: script
+    title: Review the snapshot in one signed call
+    # The signed call is bounded by 360 s per invocation; apb must not cut
+    # the node earlier.
+    expected_duration: 6m
+    script: scripts/review.sh
+    runner: sh
+  - id: finish
+    type: script
+    title: Check the citations and write the deliverable
+    expected_duration: 30s
+    script: scripts/finish.sh
+    runner: sh
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: fetch }
+  - { from: fetch, to: review }
+  - { from: review, to: finish }
+  - { from: finish, to: done }

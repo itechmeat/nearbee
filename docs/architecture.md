@@ -43,18 +43,27 @@ is files under `.nearbee/` (one durable journal per hire) and the market itself.
 | `market/` | `Market` interface and its one implementation `NearAgentMarket`: REST client with retries, `clientRequestId` on sends, file upload, assignments in every status with paging | fetch |
 | `runner/` | `Runner` interface and its implementation `ApbRunner` (`crates/nearbee-apb`): REST client to Nearbee's own apb instance pinned to one workspace, run start with params, worktree and budget, run lookup by the `hire_id` and `execution_id` search fields with completeness, polling, `decide`; since S4 `inspect` and `inspect_source` (the execution facts, `inspect.rs`), the per-attempt models of a run (`attempt_models`), materialisation with the listing's profile; `run_params` reads a script node's run params from `APB_RUN_DIR` | fetch, child process |
 | `cloud/` (S4) | `CloudAttestor` (`crates/nearbee-cloud`): the NEAR AI Cloud attestation report client behind `Attestor` (no redirects, 2 MiB cap, two attempts within 20 s, the key never in an error) | fetch |
-| `cli/audit` (S4) | `nearbee audit fetch` (the GitHub snapshot of the one repository the brief names) and `nearbee audit finish` (the citation check, `findings.json`, the Markdown deliverable, the manifest), run by the `repo-audit` playbook's script nodes in the run's worktree | fetch, the local filesystem |
+| `cli/audit` (S4, S6) | `nearbee audit fetch` (the GitHub snapshot of the one repository the brief names), since S6 `nearbee audit review` (the fast variant's model step: packs the snapshot, at most 768 KiB in a fixed priority order, and makes one signed call through `signed_call` to the run's direct model, state in `audit/signed/<execution_id>/`, coverage in `audit/review-coverage.json`) and `nearbee audit finish` (the citation check, `findings.json`, the Markdown deliverable, the manifest; with the signed evidence when the execution's signature exists), run by the `repo-audit` playbooks' script nodes in the run's worktree | fetch, the local filesystem |
 | `cloud/client` (S5) | `CloudClient` (`crates/nearbee-cloud/src/client.rs`): the model calls of Nearbee's own commands on `https://cloud-api.near.ai/v1` (exact-bytes completion, signature fetch, privacy classify, JSON completion); no proxy, no redirects, capped bodies | fetch |
 | `cli/signed_call`, `cli/digest` (S5) | `nearbee signed-call` (one exact-bytes completion with its `provider_tee` signature, state in its out directory) and `nearbee digest pages\|extract\|classify\|compose` (agent B), run by the `doc-digest` playbook's script nodes | fetch, child process (`pdfinfo`, `pdftoppm`, `magick` under `prlimit`), the local filesystem |
 | `core/signature` (S5) | the delivery recheck of a `tee_signature` manifest entry and the `Response signature` section with the Verification Center receipt link | none (pure) |
-| `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check`, `nearbee audit`, `nearbee replay` (fixture walkthrough) | all of the above |
+| `cli/replay` (S6) | `nearbee replay [--scenario <name>]... [--keep <dir>] [--verbose]`: five scripted hires (success, decline, redo, restart, cancellation) through the real `serve::round` against its own scripted `Market`, `Runner` and `Attestor` (`crates/nearbee/src/replay/`), rows shaped like the recorded market answers, the fast audit's outputs and the Cloud fixtures embedded; reads no config, credential or `.env`, opens no socket, starts no process; checks each scenario's journal end state, ordered market writes, run starts and receipt link; CI runs it | `core/serve` and the core it drives |
+| `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check` (since S6 with the apb version line), `nearbee audit`, `nearbee replay` | all of the above |
 | `config` | `nearbee.yaml` (committed example) + `.env` secrets | |
 
 Interfaces are small and typed; the core never imports `market/`, `runner/`
 or `cloud/` implementations: it sees only `Market`, `Runner` and `Attestor`. The core does no network I/O; it may run narrow synchronous
 file checks of its own (the result manifest validation reads the finished
 run's `out/` with bounded reads and returns the checked bytes). Tests use in-memory fakes of both interfaces; a recorded set
-of real market responses drives the `replay` walkthrough without credentials.
+of real market responses (`crates/nearbee-market/tests/replay.rs`) checks the
+market client. The judges' walkthrough `nearbee replay` drives the real
+round with scripted implementations of the three seams instead (S6 design 1):
+it proves the state machine and the deliverable path, not the live market.
+
+Journal records are stamped by the clock the writer was opened with: serve
+passes its round clock (`nearbee_core::clock::Clock`), every other writer
+the real clock (S6), so an injected clock drives deadlines and intent
+staleness in tests and in the replay.
 
 ## Flows
 

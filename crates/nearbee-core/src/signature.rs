@@ -73,7 +73,7 @@ pub enum Mismatch {
     /// An entry is malformed or does not bind the stored bytes.
     #[error("the response signature does not check: {0}")]
     Mismatch(String),
-    /// The listing signs its digest call and the run has no valid entry.
+    /// The listing signs a model call and the run has no valid entry.
     #[error("the response signature is missing: {0}")]
     Missing(String),
 }
@@ -171,7 +171,7 @@ pub fn recheck(
         [] if signed_models.is_empty() => return Ok(None),
         [] => {
             return Err(Mismatch::Missing(
-                "the listing signs its digest call and the run's manifest has no tee_signature entry"
+                "the listing signs a model call and the run's manifest has no tee_signature entry"
                     .into(),
             ));
         }
@@ -284,7 +284,7 @@ pub fn receipt_link(s: &SignatureFile) -> String {
 fn section(s: &SignatureFile) -> String {
     format!(
         "## Response signature\n\n\
-         The digest call ran on the NEAR AI Cloud model `{model}` in a model TEE, which signed its response (`provider_tee`, ECDSA).\n\n\
+         The signed call ran on the NEAR AI Cloud model `{model}` in a model TEE, which signed its response (`provider_tee`, ECDSA).\n\n\
          - Completion id: `{id}`\n\
          - Model: `{model}`\n\
          - Signing address: `{address}`\n\
