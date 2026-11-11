@@ -1,0 +1,160 @@
+{
+  "body": {
+    "gateway_attestation": {
+      "event_log": "[{\"imr\":0,\"event_type\":2147483659,\"digest\":\"2e070cda358b5aa00f27cca25c47381bb564f4be3a84d059805a73cbbde764ed8341f7e09915...(trimmed)",
+      "info": {
+        "app_cert": "-----BEGIN CERTIFICATE-----\nMIIa/jCCGqSgAwIBAgIUbicIwIESS8/vQeUCSgSTXOhrSHwwCgYIKoZIzj0EAwIw\nKTEPMA0GA1UECgwGRHN0YWNrMRY...(trimmed)",
+        "app_id": "f550fdfb4eb8ad787c1bcd423f091cbb4a4431ae",
+        "app_name": "dstack-0.5.12",
+        "compose_hash": "73dbb78cccfdfd6919aa4058de67ae0375d6f6c6f38eedfa78c609761c2d6db6",
+        "device_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "instance_id": "f6ed893434a19d966ba932f318554f4517a01e1b",
+        "key_provider_info": "{\"name\":\"kms\",\"id\":\"3059301306072a8648ce3d020106082a8648ce3d03010703420004394aaed2c745e6a457cb835f7f47423f57ff3ead71b92a...(trimmed)",
+        "mr_aggregated": "68a88d33ab6b20e02533549921a1e80377fd95d8378fa98400a4e2d4017dfb3a",
+        "os_image_hash": "8db40cb23008d6213668b5816702d100b37b859a8a5bfd18d938ae3a1b3715bd",
+        "tcb_info": {
+          "app_compose": "{\"manifest_version\":2,\"name\":\"dstack-0.5.12\",\"runner\":\"docker-compose\",\"docker_compose_file\":\"# Docker Compose configura...(trimmed)",
+          "compose_hash": "73dbb78cccfdfd6919aa4058de67ae0375d6f6c6f38eedfa78c609761c2d6db6",
+          "device_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "event_log": [
+            {
+              "digest": "2e070cda358b5aa00f27cca25c47381bb564f4be3a84d059805a73cbbde764ed8341f7e09915b5e7b370f9c08a743fbd",
+              "event": "",
+              "event_payload": "095464785461626c65000100000000000000af96bb93f2b9b84e9462e0ba745642360090800000000000",
+              "event_type": 2147483659,
+              "imr": 0
+            },
+            {
+              "digest": "344bc51c980ba621aaa00da3ed7436f7d6e549197dfe699515dfa2c6583d95e6412af21c097d473155875ffd561d6790",
+              "event": "",
+              "event_payload": "2946762858585858585858582d585858582d585858582d585858582d58585858585858585858585829000000c0ff000000000040080000000000",
+              "event_type": 2147483658,
+              "imr": 0
+            }
+          ],
+          "mrtd": "7fe60787222bd394cb516abca2435f22f035ab2cc9c0a4b4b3b148e46297f3d931a237b72f359052c6e657d8c1409173",
+          "os_image_hash": "8db40cb23008d6213668b5816702d100b37b859a8a5bfd18d938ae3a1b3715bd",
+          "rtmr0": "d090162bff4b1d1dc74dc59dc548838efc4b811b173da8536efa8e2a9c045da70ee092301293ad90afebee448bcd0211",
+          "rtmr1": "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
+          "rtmr2": "764489f277a8540189761e72b4238ba36d4d647e11bd958d8ab5522af2a4867b0ff63e06b0c4967f1857236244040a5d",
+          "rtmr3": "deae3273c5f087fa15f110e18aa1271e1a9e2241da12111dfc21d58cac41faac96a2e342b9b5d4cb9417e1a1261b20be"
+        },
+        "vm_config": "{\"os_image_hash\":\"8db40cb23008d6213668b5816702d100b37b859a8a5bfd18d938ae3a1b3715bd\",\"cpu_count\":4,\"memory_size\":85899345...(trimmed)"
+      },
+      "intel_quote": "040002008100000000000000939a7233f79c4ca9940a0db3957f060730f525e4ad5a007feff2f0a1ed5869f700000000090308000000000000000000...(trimmed)",
+      "report_data": "b98a789cdc4817275f5155593ba73ef2a957e7790000000000000000000000003aaff5387ea906c2b46e4e395d45f817d5ab084f06307a734fd5644d...(trimmed)",
+      "request_nonce": "3aaff5387ea906c2b46e4e395d45f817d5ab084f06307a734fd5644d290d1862",
+      "signing_address": "0xb98a789cdc4817275f5155593ba73ef2a957e779",
+      "signing_algo": "ecdsa"
+    },
+    "model_attestations": [
+      {
+        "compose_manager_attestation": {
+          "actions": [
+            {
+              "action": "compose_manager_started",
+              "container": "compose-manager",
+              "image": "nearaidev/compose-manager@sha256:6e035c8fb99c1d31f41760d25af178683a658cca4afd73cd0d366fbb5bf884be",
+              "timestamp": "2026-09-09T02:14:50.829079556+00:00"
+            },
+            {
+              "action": "compose_up",
+              "commit": "01356c5dedfec944058ebfa9dc935a82b1d1e754",
+              "file": "prod/GLM-5.3-Flash-SGL-TP4.yaml",
+              "file_sha256": "a7549a898ed0fc641861b5dad103b70cd38aca286f700540a8c4a9fa8415e346",
+              "tag": "v0.0.403",
+              "timestamp": "2026-09-09T02:24:56.004341137+00:00"
+            }
+          ],
+          "actions_hash": "44b6ac07361765088d5754f734c2dab257fbe70b5216194b156b7d0af861f969",
+          "event_log": "[{\"imr\":0,\"event_type\":2147483659,\"digest\":\"60a36090e82db2aa82a7abb76029b9ace69e9f0811b7029ff25a26a2e8b91c182696df92674a...(trimmed)",
+          "nonce": "3aaff5387ea906c2b46e4e395d45f817d5ab084f06307a734fd5644d290d1862",
+          "nonce_source": "client",
+          "quote": "040002008100000000000000939a7233f79c4ca9940a0db3957f0607fbabcd45403de16c79e2a2440aa80e34000000000b0104000000000000000000...(trimmed)",
+          "report_data": "44b6ac07361765088d5754f734c2dab257fbe70b5216194b156b7d0af861f9693aaff5387ea906c2b46e4e395d45f817d5ab084f06307a734fd5644d...(trimmed)",
+          "vm_config": "{\"os_image_hash\":\"91fd5d69ccee3e5ea4f2aeb8c9b632c4358c4ecfc29ba1aa6fb1e402af209829\",\"cpu_count\":64,\"memory_size\":2199023...(trimmed)"
+        },
+        "event_log": [
+          {
+            "digest": "60a36090e82db2aa82a7abb76029b9ace69e9f0811b7029ff25a26a2e8b91c182696df92674ab571c42093383e1fcc71",
+            "event": "",
+            "event_payload": "",
+            "event_type": 2147483659,
+            "imr": 0
+          },
+          {
+            "digest": "344bc51c980ba621aaa00da3ed7436f7d6e549197dfe699515dfa2c6583d95e6412af21c097d473155875ffd561d6790",
+            "event": "",
+            "event_payload": "",
+            "event_type": 2147483658,
+            "imr": 0
+          }
+        ],
+        "info": {
+          "app_cert": "-----BEGIN CERTIFICATE-----\nMIIbCTCCGq+gAwIBAgIUexb8vtMf/65mgFRxIqtTks15zBEwCgYIKoZIzj0EAwIw\nKTEPMA0GA1UECgwGRHN0YWNrMRY...(trimmed)",
+          "app_id": "2c0a0c96cb6dbd659bf1446e2f3fce58172ff91b",
+          "app_name": "dstack-nvidia-0.5.11",
+          "compose_hash": "448683dd83e50727b9c5f6cdc84bd9d93fcf2c888001a85b1ba32f76b3612e3e",
+          "device_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "instance_id": "fccd496ae28c19105777793efa98fbbd726219cc",
+          "key_provider_info": "{\"name\":\"kms\",\"id\":\"3059301306072a8648ce3d020106082a8648ce3d03010703420004394aaed2c745e6a457cb835f7f47423f57ff3ead71b92a...(trimmed)",
+          "mr_aggregated": "2e8ba0ad40c110920ef2e7eb36a50ade456f762e4b4732e7f699e176ea997508",
+          "os_image_hash": "91fd5d69ccee3e5ea4f2aeb8c9b632c4358c4ecfc29ba1aa6fb1e402af209829",
+          "tcb_info": {
+            "app_compose": "{\n    \"manifest_version\": 2,\n    \"name\": \"dstack-nvidia-0.5.11\",\n    \"runner\": \"docker-compose\",\n    \"docker_compose_fil...(trimmed)",
+            "compose_hash": "448683dd83e50727b9c5f6cdc84bd9d93fcf2c888001a85b1ba32f76b3612e3e",
+            "device_id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "event_log": [
+              {
+                "digest": "60a36090e82db2aa82a7abb76029b9ace69e9f0811b7029ff25a26a2e8b91c182696df92674ab571c42093383e1fcc71",
+                "event": "",
+                "event_payload": "095464785461626c65000100000000000000af96bb93f2b9b84e9462e0ba745642360090800000000000",
+                "event_type": 2147483659,
+                "imr": 0
+              },
+              {
+                "digest": "344bc51c980ba621aaa00da3ed7436f7d6e549197dfe699515dfa2c6583d95e6412af21c097d473155875ffd561d6790",
+                "event": "",
+                "event_payload": "2946762858585858585858582d585858582d585858582d585858582d58585858585858585858585829000000c0ff000000000040080000000000",
+                "event_type": 2147483658,
+                "imr": 0
+              }
+            ],
+            "mrtd": "df4d77c857de652bd0fafa343a2026b51071ee03773d076d283abf1a7d36ff91ffa279ee4a617ac664f7e2a2c8d5891b",
+            "os_image_hash": "91fd5d69ccee3e5ea4f2aeb8c9b632c4358c4ecfc29ba1aa6fb1e402af209829",
+            "rtmr0": "bc122d143ab768565ba5c3774ff5f03a63c89a4df7c1f5ea38d3bd173409d14f8cbdcc36d40e703cccb996a9d9687590",
+            "rtmr1": "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
+            "rtmr2": "bd67ab7554dc27ab03a077bc1447a1a67d0624ff547c4c809a8626f12d6a89712f8ec60e781e99b98208574065d21a71",
+            "rtmr3": "f6d954c03aac32bd87d5d64994c84c935dd967fcf5623b42a6790ca28a5b0bfd5aabf557571adf7fba1c8e9a67109f13"
+          },
+          "vm_config": "{\"os_image_hash\":\"91fd5d69ccee3e5ea4f2aeb8c9b632c4358c4ecfc29ba1aa6fb1e402af209829\",\"cpu_count\":64,\"memory_size\":2199023...(trimmed)"
+        },
+        "intel_quote": "040002008100000000000000939a7233f79c4ca9940a0db3957f0607fbabcd45403de16c79e2a2440aa80e34000000000b0104000000000000000000...(trimmed)",
+        "model_name": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        "nvidia_payload": "{\"nonce\":\"3aaff5387ea906c2b46e4e395d45f817d5ab084f06307a734fd5644d290d1862\",\"evidence_list\":[{\"arch\":\"HOPPER\",\"certifica...(trimmed)",
+        "ohttp_attestation": {
+          "key_config": "0100200a9ff8deadcda1dba447ea241b7c15487d096cf7d1afdee7bb3446c857929c2400080001000100010003",
+          "signature": "abe142fdfd06ba49ac117c3bea6355b4cf1e64cedc717e11985202516155693ae4e843919c0342dbe72169e8498426066d622e374ad28addb430d28e...(trimmed)",
+          "signing_algo": "ed25519",
+          "signing_key": "236f5a6b91dd47dc3b7b36e43d4eb531a042ffb8f8fbf3a1555b78cef4fdda4c"
+        },
+        "ohttp_key_config": "0100200a9ff8deadcda1dba447ea241b7c15487d096cf7d1afdee7bb3446c857929c2400080001000100010003",
+        "request_nonce": "3aaff5387ea906c2b46e4e395d45f817d5ab084f06307a734fd5644d290d1862",
+        "signing_address": "0xfe0071895500a9755c18044948ab4f4e1a7f337e",
+        "signing_algo": "ecdsa",
+        "signing_public_key": "0680b097f60f157c2f32904e5e194b905420182335a4e85a0b5270ee7744037fbbf39fd0903c941cb0f2b909d131682056db4b5529b83b048d1e04e7...(trimmed)"
+      }
+    ],
+    "ohttp_attestation": {
+      "key_config": "010020e4e354364111f2295e2d2ed97ce1103c9fdcb261459ec626d9bd8a6e15f0d11600080001000100010003",
+      "signature": "823086655feb1660e7975d8dfdbfd728af36cc7776f69f7b5f713753306d5a8a96b1bc49298800ef36c06ccccfeed13e1fbc4b48233496af3a3a514b...(trimmed)",
+      "signing_algo": "ed25519",
+      "signing_key": "40599fb284f43953bb356b09080fd803c960fc10285ad90eca462ca711ad4acb"
+    },
+    "ohttp_key_config": "010020e4e354364111f2295e2d2ed97ce1103c9fdcb261459ec626d9bd8a6e15f0d11600080001000100010003"
+  },
+  "note": "long strings trimmed to 120 characters and lists to 2 items; the live body was 304174 bytes",
+  "recorded": "2026-11-11",
+  "request": "GET /v1/attestation/report?model=deepseek-ai%2FDeepSeek-V4.1-Flash-1017&signing_algo=ecdsa&nonce=<64 hex>",
+  "status": 200
+}

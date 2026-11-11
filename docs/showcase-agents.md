@@ -45,19 +45,32 @@ The intake check `github_repo` declines a brief that names no repository or
 several before any market start (the scope check is skipped while the apb
 project's decisions are off, `docs/privacy.md`).
 
-- Variants (one source playbook, materialised per listing with the
-  listing's profile, `playbooks/repo-audit/listing.*.yaml`):
-  `repo-audit-fast` (attested tier, profile `nearbee-near`: DeepSeek V4.1
-  Flash first, Qwen3.8-27B as fallback, NEAR AI Cloud TEE models; price
-  0.50) and `repo-audit-premium` (plain tier, profile `nearbee-own-premium`:
-  Claude Opus on the owner's subscription; price 2.00). Both have a 24 hour
-  SLA.
-- What the attested variant shows: which models apb asked for per node, and
-  endpoint attestation reports for those models fetched before and after
-  the run, with Verification Center links. It does not prove that the
-  code never left a TEE: the snapshot is on the owner's machine, and the
-  reports are collected, not verified, and not bound to this job's
-  responses (`docs/privacy.md`).
+- Variants (`playbooks/repo-audit/listing.*.yaml`): `repo-audit-premium`
+  (plain tier, `playbook.yaml` above with profile `nearbee-own-premium`:
+  Claude Opus on the owner's subscription; price 2.00) and, since S6,
+  `repo-audit-fast` (attested tier, its own `playbook.fast.yaml`, no
+  agent, no profile; price 0.50). Both have a 24 hour SLA. Until S6 the
+  fast variant ran the `audit` agent step on OpenCode with NEAR AI Cloud
+  models; the attested tier now refuses every agent (D-027).
+- The fast variant's model step is `review` (script, `nearbee audit
+  review`): it packs the snapshot's files (only those still matching their
+  recorded SHA-256 and valid UTF-8, in a fixed priority order, numbered
+  lines, at most 768 KiB with every file that does not fit omitted and
+  listed as not reviewed, generated, vendored and lock files last; a pack
+  with no source-like file fails with `nothing_packed`) as data under a
+  system message with the same rules as the agent prompt, and makes one
+  signed call to `deepseek-ai/DeepSeek-V4.1-Flash-1017` on NEAR AI Cloud
+  (the listing's one direct and signed model). The answer becomes
+  `audit/candidates.json` (at most 40 findings; anything else fails the
+  step with `review_unparsed`), and `finish` checks every citation as for
+  the premium variant and adds the signed evidence to the manifest.
+- What the attested variant shows: endpoint attestation reports for its
+  model fetched before and after the run, with Verification Center links,
+  and the response signature of the review call with a receipt link the
+  Verification Center checks. It does not prove that the code never left
+  a TEE: the snapshot is on the owner's machine, the reports are collected,
+  not verified, and the signature binds the response to a model TEE, not
+  the deliverable to the response (`docs/privacy.md`).
 - Why: dev_tools is the second largest category and apb's home turf.
 
 ## B. `doc-digest-private` (data, privacy track, built in S5)

@@ -128,6 +128,9 @@ pub struct StartRequest {
     /// The generation's frozen direct models (design 3), sent as the
     /// `direct_models` param when not empty.
     pub direct_models: Vec<String>,
+    /// Start the run as an apb external-data run (S6 design 3): serve sets
+    /// it on every market run; callers that carry no buyer data do not.
+    pub external_data: bool,
 }
 
 /// The model identity of one attempt, as apb reported it (design 7). A
@@ -278,6 +281,9 @@ pub struct RunDetail {
     pub budget_paused: bool,
     /// Per-attempt model records; empty when the engine gave none.
     pub attempts: Vec<AttemptModel>,
+    /// The run reports itself an external-data run; false when the detail
+    /// has no such field (S6 design 3.4).
+    pub external_data: bool,
 }
 
 /// A run lookup by search field.
@@ -384,6 +390,10 @@ pub trait Runner: Send + Sync {
         id: &PlaybookId,
     ) -> impl Future<Output = Result<Estimate, RunnerError>> + Send;
     fn start(&self, req: StartRequest) -> impl Future<Output = Result<RunId, RunnerError>> + Send;
+    /// Whether the engine takes external-data runs (S6 design 3.2): one
+    /// health read, no retry beyond the read policy. The version knowledge
+    /// stays in the adapter; the core sees a bool.
+    fn external_data_supported(&self) -> impl Future<Output = Result<bool, RunnerError>> + Send;
     fn run(&self, id: &RunId) -> impl Future<Output = Result<RunDetail, RunnerError>> + Send;
     /// Stops a running run (apb's pause: a predictive stop before agent
     /// nodes). Best effort; serve ignores a failure and reports the hire.

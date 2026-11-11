@@ -1061,6 +1061,7 @@ dependencies = [
  "nearbee-core",
  "reqwest",
  "rust_decimal",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

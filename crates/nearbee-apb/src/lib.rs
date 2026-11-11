@@ -17,6 +17,46 @@ mod inspect;
 pub mod install;
 pub mod run_params;
 
+/// The first apb release whose runs take the external-data flag on the
+/// start and report it on the detail (S6 design 3).
+pub const EXTERNAL_DATA_MIN: &str = "1.0.0-beta.7";
+
+/// The apb releases whose source was read and found to have no context
+/// compaction (`docs/apb.md`); any other version stays unknown until it is
+/// read too (S6 design 3.3).
+const COMPACTION_OFF: [&str; 2] = ["1.0.0-beta.6", "1.0.0-beta.7"];
+
+/// Whether apb compacts context, by the instance version: known off only
+/// for the releases that were read, unknown for any other. Versions are
+/// compared parsed, ignoring build metadata (`1.0.0-beta.7+abc` is the
+/// read `1.0.0-beta.7`); a string that is not a version is unknown.
+pub fn compaction_for_version(version: Option<&str>) -> nearbee_core::tiers::Known<bool> {
+    use nearbee_core::tiers::Known;
+    let Some(v) = version else {
+        return Known::Unknown("the health answer has no version".into());
+    };
+    let read = semver::Version::parse(v).is_ok_and(|parsed| {
+        COMPACTION_OFF.iter().any(|off| {
+            let off = semver::Version::parse(off).expect("a read release is a version");
+            parsed.cmp_precedence(&off).is_eq()
+        })
+    });
+    if read {
+        Known::Yes(false)
+    } else {
+        Known::Unknown(format!("apb version {v}"))
+    }
+}
+
+/// Whether a health `version` string takes external-data runs, in
+/// semantic version order with prereleases (`1.0.0-beta.10` is above
+/// `1.0.0-beta.7`). `Err` holds why the string is not a version.
+pub fn version_supports_external_data(version: &str) -> Result<bool, String> {
+    let v = semver::Version::parse(version).map_err(|e| e.to_string())?;
+    let min = semver::Version::parse(EXTERNAL_DATA_MIN).expect("the minimum is a version");
+    Ok(v >= min)
+}
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -280,6 +320,22 @@ impl ApbClient {
         })
     }
 
+    /// The instance version from `GET /api/health`, with whether it takes
+    /// external-data runs; a missing or unparsable version is a protocol
+    /// error naming the field (spec `apb-runner`, Instance version).
+    pub async fn instance_version(&self) -> Result<(String, bool), RunnerError> {
+        let v = self.get("/api/health", &[], Kind::Read).await?;
+        let Some(version) = str_field(&v, "version") else {
+            return Err(self.protocol("GET /api/health: the answer has no version"));
+        };
+        let supported = version_supports_external_data(&version).map_err(|e| {
+            self.protocol(&format!(
+                "GET /api/health: version `{version}` is not a semantic version: {e}"
+            ))
+        })?;
+        Ok((version, supported))
+    }
+
     /// `GET /api/projects`.
     pub async fn projects(&self) -> Result<Vec<Project>, RunnerError> {
         let v = self.get("/api/projects", &[], Kind::Read).await?;
@@ -489,6 +545,12 @@ impl ApbRunner {
         if let Some(from) = &req.continued_from {
             body.insert("continued_from".into(), Value::from(from.as_str()));
         }
+        // An external-data run (apb `docs/EXTERNAL-DATA.md`): the key is
+        // sent only when set, so an older apb never sees it from callers
+        // that carry no buyer data (S6 design 3.4).
+        if req.external_data {
+            body.insert("external_data".into(), Value::Bool(true));
+        }
         Ok(Value::Object(body))
     }
 }
@@ -651,6 +713,7 @@ pub fn parse_run_detail(v: &Value) -> Result<RunDetail, String> {
         usage: usage.unwrap_or_default(),
         budget_paused,
         attempts: parse_attempts(v),
+        external_data: v.get("external_data").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -797,6 +860,10 @@ impl Runner for ApbRunner {
             )));
         }
         Err(refused(status, &text, |s| self.client.redact(s)))
+    }
+
+    async fn external_data_supported(&self) -> Result<bool, RunnerError> {
+        Ok(self.client.instance_version().await?.1)
     }
 
     async fn run(&self, id: &RunId) -> Result<RunDetail, RunnerError> {

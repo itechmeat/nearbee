@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "findings": [
+    {
+      "severity": "medium",
+      "title": "Webhook signature compared with a plain string comparison",
+      "file": "src/webhook.rs",
+      "line_start": 12,
+      "line_end": 12,
+      "excerpt": "if header == expected {",
+      "detail": "The signature check returns as soon as one byte differs, so the time it takes reveals how much of a forged signature is right.",
+      "fix": "Compare the two values in constant time, for example with the subtle crate."
+    }
+  ]
+}

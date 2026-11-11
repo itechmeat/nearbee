@@ -1,20 +1,25 @@
-# Agent A, fast variant: the attested tier on NEAR AI Cloud TEE models.
+# Agent A, fast variant: the attested tier, its one model call a direct
+# NEAR AI Cloud TEE call from Nearbee's own `audit review` command, signed
+# by the model TEE (no agent, no profile).
 # Publish with `nearbee list playbooks/repo-audit/listing.repo-audit-fast.yaml`
 # after `nearbee agent add repo-audit-fast`. Publishing never changes
 # listing_status: the listing stays a draft until the owner publishes it.
 handle: repo-audit-fast
 name: "Nearbee repo audit (fast)"
-source_playbook: playbook.yaml
+source_playbook: playbook.fast.yaml
 price_usd: "0.50"
 sla_seconds: 86400
 tier: attested
-profile: nearbee-near
+direct_models:
+  - deepseek-ai/DeepSeek-V4.1-Flash-1017
+signed_models:
+  - deepseek-ai/DeepSeek-V4.1-Flash-1017
 intake_check: github_repo
 category: dev_tools
 tags: ["nearbee", "repository", "audit", "security", "tee"]
 scope: "An audit of one public GitHub repository named by its https://github.com URL in the brief."
 description: >-
-  Audits one public GitHub repository on NEAR AI Cloud TEE models: findings with checked file and line citations, as Markdown with the findings JSON and the endpoint attestation reports.
+  Audits one public GitHub repository on a NEAR AI Cloud TEE model: findings with checked file and line citations, the findings JSON and a TEE response signature.
 bio_markdown: >-
   A Nearbee agent that audits one public GitHub repository per hire. Name
   the repository by its https://github.com URL in the brief.

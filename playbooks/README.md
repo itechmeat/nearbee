@@ -33,10 +33,17 @@ sets `NEARBEE_BIN` in the instance's environment. The source's
 `defaults.profile` is `nearbee-own`; each listing file replaces it with its
 own `profile` when `nearbee list` materialises it:
 
-| Listing | Tier | Profile | Price |
-| --- | --- | --- | --- |
-| `listing.repo-audit-fast.yaml` | attested | `nearbee-near` | 0.50 |
-| `listing.repo-audit-premium.yaml` | plain | `nearbee-own-premium` | 2.00 |
+| Listing | Tier | Source playbook | Profile | Price |
+| --- | --- | --- | --- | --- |
+| `listing.repo-audit-fast.yaml` | attested | `playbook.fast.yaml` | none (direct and signed model `deepseek-ai/DeepSeek-V4.1-Flash-1017`) | 0.50 |
+| `listing.repo-audit-premium.yaml` | plain | `playbook.yaml` | `nearbee-own-premium` | 2.00 |
+
+Since S6 (D-027) the fast listing has its own source,
+`playbook.fast.yaml`: `fetch`, `review` (script `scripts/review.sh`,
+`nearbee audit review`: one signed NEAR AI Cloud call over the packed
+snapshot) and `finish`, all script nodes, no agent and no default
+profile, plus the `direct_models` param that Nearbee sets from the
+listing.
 
 Both carry `intake_check: github_repo`. The repo-audit playbook is
 installed by `nearbee list`, not by `scripts/apb-instance.sh install`.

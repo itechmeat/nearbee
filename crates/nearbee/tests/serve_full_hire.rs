@@ -131,9 +131,13 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         })))
         .mount(&apb)
         .await;
+    // Every market run is an external-data run (S6 design 3.5).
     Mock::given(method("POST"))
         .and(path(format!("/api/playbooks/{HANDLE}/run")))
         .and(query_param("workspace", WS))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"external_data": true}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"run_id": run_id})))
         .expect(1)
         .mount(&apb)
@@ -156,7 +160,7 @@ async fn one_full_hire_is_taken_run_and_submitted() {
     // version.
     let running = json!({
         "run_id": run_id,
-        "run_status": "running",
+        "external_data": true,        "run_status": "running",
         "playbook": HANDLE,
         "version": "1.0.0",
     });
@@ -170,7 +174,7 @@ async fn one_full_hire_is_taken_run_and_submitted() {
         .and(path(format!("/api/runs/{run_id}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "run_id": run_id,
-            "run_status": "succeeded",
+            "external_data": true,            "run_status": "succeeded",
             "playbook": HANDLE,
             "version": "1.0.0",
         })))
@@ -400,7 +404,7 @@ async fn mount_inspection(apb: &MockServer, ws: &Path, dir: &Path) -> std::path:
         .and(path("/api/health"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(fixture("health_live")["response"]["body"].clone()),
+                .set_body_json(fixture("health_beta7_live")["response"]["body"].clone()),
         )
         .mount(apb)
         .await;
@@ -567,7 +571,7 @@ async fn a_republish_during_serve_is_taken_for_the_next_hire_without_a_restart()
         .and(path(format!("/api/runs/{run_id}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "run_id": run_id,
-            "run_status": "succeeded",
+            "external_data": true,            "run_status": "succeeded",
             "playbook": HANDLE,
             "version": "2.0.0",
         })))
@@ -818,7 +822,7 @@ async fn with_every_read_failing_an_active_run_is_still_stopped_at_its_deadline(
         .and(path(format!("/api/runs/{run_id}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "run_id": run_id,
-            "run_status": "running",
+            "external_data": true,            "run_status": "running",
             "playbook": HANDLE,
             "version": "1.0.0",
         })))
@@ -842,8 +846,12 @@ async fn with_every_read_failing_an_active_run_is_still_stopped_at_its_deadline(
         .await;
     // A hire with an active run whose recorded deadline is long past.
     {
-        let mut w =
-            journal::Writer::open(journal::journal_path(&state_dir, "hire-9"), "hire-9").unwrap();
+        let mut w = journal::Writer::open(
+            journal::journal_path(&state_dir, "hire-9"),
+            "hire-9",
+            nearbee_core::clock::Clock::real(),
+        )
+        .unwrap();
         w.set_generation(1);
         w.append(journal::Event::Received(journal::Received::from_brief(
             "brief",
@@ -977,7 +985,7 @@ async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
         .and(path(format!("/api/runs/{run_id}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "run_id": run_id,
-            "run_status": "running",
+            "external_data": true,            "run_status": "running",
             "playbook": HANDLE,
             "version": "1.0.0",
         })))
@@ -988,7 +996,7 @@ async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
         .and(path(format!("/api/runs/{run_id}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "run_id": run_id,
-            "run_status": "aborted",
+            "external_data": true,            "run_status": "aborted",
             "playbook": HANDLE,
             "version": "1.0.0",
         })))
@@ -1002,8 +1010,12 @@ async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
         .mount(&apb)
         .await;
     {
-        let mut w =
-            journal::Writer::open(journal::journal_path(&state_dir, "hire-11"), "hire-11").unwrap();
+        let mut w = journal::Writer::open(
+            journal::journal_path(&state_dir, "hire-11"),
+            "hire-11",
+            nearbee_core::clock::Clock::real(),
+        )
+        .unwrap();
         w.set_generation(1);
         w.append(journal::Event::Received(journal::Received::from_brief(
             "brief",

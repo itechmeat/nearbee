@@ -33,7 +33,7 @@ pub fn render(tier: Tier, facts: &ExecutionFacts, retention_days: u32) -> String
     out.push_str(&channels_section(facts));
     out.push_str(&run_place_section(tier));
     out.push_str(&market_keeps_section());
-    out.push_str(&retention_section(retention_days));
+    out.push_str(&retention_section(retention_days, facts));
     out
 }
 
@@ -331,11 +331,35 @@ fn market_keeps_section() -> String {
     out
 }
 
-fn retention_section(retention_days: u32) -> String {
+fn retention_section(retention_days: u32, facts: &ExecutionFacts) -> String {
     let mut out = String::from("### Local retention\n\n");
     out.push_str(&format!(
         "Nearbee deletes its own copies (the hire's worktree and its snapshots) {retention_days} days after the market reports acceptance; deletion is journaled. Not deleted by Nearbee: apb run directories, apb decision logs, executor caches.\n"
     ));
+    // Every market run is an apb external-data run (S6 design 3.8); the
+    // flag does not reach what an agent CLI keeps itself.
+    out.push_str(
+        "\nEvery run is an apb external-data run: apb keeps it out of what it learns from (corrections, memory, statistics, judge examples, discovery). ",
+    );
+    let mut agents: Vec<&str> = used_profiles(facts)
+        .into_iter()
+        .flat_map(|f| {
+            std::iter::once(f.executor.agent.as_str())
+                .chain(f.fallbacks.iter().map(|e| e.agent.as_str()))
+                .chain(f.tiers.iter().map(|(_, e)| e.agent.as_str()))
+        })
+        .collect();
+    agents.sort_unstable();
+    agents.dedup();
+    if agents.is_empty() {
+        out.push_str("No agent CLI runs, so no agent session files are kept.\n");
+    } else {
+        out.push_str("The flag does not reach what an agent CLI keeps itself");
+        if agents.contains(&"claude") {
+            out.push_str(": `claude` keeps its session files under the owner's home directory");
+        }
+        out.push_str(".\n");
+    }
     out
 }
 
@@ -449,6 +473,16 @@ mod tests {
         facts
     }
 
+    /// Attested facts that pass the S6 tier check: script nodes only, the
+    /// correct route, no profile (S6 design 4).
+    fn script_attested_facts() -> ExecutionFacts {
+        let mut facts = attested_facts();
+        facts.default_profile = None;
+        facts.profiles = vec![];
+        facts.nodes.push(node("review", "script"));
+        facts
+    }
+
     const QWEN_VL: &str = "Qwen/Qwen3-VL-30B-A3B-Instruct";
     const FILTER: &str = "openai/privacy-filter";
     const DS: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
@@ -520,14 +554,15 @@ mod tests {
     /// from direct models).
     #[test]
     fn the_drift_pass_adds_the_records_direct_models() {
-        let facts = digest_facts();
+        let facts = script_attested_facts()
+            .with_direct_models(&[QWEN_VL.into(), FILTER.into(), DS.into()], &[DS.into()]);
         let mut rec = record(Tier::Attested, &facts);
         rec.direct_models = facts.direct_models.clone();
         rec.signed_models = facts.signed_models.clone();
-        assert_eq!(drift(&rec, &attested_facts(), 7), None);
+        assert_eq!(drift(&rec, &script_attested_facts(), 7), None);
         // A record whose lists differ from the published facts drifts.
         rec.signed_models.clear();
-        assert!(drift(&rec, &attested_facts(), 7).is_some());
+        assert!(drift(&rec, &script_attested_facts(), 7).is_some());
     }
 
     fn record(tier: Tier, facts: &ExecutionFacts) -> ResolvedListing {
@@ -554,6 +589,23 @@ mod tests {
             signed_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
+    }
+
+    /// Every statement says runs are apb external-data runs and what the
+    /// flag does not reach: an agent CLI's own session files, named for
+    /// `claude`, and none for a listing without agents (S6 design 3.8).
+    #[test]
+    fn the_statement_names_external_data_runs_and_what_they_do_not_reach() {
+        let plain = render(Tier::Plain, &plain_premium_facts(), 7);
+        assert!(plain.contains("apb external-data run"), "{plain}");
+        assert!(
+            plain.contains("`claude` keeps its session files under the owner's home directory"),
+            "{plain}"
+        );
+        let attested = render(Tier::Attested, &script_attested_facts(), 7);
+        assert!(attested.contains("apb external-data run"), "{attested}");
+        assert!(attested.contains("No agent CLI runs"), "{attested}");
+        assert!(!attested.contains("session files under"), "{attested}");
     }
 
     /// Scenario "Plain listing": the statement names the `claude` agent,
@@ -726,7 +778,7 @@ mod tests {
     /// matching record reports `None`.
     #[test]
     fn drift_reports_every_mismatch_and_none_for_a_matching_record() {
-        let facts = attested_facts();
+        let facts = script_attested_facts();
         let good = record(Tier::Attested, &facts);
         assert_eq!(
             drift(&good, &facts, 7),
@@ -777,9 +829,7 @@ mod tests {
         // here, so the record keeps the old fingerprint while the facts
         // moved (the reverse order of the swap test).
         let mut moved = facts.clone();
-        if let Known::Yes(fact) = &mut moved.profiles[0].1 {
-            fact.fallbacks = vec![executor("opencode", TEE_A), executor("opencode", TEE_B)];
-        }
+        moved.nodes.push(node("check", "script"));
         let reason = drift(&good, &moved, 7).expect("changed facts drift");
         assert!(
             reason.contains("fingerprint"),

@@ -19,6 +19,7 @@ use nearbee_market::NearAgentMarket;
 pub mod audit;
 pub mod digest;
 pub mod publish;
+pub mod replay;
 pub mod signed_call;
 
 /// Exit code for an error that is not a finding (unreadable config,
@@ -81,6 +82,23 @@ pub enum Command {
         #[command(subcommand)]
         action: DigestAction,
     },
+    /// Walk five scripted hires through the real serve state machine,
+    /// with no account, no apb and no network.
+    Replay(ReplayArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ReplayArgs {
+    /// Run only this scenario (repeatable): success, decline, redo,
+    /// restart, cancellation.
+    #[arg(long = "scenario", value_name = "NAME")]
+    pub scenarios: Vec<String>,
+    /// Keep the state in this new or empty directory.
+    #[arg(long, value_name = "DIR")]
+    pub keep: Option<PathBuf>,
+    /// Name the journal events each step wrote.
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -110,6 +128,9 @@ pub enum AuditAction {
     /// Take a snapshot of the one public GitHub repository the run's
     /// brief names into `audit-snapshot/`.
     Fetch,
+    /// The fast variant's review: pack the snapshot and write
+    /// `audit/candidates.json` from one signed NEAR AI Cloud call.
+    Review,
     /// Check `audit/candidates.json` against the snapshot and write
     /// `out/findings.json`, `out/deliverable.md` and `out/result.json`.
     Finish,
@@ -278,10 +299,21 @@ pub async fn run(cli: Cli, env: &Env<'_>, out: &mut dyn Write) -> i32 {
             action: AuditAction::Fetch,
         } => audit_fetch(env, out).await,
         Command::Audit {
+            action: AuditAction::Review,
+        } => audit_review(env, out).await,
+        Command::Audit {
             action: AuditAction::Finish,
         } => audit_finish(env, out),
         Command::SignedCall(args) => signed_call_command(env, &args.request, &args.out, out).await,
         Command::Digest { action } => digest_command(env, action, out).await,
+        Command::Replay(args) => {
+            let opts = replay::Options {
+                scenarios: args.scenarios,
+                keep: args.keep.map(|k| env.cwd.join(k)),
+                verbose: args.verbose,
+            };
+            replay::run(&opts, out).await
+        }
     }
 }
 
@@ -462,10 +494,65 @@ pub async fn audit_fetch(env: &Env<'_>, out: &mut dyn Write) -> i32 {
     }
 }
 
-/// `nearbee audit finish` in the current directory.
+/// `nearbee audit review` in the current directory, against
+/// [`nearbee_cloud::PRODUCTION_BASE`]: the run's params come from
+/// `APB_RUN_DIR`, the key from `NEARAI_API_KEY`.
+pub async fn audit_review(env: &Env<'_>, out: &mut dyn Write) -> i32 {
+    let mut lines = Lines::new(out);
+    let result = async {
+        let params = script_params(env)?;
+        let key = cloud_key(env)?;
+        lines.secrets.push(key.clone());
+        let client = nearbee_cloud::CloudClient::new(nearbee_cloud::PRODUCTION_BASE, key.clone())?;
+        let attestor = nearbee_cloud::CloudAttestor::new(nearbee_cloud::PRODUCTION_BASE, key)?
+            .with_provider("near");
+        audit::review(
+            env.cwd,
+            &params,
+            &client,
+            &attestor,
+            &signed_call::Timing::default(),
+        )
+        .await
+    }
+    .await;
+    match result {
+        Ok(r) => {
+            lines.line(&format!(
+                "review done: {} candidate findings, {} files packed, {} omitted",
+                r.findings, r.packed, r.omitted
+            ));
+            0
+        }
+        Err(e) => {
+            lines.line(&format!("error: audit review: {e}"));
+            EXIT_ERROR
+        }
+    }
+}
+
+/// `nearbee audit finish` in the current directory; the execution id
+/// comes from the run's params when `APB_RUN_DIR` is set.
 pub fn audit_finish(env: &Env<'_>, out: &mut dyn Write) -> i32 {
     let mut lines = Lines::new(out);
-    match audit::finish(env.cwd) {
+    // Signed evidence is collected only for a run with direct models
+    // (the fast playbook); a premium run has none.
+    let (execution_id, direct_models) = match (env.var)("APB_RUN_DIR") {
+        None => (None, Vec::new()),
+        Some(_) => match script_params(env) {
+            Ok(p) => (
+                p.get("execution_id").cloned(),
+                p.get("direct_models")
+                    .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                    .unwrap_or_default(),
+            ),
+            Err(e) => {
+                lines.line(&format!("error: audit finish: {e}"));
+                return EXIT_ERROR;
+            }
+        },
+    };
+    match audit::finish(env.cwd, execution_id.as_deref(), &direct_models) {
         Ok(f) => {
             lines.line(&format!(
                 "deliverable written: {} findings location checked, {} rejected",
@@ -547,6 +634,28 @@ pub async fn config_check(file: Option<&Path>, env: &Env<'_>, out: &mut dyn Writ
         Err(e) => {
             failed = true;
             line("failed", format!("apb workspace: {e}"));
+        }
+    }
+    // Every market run is an external-data run (S6 design 3.7).
+    let min = nearbee_apb::EXTERNAL_DATA_MIN;
+    match client.instance_version().await {
+        Ok((v, true)) => line(
+            "ok",
+            format!("apb version {v} (external data runs supported)"),
+        ),
+        Ok((v, false)) => {
+            failed = true;
+            line(
+                "failed",
+                format!("apb version {v}: Nearbee needs {min} or newer"),
+            );
+        }
+        Err(e) => {
+            failed = true;
+            line(
+                "failed",
+                format!("apb version: {e}; Nearbee needs {min} or newer"),
+            );
         }
     }
     i32::from(failed)
@@ -1229,6 +1338,12 @@ impl Runner for RoundRunner {
                 detail: "apb cannot be reached this round".into(),
                 estimate: None,
             }),
+        }
+    }
+    async fn external_data_supported(&self) -> Result<bool, nearbee_core::runner::RunnerError> {
+        match self {
+            RoundRunner::Up(r) => r.external_data_supported().await,
+            RoundRunner::Down { .. } => Err(self.unavailable()),
         }
     }
     async fn run(

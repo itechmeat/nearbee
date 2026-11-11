@@ -22,6 +22,7 @@ tracing.workspace = true
 rust_decimal.workspace = true
 yaml_serde.workspace = true
 tempfile.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 h2.workspace = true

@@ -1,0 +1,546 @@
+{
+  "apb": "1.0.0-beta.7",
+  "request": {
+    "method": "GET",
+    "path": "/api/runs/s6-flag-probe-1794411151095",
+    "query": [
+      [
+        "workspace",
+        "ws-c0188762df734bf4a1f03f8db22f19d7"
+      ]
+    ],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "answer": null,
+      "children": [],
+      "driven_by": "driven by apb 1.0.0-beta.7",
+      "driver_alive": null,
+      "estimate": {
+        "comparable": {
+          "attempts_without_cost": 0,
+          "attempts_without_usage": 0,
+          "key_version": 2,
+          "runs": 0,
+          "runs_without_usage": 0,
+          "succeeded": 0,
+          "window": 50
+        },
+        "cost_usd": null,
+        "execution": "cli",
+        "nodes": [],
+        "note": "0 comparable runs: indicative only",
+        "playbook": "s6-flag-probe",
+        "time": {
+          "basis": "declared",
+          "spread": {
+            "high": 10000,
+            "kind": "single",
+            "low": 10000,
+            "n": 0,
+            "p50": 10000
+          }
+        },
+        "tokens": null,
+        "unestimated": [],
+        "unestimated_cost": [],
+        "unestimated_tokens": [],
+        "version": "1.0.0"
+      },
+      "events": [
+        {
+          "definition": "d0fd8a209eebd439a9b0ee0a1d03fddc598ec4f50396811d2aa93c35e7a61ed0",
+          "external_data": true,
+          "playbook": "s6-flag-probe",
+          "seq": 0,
+          "ts": 1794411151131,
+          "type": "run_started",
+          "version": "1.0.0"
+        },
+        {
+          "apb": "1.0.0-beta.7",
+          "digest": "sha256:d0978707d2083e01e62d860fc08636387f93d2121fb53563eab2cfcd8fa4da84",
+          "execution_root": "<home>/.local/share/nearbee/apb-workspace",
+          "origin": "project",
+          "seq": 1,
+          "ts": 1794411151131,
+          "type": "run_provenance"
+        },
+        {
+          "path": "<home>/.local/share/nearbee/apb-workspace/work/s6-flag-probe",
+          "seq": 2,
+          "source": "caller",
+          "ts": 1794411151137,
+          "type": "worktree_resolved"
+        },
+        {
+          "attempt": 1,
+          "node": "start",
+          "seq": 3,
+          "ts": 1794411151173,
+          "type": "node_started"
+        },
+        {
+          "artifacts": [],
+          "attempt": 1,
+          "node": "start",
+          "output": "",
+          "seq": 4,
+          "status": "succeeded",
+          "ts": 1794411151173,
+          "type": "node_finished"
+        },
+        {
+          "edges": [
+            "e:start>probe#1"
+          ],
+          "from": "start",
+          "seq": 5,
+          "to": "probe",
+          "ts": 1794411151184,
+          "type": "edge_traversed",
+          "uncounted": true
+        },
+        {
+          "attempt": 1,
+          "node": "probe",
+          "seq": 6,
+          "ts": 1794411151184,
+          "type": "node_started"
+        },
+        {
+          "artifacts": [],
+          "attempt": 1,
+          "node": "probe",
+          "output": "",
+          "seq": 7,
+          "status": "succeeded",
+          "ts": 1794411151243,
+          "type": "node_finished"
+        },
+        {
+          "edges": [
+            "e:probe>done#1"
+          ],
+          "from": "probe",
+          "seq": 8,
+          "to": "done",
+          "ts": 1794411151254,
+          "type": "edge_traversed",
+          "uncounted": true
+        },
+        {
+          "artifacts": [],
+          "attempt": 1,
+          "node": "done",
+          "output": "",
+          "seq": 9,
+          "status": "succeeded",
+          "ts": 1794411151254,
+          "type": "node_finished"
+        },
+        {
+          "outcome": "succeeded",
+          "seq": 10,
+          "ts": 1794411151255,
+          "type": "run_finished"
+        }
+      ],
+      "execution": "cli",
+      "execution_fallback": false,
+      "external_data": true,
+      "failure_reason": null,
+      "graph": {
+        "edges": [
+          {
+            "count": 1,
+            "edge": {
+              "from": "start",
+              "kind": "derived",
+              "ordinal": 1,
+              "to": "probe"
+            },
+            "from": "start",
+            "rendered": "e:start>probe#1",
+            "segment": 0,
+            "state": "taken",
+            "to": "probe"
+          },
+          {
+            "count": 1,
+            "edge": {
+              "from": "probe",
+              "kind": "derived",
+              "ordinal": 1,
+              "to": "done"
+            },
+            "from": "probe",
+            "rendered": "e:probe>done#1",
+            "segment": 0,
+            "state": "taken",
+            "to": "done"
+          }
+        ],
+        "ended": true,
+        "judge_edges": [],
+        "judge_nodes": [],
+        "nodes": [
+          {
+            "by_status": {
+              "succeeded": 1
+            },
+            "cancelled": 0,
+            "executions": 1,
+            "in_definition": true,
+            "last_status": "succeeded",
+            "node": "start",
+            "open": 0,
+            "status": "succeeded"
+          },
+          {
+            "by_status": {
+              "succeeded": 1
+            },
+            "cancelled": 0,
+            "executions": 1,
+            "in_definition": true,
+            "last_status": "succeeded",
+            "node": "probe",
+            "open": 0,
+            "status": "succeeded"
+          },
+          {
+            "by_status": {
+              "succeeded": 1
+            },
+            "cancelled": 0,
+            "executions": 1,
+            "in_definition": true,
+            "last_status": "succeeded",
+            "node": "done",
+            "open": 0,
+            "status": "succeeded"
+          }
+        ],
+        "not_run": [],
+        "segments": [
+          {
+            "digest": "d0fd8a209eebd439a9b0ee0a1d03fddc598ec4f50396811d2aa93c35e7a61ed0",
+            "from_seq": 0,
+            "index": 0,
+            "known": true,
+            "mismatch_recorded": false,
+            "opened_by": "start",
+            "reason": null,
+            "to_seq": null
+          }
+        ],
+        "shown_segment": 0,
+        "traversals": [
+          {
+            "counted": false,
+            "edges": [
+              {
+                "from": "start",
+                "kind": "derived",
+                "ordinal": 1,
+                "to": "probe"
+              }
+            ],
+            "execution": 1,
+            "from": "start",
+            "policy": null,
+            "reason": null,
+            "resolved": true,
+            "segment": 0,
+            "seq": 5,
+            "to": "probe",
+            "via_policy": false
+          },
+          {
+            "counted": false,
+            "edges": [
+              {
+                "from": "probe",
+                "kind": "derived",
+                "ordinal": 1,
+                "to": "done"
+              }
+            ],
+            "execution": 1,
+            "from": "probe",
+            "policy": null,
+            "reason": null,
+            "resolved": true,
+            "segment": 0,
+            "seq": 8,
+            "to": "done",
+            "via_policy": false
+          }
+        ]
+      },
+      "graph_model": {
+        "defaults": {
+          "max_retries": null,
+          "profile": null,
+          "timeout_seconds": null
+        },
+        "description": "One script node that writes out/probe.txt inside its worktree. Used once to record a flagged run detail; deleted afterwards.",
+        "edges": [
+          {
+            "condition": null,
+            "fallback": false,
+            "from": "start",
+            "join": null,
+            "to": "probe"
+          },
+          {
+            "condition": null,
+            "fallback": false,
+            "from": "probe",
+            "join": null,
+            "to": "done"
+          }
+        ],
+        "effects": [],
+        "id": "s6-flag-probe",
+        "name": "Nearbee S6 external-data probe (throwaway)",
+        "nodes": [
+          {
+            "cache": null,
+            "expected_duration": null,
+            "id": "start",
+            "inputs": null,
+            "outputs": null,
+            "title": null,
+            "type": "start"
+          },
+          {
+            "cache": null,
+            "expected_duration": "10s",
+            "id": "probe",
+            "inputs": null,
+            "outputs": null,
+            "runner": "sh",
+            "script": "scripts/probe.sh",
+            "timeout_seconds": null,
+            "title": "Write a probe file",
+            "type": "script"
+          },
+          {
+            "cache": null,
+            "expected_duration": null,
+            "id": "done",
+            "inputs": null,
+            "outcome": "success",
+            "outputs": null,
+            "profile": null,
+            "prompt": null,
+            "title": null,
+            "type": "finish"
+          }
+        ],
+        "params": [
+          {
+            "default": null,
+            "label": "Market hire id",
+            "name": "hire_id",
+            "options": null,
+            "search": true,
+            "type": "text"
+          },
+          {
+            "default": null,
+            "label": "Nearbee execution id",
+            "name": "execution_id",
+            "options": null,
+            "search": true,
+            "type": "text"
+          }
+        ],
+        "requires": null,
+        "schema": 2,
+        "supervisor": null,
+        "trigger": null,
+        "version": "1.0.0"
+      },
+      "hooks": {},
+      "instruction": "Run the playbook.",
+      "launch": {
+        "billing": {
+          "allowed": [
+            "subscription_equivalent"
+          ],
+          "confirmed": [],
+          "sources": [
+            "default"
+          ]
+        },
+        "initiator": "dashboard_keyless",
+        "kind": "start",
+        "policy": "allow",
+        "sources": [
+          "default"
+        ]
+      },
+      "layout": null,
+      "model": {
+        "defaults": {
+          "max_retries": null,
+          "profile": null,
+          "timeout_seconds": null
+        },
+        "description": "One script node that writes out/probe.txt inside its worktree. Used once to record a flagged run detail; deleted afterwards.",
+        "edges": [
+          {
+            "condition": null,
+            "fallback": false,
+            "from": "start",
+            "join": null,
+            "to": "probe"
+          },
+          {
+            "condition": null,
+            "fallback": false,
+            "from": "probe",
+            "join": null,
+            "to": "done"
+          }
+        ],
+        "effects": [],
+        "id": "s6-flag-probe",
+        "name": "Nearbee S6 external-data probe (throwaway)",
+        "nodes": [
+          {
+            "cache": null,
+            "expected_duration": null,
+            "id": "start",
+            "inputs": null,
+            "outputs": null,
+            "title": null,
+            "type": "start"
+          },
+          {
+            "cache": null,
+            "expected_duration": "10s",
+            "id": "probe",
+            "inputs": null,
+            "outputs": null,
+            "runner": "sh",
+            "script": "scripts/probe.sh",
+            "timeout_seconds": null,
+            "title": "Write a probe file",
+            "type": "script"
+          },
+          {
+            "cache": null,
+            "expected_duration": null,
+            "id": "done",
+            "inputs": null,
+            "outcome": "success",
+            "outputs": null,
+            "profile": null,
+            "prompt": null,
+            "title": null,
+            "type": "finish"
+          }
+        ],
+        "params": [
+          {
+            "default": null,
+            "label": "Market hire id",
+            "name": "hire_id",
+            "options": null,
+            "search": true,
+            "type": "text"
+          },
+          {
+            "default": null,
+            "label": "Nearbee execution id",
+            "name": "execution_id",
+            "options": null,
+            "search": true,
+            "type": "text"
+          }
+        ],
+        "requires": null,
+        "schema": 2,
+        "supervisor": null,
+        "trigger": null,
+        "version": "1.0.0"
+      },
+      "next_actions": {
+        "actions": [
+          {
+            "args": [],
+            "code": "read_report",
+            "command": "apb runs s6-flag-probe-1794411151095",
+            "principals": [
+              "person",
+              "operator",
+              "host",
+              "supervisor"
+            ],
+            "ready": true,
+            "reason": "the run finished (succeeded); read its report",
+            "run_id": "s6-flag-probe-1794411151095",
+            "target": {}
+          }
+        ],
+        "observed_at_ms": 1794411162102,
+        "primary": 0,
+        "status": "succeeded",
+        "stop": "finished"
+      },
+      "nodes": {
+        "done": "succeeded",
+        "probe": "succeeded",
+        "start": "succeeded"
+      },
+      "outcome": {
+        "done": [
+          "succeeded: probe"
+        ],
+        "findings": [],
+        "headline": "Run succeeded; nothing checked by the engine",
+        "unverified": [],
+        "verified": [],
+        "warnings": []
+      },
+      "outputs": {
+        "done": "",
+        "probe": "",
+        "start": ""
+      },
+      "params": {
+        "execution_id": "s6-probe-1",
+        "hire_id": "s6-probe"
+      },
+      "playbook": "s6-flag-probe",
+      "progress": {
+        "label": null,
+        "pending_question": null,
+        "pending_questions": [],
+        "pending_review": null,
+        "pending_reviews": [],
+        "pending_supervisor": null,
+        "pending_waits": [],
+        "percent": 100,
+        "plan_key": "1.0.0|",
+        "waiting_kind": null,
+        "waiting_on": null
+      },
+      "redacted_params": [],
+      "run_id": "s6-flag-probe-1794411151095",
+      "run_status": "succeeded",
+      "unknown_events": 0,
+      "usage": null,
+      "version": "1.0.0",
+      "worktree": "<home>/.local/share/nearbee/apb-workspace/work/s6-flag-probe"
+    }
+  },
+  "recorded": "2026-11-11",
+  "note": "a throwaway script-only playbook started once over REST with external_data: true on Nearbee's own instance; the playbook was deleted afterwards"
+}

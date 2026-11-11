@@ -23,7 +23,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -96,32 +95,7 @@ pub fn clamp_poll_interval_secs(secs: u64) -> u64 {
     secs.clamp(POLL_INTERVAL_MIN_SECS, POLL_INTERVAL_MAX_SECS)
 }
 
-/// The wall clock of a round, injectable so multi-round tests can move
-/// time (design 1). Production uses [`Clock::real`].
-#[derive(Clone)]
-pub struct Clock(Arc<dyn Fn() -> OffsetDateTime + Send + Sync>);
-
-impl std::fmt::Debug for Clock {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Clock")
-    }
-}
-
-impl Clock {
-    /// The real UTC clock.
-    pub fn real() -> Self {
-        Self::new(OffsetDateTime::now_utc)
-    }
-
-    /// A clock reading its instant from `now`.
-    pub fn new(now: impl Fn() -> OffsetDateTime + Send + Sync + 'static) -> Self {
-        Self(Arc::new(now))
-    }
-
-    pub fn now(&self) -> OffsetDateTime {
-        (self.0)()
-    }
-}
+pub use crate::clock::Clock;
 
 /// Cross-round state of one serve process, kept in memory; the durable
 /// parts live in the journals (design 1).
@@ -812,7 +786,7 @@ pub async fn round<M: Market, R: Runner, A: Attestor>(
     for e in &scan.entries {
         if let Ok(j) = &e.read
             && let Some(hire_id) = j.records.first().map(|r| r.hire_id.clone())
-            && let Err(err) = close_stale_intents(state_dir, &hire_id, j)
+            && let Err(err) = close_stale_intents(state_dir, &hire_id, j, clock)
         {
             out.push(step_failed(&hire_id, &ServeError::Journal(err)));
         }
@@ -903,8 +877,29 @@ pub async fn round<M: Market, R: Runner, A: Attestor>(
     let views = reread(agents, state_dir, &mut Vec::new());
     let mut loss_today: Option<Result<rust_decimal::Decimal, String>> = None;
     let mut scope_due: Vec<usize> = Vec::new();
+    // The apb version gate at intake (S6 design 3.5.1): asked once per
+    // round, only when a hire is in intake.
+    let apb_gate = if views.iter().any(intake_gate_due) {
+        Some(
+            runner
+                .external_data_supported()
+                .await
+                .map_err(|e| e.to_string()),
+        )
+    } else {
+        None
+    };
     for (i, v) in views.iter().enumerate() {
-        match intake_short(v, state, opts, state_dir, limits, clock, &mut loss_today) {
+        match intake_short(
+            v,
+            state,
+            opts,
+            state_dir,
+            limits,
+            clock,
+            &mut loss_today,
+            apb_gate.as_ref(),
+        ) {
             Ok(IntakeStep::Nothing) => {}
             Ok(IntakeStep::Outcome(o)) => out.push(o),
             Ok(IntakeStep::ScopeDue) => scope_due.push(i),
@@ -926,7 +921,7 @@ pub async fn round<M: Market, R: Runner, A: Attestor>(
         // Evidence (design 6.4): a report file a crash left without its
         // record is completed here with no fetch; the first missing
         // report of the hire is a long-step candidate.
-        match evidence_due(v, state_dir) {
+        match evidence_due(v, state_dir, clock) {
             Ok(Some((phase, model))) => long.push((i, LongStep::Evidence(phase, model))),
             Ok(None) => {}
             Err(e) => out.push(step_failed(&v.row.id, &e)),
@@ -1078,6 +1073,7 @@ fn close_stale_intents(
     state_dir: &Path,
     hire_id: &str,
     j: &journal::JournalRead,
+    clock: &Clock,
 ) -> Result<bool, WriterError> {
     let done = journal::closed_operations(&j.records);
     let active = has_active_run(j);
@@ -1112,7 +1108,11 @@ fn close_stale_intents(
     if stale.is_empty() {
         return Ok(false);
     }
-    let mut w = Writer::open(journal::journal_path(state_dir, hire_id), hire_id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, hire_id),
+        hire_id,
+        clock.clone(),
+    )?;
     for (generation, operation_id, outcome, external_ids) in stale {
         w.set_generation(generation);
         w.append(Event::Result(OpResult {
@@ -1138,7 +1138,11 @@ async fn local_only<R: Runner>(
     state_dir: &Path,
     clock: &Clock,
 ) -> Result<HireOutcome, ServeError> {
-    let mut w = Writer::open(journal::journal_path(state_dir, hire_id), hire_id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, hire_id),
+        hire_id,
+        clock.clone(),
+    )?;
     w.set_generation(current_generation(j));
     let left = |why: &str| HireOutcome::OperatorNeeded {
         row_id: hire_id.to_owned(),
@@ -1448,7 +1452,11 @@ async fn reconcile<M: Market, R: Runner>(
     // the admit pass; a row in any other status is left alone and
     // nothing is written (spec `hire-serving`, Polling).
     if records.is_empty() && row.kind() != RowKind::FirstTime {
-        let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+        let mut w = Writer::open(
+            journal::journal_path(state_dir, &row.id),
+            &row.id,
+            clock.clone(),
+        )?;
         w.set_generation(1);
         w.append(Event::Received(received(row, &v.ctx.handle)))?;
         w.append(Event::Decision(Decision {
@@ -1466,7 +1474,11 @@ async fn reconcile<M: Market, R: Runner>(
             why: "not in_progress and not journaled: left alone",
         });
     }
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(generation);
 
     // A disputed hire is frozen only while its row stays disputed: the
@@ -1897,7 +1909,11 @@ async fn advance<M: Market, R: Runner>(
         v
     } else {
         {
-            let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+            let mut w = Writer::open(
+                journal::journal_path(state_dir, &row.id),
+                &row.id,
+                clock.clone(),
+            )?;
             w.set_generation(current_generation(&v.j));
             confirm_aborts(runner, &mut w, &v.j, state).await?;
         }
@@ -1938,7 +1954,11 @@ async fn advance<M: Market, R: Runner>(
             GenState::Fresh | GenState::Started | GenState::StartIntentOpen
         )
     {
-        let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+        let mut w = Writer::open(
+            journal::journal_path(state_dir, &row.id),
+            &row.id,
+            clock.clone(),
+        )?;
         w.set_generation(generation);
         return Ok(waiting_decline(
             &mut w,
@@ -1961,7 +1981,11 @@ async fn advance<M: Market, R: Runner>(
         && let Some(o) = last_observed(&records)
         && !RunStatus::parse(&o.status).is_terminal()
     {
-        let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+        let mut w = Writer::open(
+            journal::journal_path(state_dir, &row.id),
+            &row.id,
+            clock.clone(),
+        )?;
         w.set_generation(generation);
         abort_run(
             runner,
@@ -1988,7 +2012,11 @@ async fn advance<M: Market, R: Runner>(
             why: "waiting for admission",
         });
     }
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(generation);
     // An S2 journal's open intents have no snapshot to resend from: the
     // attention is set once and nothing is sent for them (design,
@@ -2507,7 +2535,11 @@ fn evidence_phase(v: &HireView<'_>, state_dir: &Path) -> Option<(Phase, Vec<Stri
 /// decline. Reports a crash left stored without their record get the
 /// record here, with no fetch (spec `run-evidence`, Crash between file
 /// and record).
-fn evidence_due(v: &HireView<'_>, state_dir: &Path) -> Result<Option<(Phase, String)>, ServeError> {
+fn evidence_due(
+    v: &HireView<'_>,
+    state_dir: &Path,
+    clock: &Clock,
+) -> Result<Option<(Phase, String)>, ServeError> {
     let Some((phase, models)) = evidence_phase(v, state_dir) else {
         return Ok(None);
     };
@@ -2515,7 +2547,11 @@ fn evidence_due(v: &HireView<'_>, state_dir: &Path) -> Result<Option<(Phase, Str
     let records = gen_records(&v.j, generation);
     let view = evidence_view(state_dir, &v.row.id, generation, &records, phase, &models);
     if !view.unrecorded.is_empty() {
-        let mut w = Writer::open(journal::journal_path(state_dir, &v.row.id), &v.row.id)?;
+        let mut w = Writer::open(
+            journal::journal_path(state_dir, &v.row.id),
+            &v.row.id,
+            clock.clone(),
+        )?;
         w.set_generation(generation);
         for s in &view.unrecorded {
             w.append(Event::EvidenceCollected(journal::EvidenceCollected {
@@ -2552,7 +2588,11 @@ async fn evidence_step<A: Attestor>(
     let row = v.row;
     let generation = current_generation(&v.j);
     let records = gen_records(&v.j, generation);
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(generation);
     let fetched = match evidence::new_nonce() {
         Ok(nonce) => {
@@ -3378,6 +3418,35 @@ async fn observe_run<M: Market, R: Runner>(
             budget_usd,
         }))?;
     }
+    // Every market run is an external-data run (S6 design 3.6): a detail
+    // that does not report the flag means buyer data reached apb's
+    // learning state; the run is aborted and the hire declined. Only a
+    // run whose start intent recorded the flag is checked: a run started
+    // before the flag existed (an upgrade with hires in flight) is not.
+    if started_external(records, observed.execution) && !detail.external_data {
+        w.append(Event::PrivacyFlagMissing(journal::PrivacyFlagMissing {
+            run_id: run_id.as_str().to_owned(),
+        }))?;
+        append_attention(
+            w,
+            records,
+            PRIVACY_INCIDENT,
+            &format!(
+                "run {run_id} did not report the external-data flag; apb may have learned from this hire: see docs/privacy.md, Privacy incident"
+            ),
+        )?;
+        return stop_and_decline(
+            runner,
+            w,
+            &v.j.records,
+            &row.id,
+            &run_id,
+            state,
+            &format!("run {run_id} did not report the external-data flag (privacy_flag_missing)"),
+            BUYER_NOT_ISOLATED,
+        )
+        .await;
+    }
     // An open abort of this run is confirmed by `confirm_aborts` before
     // this step runs; the advance pass never observes a run being stopped.
     // Version check (spec `hire-serving`, Served version; 5.3): a pending
@@ -3605,6 +3674,21 @@ async fn send_progress<M: Market>(
 
 /// The budget the generation's run started with, from its run intent
 /// (empty for a run started without one).
+/// Whether the run start intent of `execution` (the newest one when no
+/// intent names that execution) recorded the external-data flag.
+fn started_external(records: &[journal::Record], execution: u32) -> bool {
+    let starts = || {
+        records.iter().rev().filter_map(|r| match &r.event {
+            Event::Intent(i) if i.kind == "run_start" => Some(i),
+            _ => None,
+        })
+    };
+    starts()
+        .find(|i| i.execution == execution)
+        .or_else(|| starts().next())
+        .is_some_and(|i| i.refs.get("external_data").map(String::as_str) == Some("true"))
+}
+
 fn run_budget(records: &[journal::Record]) -> Option<String> {
     records.iter().rev().find_map(|r| match &r.event {
         Event::Intent(i) if i.kind == "run_start" => {
@@ -4348,7 +4432,11 @@ async fn admit<M: Market, R: Runner>(
     if !fresh_first_time && row.status() != RowStatus::InProgress {
         return Ok(None);
     }
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(generation);
 
     // (a) A fresh first-time row: received, then the market start (or the
@@ -4554,6 +4642,41 @@ async fn admit<M: Market, R: Runner>(
             reason: BUYER_INPUTS.to_owned(),
         }));
     }
+    // Nothing starts unless apb takes external-data runs (S6 design
+    // 3.5.2): every run, first, rework or redo, is one. The hire keeps its
+    // state; its deadline declines it later.
+    match runner.external_data_supported().await {
+        Ok(true) => {}
+        Ok(false) => {
+            append_attention(
+                &mut w,
+                &fresh_records,
+                APB_TOO_OLD,
+                &format!(
+                    "apb does not take external-data runs (it needs {APB_TOO_OLD_MIN} or newer); nothing was started"
+                ),
+            )?;
+            return Ok(Some(HireOutcome::OperatorNeeded {
+                row_id: row.id.clone(),
+                why: format!(
+                    "apb does not take external-data runs (it needs {APB_TOO_OLD_MIN} or newer); nothing was started (apb_too_old)"
+                ),
+            }));
+        }
+        Err(e) => {
+            // Told once per hire and process, like the intake gate; the
+            // next rounds ask again silently.
+            if !state.notices.insert(format!("apb_version:{}", row.id)) {
+                return Ok(None);
+            }
+            return Ok(Some(HireOutcome::OperatorNeeded {
+                row_id: row.id.clone(),
+                why: format!(
+                    "apb cannot say whether it takes external-data runs ({e}); nothing was started"
+                ),
+            }));
+        }
+    }
     // Nothing starts unless apb still runs the published version (S2
     // rule, kept for every start).
     match verify_published_version(runner, ctx).await {
@@ -4709,6 +4832,10 @@ async fn admit<M: Market, R: Runner>(
         ("worktree".into(), wt.to_string_lossy().to_string()),
         ("playbook_version".into(), ctx.playbook_version.clone()),
         ("playbook_sha256".into(), ctx.playbook_sha256.clone()),
+        // The run is started as an apb external-data run (S6 design 3.5);
+        // observation checks the run detail's flag only for runs whose
+        // start intent recorded this (a legacy run is not checked).
+        ("external_data".into(), "true".into()),
         (
             "sla_deadline_at".into(),
             row.sla_deadline_at.map(rfc3339).unwrap_or_default(),
@@ -4824,6 +4951,22 @@ fn intake_owed(row: &Row, records: &[journal::Record]) -> bool {
     }) && !decided(records) && open_intent(records, "market_decline").is_none()
 }
 
+/// Whether the round's apb version gate is asked for this hire: a
+/// first-time row in generation 1 whose intake is owed and not finished,
+/// with no declining check (the conditions `intake_short` reaches the
+/// gate under).
+fn intake_gate_due(v: &HireView<'_>) -> bool {
+    if v.row.status() != RowStatus::InProgress || current_generation(&v.j) != 1 {
+        return false;
+    }
+    let records = gen_records(&v.j, 1);
+    intake_owed(v.row, &records)
+        && !intake_complete(&records)
+        && !intake_records(&records)
+            .iter()
+            .any(|i| i.outcome == "declined")
+}
+
 /// The intake records of a generation.
 fn intake_records(records: &[journal::Record]) -> Vec<&journal::Intake> {
     records
@@ -4905,6 +5048,7 @@ fn intake_short(
     limits: &Limits,
     clock: &Clock,
     loss_today: &mut Option<Result<rust_decimal::Decimal, String>>,
+    apb_gate: Option<&Result<bool, String>>,
 ) -> Result<IntakeStep, ServeError> {
     let row = v.row;
     let ctx = &v.ctx;
@@ -4925,7 +5069,11 @@ fn intake_short(
         if has_decline || decided(&records) {
             return Ok(IntakeStep::Nothing);
         }
-        let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+        let mut w = Writer::open(
+            journal::journal_path(state_dir, &row.id),
+            &row.id,
+            clock.clone(),
+        )?;
         w.set_generation(1);
         open_decline_intent(
             &mut w,
@@ -4949,7 +5097,11 @@ fn intake_short(
             && let ListingGate::Decline(detail) = listing_gate(v, state)
         {
             let (texts, attention) = drift_decline_args(&detail);
-            let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+            let mut w = Writer::open(
+                journal::journal_path(state_dir, &row.id),
+                &row.id,
+                clock.clone(),
+            )?;
             w.set_generation(1);
             return Ok(IntakeStep::Outcome(waiting_decline(
                 &mut w, v, 1, texts, attention,
@@ -4957,22 +5109,54 @@ fn intake_short(
         }
         return Ok(IntakeStep::Nothing);
     }
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    // The apb version gate (S6 design 3.5.1): an unreadable answer writes
+    // nothing and is asked again next round; an apb that takes no
+    // external-data runs declines the hire `rejected`.
+    let supported = match apb_gate {
+        Some(Ok(b)) => *b,
+        Some(Err(e)) => {
+            if state.notices.insert(format!("apb_version:{}", row.id)) {
+                return Ok(IntakeStep::Outcome(HireOutcome::OperatorNeeded {
+                    row_id: row.id.clone(),
+                    why: format!(
+                        "apb cannot say whether it takes external-data runs ({e}); intake waits"
+                    ),
+                }));
+            }
+            return Ok(IntakeStep::Nothing);
+        }
+        None => return Ok(IntakeStep::Nothing),
+    };
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(1);
     if records.is_empty() {
         w.append(Event::Received(received(row, &v.ctx.handle)))?;
-        if opts.reject_handle.as_deref() == Some(ctx.handle.as_str()) {
-            open_decline_intent(
-                &mut w,
-                &row.id,
-                "rejected",
-                "test decline, nothing is charged",
-                "test decline, nothing is charged",
-            )?;
-            return Ok(IntakeStep::Outcome(HireOutcome::DeclinedRejected {
-                row_id: row.id.clone(),
-            }));
-        }
+    }
+    if !supported {
+        let reason = format!(
+            "apb does not take external-data runs (it needs {APB_TOO_OLD_MIN} or newer); nothing was started"
+        );
+        append_attention(&mut w, &records, APB_TOO_OLD, &reason)?;
+        open_decline_intent(&mut w, &row.id, "rejected", &reason, BUYER_CANNOT_TAKE)?;
+        return Ok(IntakeStep::Outcome(HireOutcome::DeclinedRejected {
+            row_id: row.id.clone(),
+        }));
+    }
+    if records.is_empty() && opts.reject_handle.as_deref() == Some(ctx.handle.as_str()) {
+        open_decline_intent(
+            &mut w,
+            &row.id,
+            "rejected",
+            "test decline, nothing is charged",
+            "test decline, nothing is charged",
+        )?;
+        return Ok(IntakeStep::Outcome(HireOutcome::DeclinedRejected {
+            row_id: row.id.clone(),
+        }));
     }
     // A hire of a listing that drifted this round is declined at once,
     // before any check, scope question or market start; one of a listing
@@ -5206,7 +5390,11 @@ async fn download_step<M: Market>(
     if std::fs::symlink_metadata(&wt).map_or(true, |m| m.is_dir()) {
         journal::create_dir_durable(&wt).map_err(|e| ServeError::Other(e.to_string()))?;
     }
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(generation);
     let mut stored: Vec<journal::InputFile> = Vec::new();
     let mut downloaded = false;
@@ -5332,7 +5520,11 @@ async fn scope_check<R: Runner>(
     let row = v.row;
     let scope = v.ctx.scope.clone().unwrap_or_default();
     let question = intake::scope_question(&scope, row);
-    let mut w = Writer::open(journal::journal_path(state_dir, &row.id), &row.id)?;
+    let mut w = Writer::open(
+        journal::journal_path(state_dir, &row.id),
+        &row.id,
+        clock.clone(),
+    )?;
     w.set_generation(1);
     let operation_id = uuid_v7();
     w.append(Event::Intent(Intent {
@@ -5583,6 +5775,8 @@ fn start_request(
         budget,
         continued_from,
         direct_models: Vec::new(),
+        // Every market run is an apb external-data run (S6 design 3.5).
+        external_data: true,
     }
 }
 
@@ -5627,6 +5821,19 @@ const BUYER_INPUTS: &str = "the attached files could not be used";
 /// The buyer text of a drifted listing (design 4.5): the hire was never
 /// taken, the listing must be listed again first.
 const BUYER_LISTING_DRIFT: &str = "the listing is being updated; you are refunded in full.";
+/// The buyer text of a hire declined because apb takes no external-data
+/// runs (S6 design 3.5).
+const BUYER_CANNOT_TAKE: &str = "the agent cannot take hires right now";
+/// The buyer text of a run that did not report the external-data flag
+/// (S6 design 3.6).
+const BUYER_NOT_ISOLATED: &str = "the run could not be isolated";
+/// The attention code of an apb that takes no external-data runs.
+const APB_TOO_OLD: &str = "apb_too_old";
+/// The first apb release that takes external-data runs, for the operator
+/// text only; the check itself lives in the runner adapter.
+const APB_TOO_OLD_MIN: &str = "1.0.0-beta.7";
+/// The attention code of a market run without the external-data flag.
+const PRIVACY_INCIDENT: &str = "privacy_incident";
 /// The attention code of a manifest with output files (C11).
 const UNSUPPORTED_OUTPUT: &str = "unsupported_output";
 /// The fixed run instruction: the brief is data (the untrusted `brief`

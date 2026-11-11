@@ -1,7 +1,7 @@
 # Agentic Playbooks (`apb`): the surface Nearbee drives
 
 Source: https://github.com/itechmeat/agentic-playbooks (public, Apache-2.0).
-Version at the time of writing: `apb 1.0.0-beta.6` (installed; Nearbee reads apb's source at that tag). Its `docs/` folder is the
+Version at the time of writing: `apb 1.0.0-beta.7` (installed on Nearbee's instance since 2026-11-11, S6; Nearbee needs at least this release). Facts recorded in S1 to S5 were read at `1.0.0-beta.6` and say so; the beta.7 facts are in "apb 1.0.0-beta.7" below. Its `docs/` folder is the
 authority; the facts below were checked there on 2026-11-09 (`DEPLOYMENT.md`,
 `NOTIFY.md`, `CONNECTORS.md`, `PROFILES.md`, `DECISIONS.md`,
 `HOST-INTEGRATION.md`, `crates/apb-server/src/routes/*`).
@@ -217,6 +217,62 @@ by `/home/user`):
    `profile `<name>` not found`. Nearbee's profiles are all project scope;
    the instance has no global profiles.
 
+### apb 1.0.0-beta.7 (read 2026-11-11, S6)
+
+1. Health: `GET /api/health` answers `{"build_id": "ef8c081aa53b61e8",
+   "status": "ok", "version": "1.0.0-beta.7"}` (recorded:
+   `health_beta7_live.json`). `nearbee-apb` parses `version` as a semantic
+   version with prerelease order (`semver`; `1.0.0-beta.10` is above
+   `1.0.0-beta.7`, `1.0.0` above both); a missing or unparsable version is
+   a protocol error naming the field. The core sees one bool,
+   `Runner::external_data_supported`: true from `1.0.0-beta.7` on.
+2. External-data runs (apb `docs/EXTERNAL-DATA.md`): a start body with
+   `"external_data": true` marks the run as carrying outside data, so apb
+   skips its learning state for it (corrections ledger, memory, judge
+   examples, discovery). The run detail then carries a top-level
+   `"external_data": true`, and its `run_started` event carries the same
+   field (recorded: `run_external_data_live.json`, a throwaway script-only
+   playbook started once over REST on Nearbee's instance with the flag, no
+   agent and no model, then deleted from the workspace). A detail without
+   the field, as every beta.6 detail, is not an external-data run. apb
+   flags a continued run itself: "a run started with `continued_from`
+   naming a flagged run" is flagged (`docs/EXTERNAL-DATA.md` at
+   `v1.0.0-beta.7`); Nearbee sends the flag explicitly on every start
+   anyway, reworks and redos included. Serve records the flag on the run
+   start intent and checks it on every observed run detail of a run whose
+   intent recorded it; a run started before that ref existed is not
+   checked, so an upgrade does not abort hires in flight
+   (`docs/privacy.md`, External-data runs); the live smoke test and
+   `examples/capture.rs` send no flag (they carry no buyer data).
+3. Compaction, re-read at `v1.0.0-beta.7`: `context_max_bytes` is still
+   set by no surface. Every `RunOptions` constructor in `apb-cli`,
+   `apb-mcp`, `apb-server`, `judge_eval` and the sub-playbook child uses
+   `..Default::default()`; `apb-cli/src/run.rs` sets `None`; `RunConfig`
+   is written only by `prepare.rs` from those options. So compaction is
+   known off for exactly `1.0.0-beta.6` and `1.0.0-beta.7`, compared as
+   parsed semantic versions ignoring build metadata (`1.0.0-beta.7+abc`
+   counts) (`nearbee_apb::compaction_for_version`); any other version, or
+   a string that is not a version, is unknown,
+   which refuses every tier until someone reads that release too.
+4. The native `nearai/` route: beta.7 runs NEAR AI Cloud models through
+   its own `dsh` harness (`docs/AGENT-SETUP.md`, "DeepSeek Harness").
+   Nearbee does not use it: `dsh` reads `~/.agents/skills`, mounts the home
+   patch layer where `apb setup` registers the MCP server, has no
+   `minimal` environment and no sandbox, so an attested listing could not
+   vouch for it. Attested listings make their model calls from Nearbee's
+   own commands instead (D-027).
+5. OpenCode as apb starts it: `run --format json -m <model> -- <prompt>`
+   without `--standalone` (`crates/apb-core/src/agents/opencode/mod.rs`
+   at the tag). OpenCode 2.x then hands the session to a shared background
+   service (`opencode serve --service`) that runs with the environment of
+   whoever started it; probed on this machine on 2026-11-11 (OpenCode
+   2.2.5, no model call: a missing model id fails before any request), it
+   ran with the owner's home and configuration and connected the owner's
+   `agentic-playbooks` MCP server. With `--standalone` it honours
+   `XDG_CONFIG_HOME` but still loads `~/.agents/skills` and
+   `~/.opencode/skills`. The attested tier therefore refuses `opencode`
+   (`docs/privacy.md`, Attested tier without agents).
+
 ## Params and the brief
 
 A playbook declares `params` (text, with labels and defaults; `secret: true`
@@ -349,6 +405,10 @@ fallback since S4); `nearbee-near-vision` is an unsupported placeholder
 
 ### What S4 relies on (read at `v1.0.0-beta.6`)
 
+Since S6 no attested listing runs an agent (D-027), so items 3 and 4 below
+matter only for the statement of a plain listing that uses OpenCode; none
+ships. They are kept, and still checked, as facts.
+
 1. Script nodes run in the run's worktree, inherit the dashboard's
    environment (no `env_clear`) and get `APB_RUN_DIR`, `APB_RUN_ID` and
    `APB_NODE_ID` (`crates/apb-engine/src/script.rs`, `run_env` and
@@ -442,13 +502,19 @@ apb 1.0.0-beta.6, OpenCode 2.2.5.
 
 1. A flag on a run that marks it as **external buyer data**: skip corrections
    ledger, memory, judge-example capture and discover for it (`docs/legal.md`). Requested
-   from the apb project on 2026-11-09 in its `near-ai-cloud-models` change (D-023).
+   from the apb project on 2026-11-09 in its `near-ai-cloud-models` change (D-023);
+   shipped in `1.0.0-beta.7` as `external_data` and used on every market run
+   since S6 (above).
 2. A documented **result contract**: which node output is the result, with files.
 3. A **machine estimate** of an instruction before the run (today `estimate` is
    per playbook version from history; intake needs "this brief vs this listing").
 4. Executor support for NEAR AI Cloud without going through OpenCode or Codex
    custom providers (DSH native). Requested from the apb project on 2026-11-09:
-   `docs/apb-request-near-models.md`.
+   `docs/apb-request-near-models.md`. Shipped in `1.0.0-beta.7` as the
+   native `nearai/` route on `dsh`; not used by Nearbee (above, item 4 of
+   "apb 1.0.0-beta.7"). Still missing for an attested agent route: an
+   OpenCode start with `--standalone` and a separate home, or a `dsh`
+   environment that reads nothing from the owner's home.
 5. A notify connector shipped with apb for a generic HTTP sink.
 6. An **instance-wide switch for candidate trials** (or a start field that
    pins `current`): in 1.0.0-beta.6 `trial_candidates` is only a per-playbook

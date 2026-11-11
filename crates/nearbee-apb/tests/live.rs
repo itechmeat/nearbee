@@ -96,6 +96,8 @@ async fn smoke(playbook: &str) {
             }),
             continued_from: None,
             direct_models: Vec::new(),
+            // No buyer data: not an external-data run.
+            external_data: false,
         })
         .await
         .unwrap();

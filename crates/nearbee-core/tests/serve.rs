@@ -485,6 +485,13 @@ struct FakeRunner {
     attempts: Vec<nearbee_core::runner::AttemptModel>,
     /// While set, `inspect` fails (a transport error on the instance).
     inspect_fails: std::sync::Arc<Mutex<bool>>,
+    /// What `external_data_supported` answers; `Err` is a protocol error
+    /// (an unparsable version) (S6 design 3).
+    external_data: std::sync::Arc<Mutex<Result<bool, ()>>>,
+    /// How often `external_data_supported` was asked.
+    support_asks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Whether every run detail reports `external_data: true`.
+    detail_flag: std::sync::Arc<Mutex<bool>>,
 }
 
 /// A complete small cost, as apb reports a finished run with usage.
@@ -530,7 +537,20 @@ impl FakeRunner {
             inspect_facts: None,
             attempts: Vec::new(),
             inspect_fails: std::sync::Arc::new(Mutex::new(false)),
+            external_data: std::sync::Arc::new(Mutex::new(Ok(true))),
+            support_asks: Default::default(),
+            detail_flag: std::sync::Arc::new(Mutex::new(true)),
         }
+    }
+
+    /// Pins what `external_data_supported` answers from now on.
+    fn set_external_data(&self, answer: Result<bool, ()>) {
+        *self.external_data.lock().unwrap() = answer;
+    }
+
+    /// Pins whether run details report the external-data flag.
+    fn set_detail_flag(&self, flag: bool) {
+        *self.detail_flag.lock().unwrap() = flag;
     }
 
     /// Pins what `inspect` answers (the drift pass reads it each round).
@@ -631,6 +651,7 @@ fn detail(id: &str, status: &str) -> RunDetail {
         usage: Usage::default(),
         budget_paused: false,
         attempts: Vec::new(),
+        external_data: true,
     }
 }
 
@@ -734,7 +755,14 @@ impl Runner for FakeRunner {
             },
             budget_paused: self.budget_paused,
             attempts: self.attempts.clone(),
+            external_data: *self.detail_flag.lock().unwrap(),
             ..detail(id.as_str(), status)
+        })
+    }
+    async fn external_data_supported(&self) -> Result<bool, RunnerError> {
+        self.support_asks.fetch_add(1, Ordering::SeqCst);
+        (*self.external_data.lock().unwrap()).map_err(|()| RunnerError::Protocol {
+            detail: "GET /api/health: version `dev` is not a semantic version".into(),
         })
     }
     async fn stop(&self, _id: &RunId) -> Result<(), RunnerError> {
@@ -1379,9 +1407,6 @@ async fn a_cancelled_row_stops_the_local_work_and_records_it() {
 async fn a_ten_minute_window_runs_for_eight_minutes() {
     let mut d = Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running"]);
     let _ = delivered_markdown(&d.ws(), "a1");
-    // Journal records carry the real time, so the window before the
-    // market start (measured from `received`) must start at real time.
-    *d.now.lock().unwrap() = time::OffsetDateTime::now_utc();
     d.rows()[0].sla_deadline_at = Some(d.now() + time::Duration::minutes(10));
     d.round().await; // admitted: market start, `startedAt` now
     d.round().await; // run started
@@ -5995,7 +6020,12 @@ async fn r2_6_an_unknown_progress_write_is_closed_when_the_run_is_stopped() {
     let run_a = run_of_start(&d, 0);
     d.runner.set_status(&run_a, "running");
     {
-        let mut w = journal::Writer::open(journal::journal_path(d.dir.path(), "a1"), "a1").unwrap();
+        let mut w = journal::Writer::open(
+            journal::journal_path(d.dir.path(), "a1"),
+            "a1",
+            Clock::real(),
+        )
+        .unwrap();
         w.set_generation(1);
         w.append(journal::Event::Intent(journal::Intent {
             operation_id: uuid::Uuid::now_v7(),
@@ -6152,8 +6182,8 @@ async fn r2_7_terminal_ambiguous_runs_are_recorded_once_with_their_cost() {
         );
     }
     assert_eq!(
-        // Journal records carry the wall clock, not the test clock.
-        nearbee_core::cost::daily_loss(d.dir.path(), time::OffsetDateTime::now_utc()).unwrap(),
+        // Journal records carry the driver clock (S6 design 2).
+        nearbee_core::cost::daily_loss(d.dir.path(), d.now()).unwrap(),
         rust_decimal::Decimal::new(10, 2),
         "the ambiguous runs' cost is missing from the daily loss"
     );
@@ -6640,8 +6670,8 @@ async fn r3_5_ambiguous_runs_without_a_complete_cost_count_their_budget() {
             assert_eq!(t[0].budget_usd.as_deref(), Some("2.60"), "{id}: {t:?}");
         }
         assert_eq!(
-            // Journal records carry the wall clock, not the test clock.
-            nearbee_core::cost::daily_loss(d.dir.path(), time::OffsetDateTime::now_utc()).unwrap(),
+            // Journal records carry the driver clock (S6 design 2).
+            nearbee_core::cost::daily_loss(d.dir.path(), d.now()).unwrap(),
             rust_decimal::Decimal::new(520, 2),
             "usage {usage:?}"
         );
@@ -7828,17 +7858,11 @@ async fn the_terminal_run_observed_record_carries_the_attempts() {
 const EV_DS: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
 const EV_QWEN: &str = "Qwen/Qwen3.8-27B";
 
-/// Facts that pass the attested check: the shipped `nearbee-near` shape,
-/// DeepSeek first and Qwen as fallback, the exact route, no side
-/// channels.
+/// Facts that pass the attested check (S6 design 4): script nodes only,
+/// the exact route, no side channels. The models are the listing's direct
+/// models, which the record carries and the runner's facts never do.
 fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
-    use nearbee_core::tiers::{
-        ExecutorFact, Known, NEARAI_API_KEY_REF, NodeFact, ProfileFact, ProfileRef, ProviderRoute,
-    };
-    let reference = ProfileRef {
-        name: "nearbee-near".into(),
-        scope: "project".into(),
-    };
+    use nearbee_core::tiers::{Known, NEARAI_API_KEY_REF, NodeFact, ProviderRoute};
     let node = |id: &str, kind: &str| NodeFact {
         id: id.into(),
         kind: kind.into(),
@@ -7849,27 +7873,9 @@ fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
     };
     nearbee_core::runner::ExecutionFacts {
         playbook_id: "repo-audit-fast".into(),
-        default_profile: Some(reference.clone()),
-        nodes: vec![node("audit", "agent_task"), node("done", "finish")],
-        profiles: vec![(
-            reference.clone(),
-            Known::Yes(ProfileFact {
-                reference,
-                executor: ExecutorFact {
-                    agent: "opencode".into(),
-                    model: format!("nearai/{EV_DS}"),
-                },
-                fallbacks: vec![ExecutorFact {
-                    agent: "opencode".into(),
-                    model: format!("nearai/{EV_QWEN}"),
-                }],
-                tiers: Vec::new(),
-                environment: "minimal".into(),
-                skills: Vec::new(),
-                env_policy: "allowlist".into(),
-                env_allow: vec!["NEARAI_API_KEY".into()],
-            }),
-        )],
+        default_profile: None,
+        nodes: vec![node("review", "script"), node("done", "finish")],
+        profiles: Vec::new(),
         routes: Known::Yes(vec![ProviderRoute {
             name: "nearai".into(),
             base_url: nearbee_core::tiers::NEARAI_BASE_URL.into(),
@@ -7883,12 +7889,18 @@ fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
     }
 }
 
+/// The direct models of the attested record.
+fn attested_direct() -> Vec<String> {
+    vec![EV_DS.to_owned(), EV_QWEN.to_owned()]
+}
+
 /// An attested record built from [`attested_facts`]: it does not drift.
 fn attested_record() -> nearbee_core::listing::ResolvedListing {
     use nearbee_core::listing::Tier;
     use nearbee_core::statement;
-    let facts = attested_facts();
+    let facts = attested_facts().with_direct_models(&attested_direct(), &[]);
     let mut r = s4_record(Tier::Attested);
+    r.direct_models = attested_direct();
     let text = statement::render(Tier::Attested, &facts, RETENTION);
     r.statement_sha256 = Some(journal::sha256_hex(text.as_bytes()));
     r.statement = Some(text);
@@ -8633,4 +8645,359 @@ async fn a_restart_resends_the_signed_snapshot() {
             .submitted_markdown(0)
             .contains("## Response signature")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Journal clock (S6 design 2, spec hire-journal)
+// ---------------------------------------------------------------------------
+
+/// A writer opened with a fixed clock stamps that clock's time.
+#[test]
+fn a_writer_with_a_fixed_clock_stamps_that_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = datetime!(2026-11-10 00:00:00 UTC);
+    let mut w = journal::Writer::open(
+        journal::journal_path(dir.path(), "c1"),
+        "c1",
+        Clock::new(move || fixed),
+    )
+    .unwrap();
+    w.append(journal::Event::Received(journal::Received {
+        brief_sha256: "ab".into(),
+        brief_bytes: 2,
+        listing_id: None,
+        attachments: Vec::new(),
+    }))
+    .unwrap();
+    drop(w);
+    let j = read_journal_records(dir.path(), "c1");
+    assert_eq!(j.records.len(), 1);
+    assert_eq!(j.records[0].timestamp, fixed);
+}
+
+/// A redo generation opened under the driver clock reaches its deadline
+/// when that clock passes it: the generation's start is the injected time,
+/// so the margin is a fifth of a 20 minute window (4 minutes), not the
+/// full 10 minutes a real-time stamp in the driver's future would give.
+#[tokio::test]
+async fn a_waiting_redo_reaches_its_deadline_on_the_injected_clock() {
+    let mut d =
+        Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running", "succeeded"]);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.drive_to_delivery().await;
+    let deadline = d.now() + time::Duration::minutes(20);
+    for r in d.rows().iter_mut() {
+        r.status = Some("in_progress".into());
+        r.deliverable_url = Some("https://m/f/tok".into());
+        r.submitted_at = Some(d.now());
+        r.sla_deadline_at = Some(deadline);
+        r.latest_message = Some(nearbee_core::market::Message {
+            body: "redo it".into(),
+            sender_side: Some("buyer".into()),
+            created_at: None,
+            truncated: false,
+            attachments: Vec::new(),
+        });
+    }
+    // apb is unreachable: the redo generation opens and waits.
+    d.state.runner_unavailable = true;
+    d.round().await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    let opened = j
+        .records
+        .iter()
+        .find(|r| matches!(r.event, journal::Event::GenerationOpened(_)))
+        .expect("the redo generation opened");
+    assert_eq!(opened.timestamp, d.now(), "stamped by the round clock");
+    // 12 minutes in: before the deadline (20 - 4 minutes).
+    d.tick(12 * 60);
+    d.state.runner_unavailable = true;
+    let out = d.round().await;
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "declined before the deadline: {out:?}"
+    );
+    // 17 minutes in: past it.
+    d.tick(5 * 60);
+    d.state.runner_unavailable = true;
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { row_id, .. } if row_id == "a1")),
+        "{out:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// External-data runs and the apb version gates (S6 design 3, spec
+// hire-serving)
+// ---------------------------------------------------------------------------
+
+fn attention_codes(d: &Driver) -> Vec<String> {
+    read_journal_records(d.dir.path(), "a1")
+        .records
+        .into_iter()
+        .filter_map(|r| match r.event {
+            journal::Event::Attention(a) => Some(a.code),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An apb that takes no external-data runs declines a new hire
+/// `rejected` before any market start, with `apb_too_old`.
+#[tokio::test]
+async fn an_old_apb_at_intake_declines_rejected_before_the_market_start() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running"]);
+    d.runner.set_external_data(Ok(false));
+    let out = d.round().await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedRejected { row_id } if row_id == "a1")),
+        "{out:?}"
+    );
+    d.round().await;
+    assert_eq!(d.market.calls.count("start a1"), 0);
+    assert_eq!(d.market.calls.count("decline a1 rejected"), 1);
+    assert!(
+        d.market
+            .decline_detail(0)
+            .contains("the agent cannot take hires right now"),
+        "{}",
+        d.market.decline_detail(0)
+    );
+    assert_eq!(d.runner.calls.count("run a1"), 0);
+    assert!(attention_codes(&d).contains(&"apb_too_old".to_owned()));
+}
+
+/// A version that cannot be read at intake writes nothing; the next round
+/// asks again and the hire proceeds once the answer is yes.
+#[tokio::test]
+async fn an_unreadable_apb_version_at_intake_writes_nothing_and_retries() {
+    let mut d =
+        Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running", "succeeded"]);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.runner.set_external_data(Err(()));
+    d.round().await;
+    // The admit pass may leave an empty journal file; no record is in it.
+    let path = journal::journal_path(d.dir.path(), "a1");
+    assert!(
+        !path.exists() || std::fs::read_to_string(&path).unwrap().is_empty(),
+        "a record was written while the version was unreadable: {}",
+        journal_text(d.dir.path(), "a1")
+    );
+    assert_eq!(d.market.calls.count("start"), 0);
+    d.round().await;
+    assert!(!path.exists() || std::fs::read_to_string(&path).unwrap().is_empty());
+    d.runner.set_external_data(Ok(true));
+    d.drive_to_delivery().await;
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert!(d.runner.support_asks.load(Ordering::SeqCst) >= 3);
+}
+
+/// Every run start of a hire carries the flag: the first run, a rework
+/// and a redo.
+#[tokio::test]
+async fn every_run_start_carries_the_external_data_flag() {
+    let mut d = delivered_once(
+        vec!["running", "succeeded", "running"],
+        serde_json::json!({}),
+    )
+    .await;
+    request_changes(&d, "use a table", vec![], false);
+    d.run_until(|o| matches!(o, HireOutcome::Working { .. }))
+        .await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert!(starts.iter().all(|s| s.external_data), "{starts:?}");
+
+    let mut d = delivered_once(
+        vec!["running", "succeeded", "running"],
+        serde_json::json!({}),
+    )
+    .await;
+    for r in d.rows().iter_mut() {
+        r.status = Some("in_progress".into());
+        r.deliverable_url = Some("https://m/f/tok".into());
+        r.submitted_at = None;
+    }
+    d.run_until(|o| matches!(o, HireOutcome::Working { .. }))
+        .await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2, "the redo did not start");
+    assert!(starts.iter().all(|s| s.external_data), "{starts:?}");
+}
+
+/// An apb downgraded before a rework starts nothing and shows
+/// `apb_too_old`; the hire keeps its state.
+#[tokio::test]
+async fn an_old_apb_before_a_rework_starts_nothing() {
+    let mut d = delivered_once(
+        vec!["running", "succeeded", "running"],
+        serde_json::json!({}),
+    )
+    .await;
+    d.runner.set_external_data(Ok(false));
+    request_changes(&d, "use a table", vec![], false);
+    for _ in 0..4 {
+        d.round().await;
+    }
+    assert_eq!(d.runner.starts.lock().unwrap().len(), 1, "a run started");
+    assert!(
+        attention_codes(&d).contains(&"apb_too_old".to_owned()),
+        "{:?}",
+        attention_codes(&d)
+    );
+    assert_eq!(d.market.calls.count("decline"), 0);
+}
+
+fn assert_privacy_incident(d: &Driver, run_id: &str) {
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(
+        j.records.iter().any(|r| matches!(&r.event,
+            journal::Event::PrivacyFlagMissing(p) if p.run_id == run_id)),
+        "no privacy_flag_missing for {run_id}"
+    );
+    assert!(attention_codes(d).contains(&"privacy_incident".to_owned()));
+    assert!(d.runner.calls.count(&format!("abort {run_id}")) >= 1);
+}
+
+/// A first run whose detail does not report the flag is aborted, journaled
+/// and declined `failed`.
+#[tokio::test]
+async fn a_first_run_without_the_flag_is_aborted_and_declined_failed() {
+    let mut d =
+        Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running", "succeeded"]);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.runner.set_detail_flag(false);
+    let out = d
+        .run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { reason, .. }
+            if reason == "the run could not be isolated")),
+        "{out:?}"
+    );
+    d.round().await;
+    let run_id = format!("run-{}", d.runner.starts.lock().unwrap()[0].execution_id);
+    assert_privacy_incident(&d, &run_id);
+    assert_eq!(d.market.calls.count("decline a1 failed"), 1);
+    assert_eq!(d.market.calls.count("submit"), 0);
+}
+
+/// A rework run whose detail does not report the flag is aborted and
+/// declined the same way.
+#[tokio::test]
+async fn a_rework_run_without_the_flag_is_aborted_and_declined_failed() {
+    let mut d = delivered_once(
+        vec!["running", "succeeded", "running"],
+        serde_json::json!({}),
+    )
+    .await;
+    request_changes(&d, "use a table", vec![], false);
+    d.runner.set_detail_flag(false);
+    let out = d
+        .run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, HireOutcome::DeclinedFailed { reason, .. }
+            if reason == "the run could not be isolated")),
+        "{out:?}"
+    );
+    d.round().await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert_privacy_incident(&d, &format!("run-{}", starts[1].execution_id));
+    assert_eq!(d.market.calls.count("decline a1 failed"), 1);
+    assert_eq!(
+        d.market.calls.count("submit a1"),
+        1,
+        "the rework was submitted"
+    );
+}
+
+/// The run start intent records that the run was started as an
+/// external-data run.
+#[tokio::test]
+async fn the_run_start_intent_records_the_external_data_flag() {
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running"]);
+    d.run_until(|o| matches!(o, HireOutcome::Working { .. }))
+        .await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    let intent = j
+        .records
+        .iter()
+        .find_map(|r| match &r.event {
+            journal::Event::Intent(i) if i.kind == "run_start" => Some(i.clone()),
+            _ => None,
+        })
+        .expect("a run start intent");
+    assert_eq!(
+        intent.refs.get("external_data").map(String::as_str),
+        Some("true")
+    );
+}
+
+/// A run started before the flag was recorded (its start intent has no
+/// `external_data` ref) is not checked: an upgrade does not kill an
+/// in-flight hire whose detail lacks the flag.
+#[tokio::test]
+async fn a_legacy_run_without_the_recorded_flag_is_not_aborted() {
+    let mut d =
+        Driver::new(&[("a1", "in_progress", "fresh")]).with_runner(vec!["running", "succeeded"]);
+    let _ = delivered_markdown(&d.ws(), "a1");
+    d.run_until(|o| matches!(o, HireOutcome::Working { .. }))
+        .await;
+    let p = journal::journal_path(d.dir.path(), "a1");
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains(r#""external_data":"true""#), "{text}");
+    let legacy = text
+        .replace(r#""external_data":"true","#, "")
+        .replace(r#","external_data":"true""#, "");
+    std::fs::write(&p, legacy).unwrap();
+    d.runner.set_detail_flag(false);
+    d.drive_to_delivery().await;
+    let j = read_journal_records(d.dir.path(), "a1");
+    assert!(
+        !j.records
+            .iter()
+            .any(|r| matches!(&r.event, journal::Event::PrivacyFlagMissing(_))),
+        "a legacy run was treated as a privacy incident"
+    );
+    assert_eq!(d.market.calls.count("submit a1"), 1);
+    assert_eq!(d.market.calls.count("decline"), 0);
+}
+
+/// An unreadable apb version before a rework tells the operator once, not
+/// every round; the rework starts once the answer is yes.
+#[tokio::test]
+async fn an_unreadable_apb_version_before_a_rework_is_told_once() {
+    let mut d = delivered_once(
+        vec!["running", "succeeded", "running"],
+        serde_json::json!({}),
+    )
+    .await;
+    d.runner.set_external_data(Err(()));
+    request_changes(&d, "use a table", vec![], false);
+    let mut told = 0;
+    for _ in 0..4 {
+        told += d
+            .round()
+            .await
+            .iter()
+            .filter(|o| {
+                matches!(o, HireOutcome::OperatorNeeded { row_id, why }
+                if row_id == "a1" && why.contains("external-data"))
+            })
+            .count();
+    }
+    assert_eq!(told, 1, "the operator message was repeated");
+    assert_eq!(d.runner.starts.lock().unwrap().len(), 1, "a run started");
+    d.runner.set_external_data(Ok(true));
+    d.run_until(|o| matches!(o, HireOutcome::Working { .. }))
+        .await;
+    assert_eq!(d.runner.starts.lock().unwrap().len(), 2);
 }

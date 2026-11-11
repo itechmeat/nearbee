@@ -88,6 +88,7 @@ pub enum Event {
     Attention(Attention),
     EvidenceCollected(EvidenceCollected),
     EvidenceFailed(EvidenceFailed),
+    PrivacyFlagMissing(PrivacyFlagMissing),
     Unknown {
         event_type: String,
         raw: serde_json::Value,
@@ -111,6 +112,7 @@ impl Event {
             Event::Attention(_) => "attention",
             Event::EvidenceCollected(_) => "evidence_collected",
             Event::EvidenceFailed(_) => "evidence_failed",
+            Event::PrivacyFlagMissing(_) => "privacy_flag_missing",
             Event::Unknown { event_type, .. } => event_type,
         }
     }
@@ -287,6 +289,13 @@ pub struct Attention {
     pub detail: String,
 }
 
+/// A market run whose detail did not report the apb external-data flag
+/// (S6 design 3.6): the run was aborted and the hire declined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivacyFlagMissing {
+    pub run_id: String,
+}
+
 /// An endpoint attestation report stored for the generation (design
 /// 6.2): its phase (`start` or `end`), the model and the SHA-256 of the
 /// report body. The body itself lives in the generation's private
@@ -359,6 +368,7 @@ impl Record {
             Event::Attention(p) => to_value(p),
             Event::EvidenceCollected(p) => to_value(p),
             Event::EvidenceFailed(p) => to_value(p),
+            Event::PrivacyFlagMissing(p) => to_value(p),
             Event::Unknown { raw, .. } => raw.clone(),
         };
         let wire = Wire {
@@ -404,6 +414,9 @@ impl Record {
             "attention" => typed(serde_json::from_value(p).map(Event::Attention))?,
             "evidence_collected" => typed(serde_json::from_value(p).map(Event::EvidenceCollected))?,
             "evidence_failed" => typed(serde_json::from_value(p).map(Event::EvidenceFailed))?,
+            "privacy_flag_missing" => {
+                typed(serde_json::from_value(p).map(Event::PrivacyFlagMissing))?
+            }
             other => Event::Unknown {
                 event_type: other.to_owned(),
                 raw: p,
@@ -958,6 +971,8 @@ pub struct Writer {
     file: std::fs::File,
     path: PathBuf,
     hire_id: String,
+    /// The clock that stamps every record (S6 design 2).
+    clock: crate::clock::Clock,
     /// The generation every appended record carries; 1 until serve sets
     /// it (design 2).
     generation: u32,
@@ -1011,13 +1026,17 @@ fn release_journal_lock(path: &Path) {
 
 impl Writer {
     /// Opens (or creates) the journal at `path` for appending, continuing
-    /// the sequence of the records already on disk.
-    /// Opens (or creates) the journal at `path` for appending, continuing
     /// the sequence of the records already on disk. One writer at a time
     /// per hire within this process: a second open fails naming the file.
-    pub fn open(path: PathBuf, hire_id: &str) -> Result<Self, WriterError> {
+    /// Every record is stamped with `clock` (serve passes its round clock,
+    /// every other caller [`crate::clock::Clock::real`]).
+    pub fn open(
+        path: PathBuf,
+        hire_id: &str,
+        clock: crate::clock::Clock,
+    ) -> Result<Self, WriterError> {
         acquire_journal_lock(&path)?;
-        match Self::open_inner(path.clone(), hire_id) {
+        match Self::open_inner(path.clone(), hire_id, clock) {
             Ok(w) => Ok(w),
             Err(e) => {
                 release_journal_lock(&path);
@@ -1026,7 +1045,11 @@ impl Writer {
         }
     }
 
-    fn open_inner(path: PathBuf, hire_id: &str) -> Result<Self, WriterError> {
+    fn open_inner(
+        path: PathBuf,
+        hire_id: &str,
+        clock: crate::clock::Clock,
+    ) -> Result<Self, WriterError> {
         if let Some(dir) = path.parent() {
             create_dir_durable(dir).map_err(|source| WriterError::Io {
                 path: path.clone(),
@@ -1104,6 +1127,7 @@ impl Writer {
             file,
             path,
             hire_id: hire_id.to_owned(),
+            clock,
             generation: 1,
             next_seq,
             poisoned: false,
@@ -1143,7 +1167,7 @@ impl Writer {
         let record = Record {
             schema_version: SCHEMA_VERSION,
             seq: self.next_seq,
-            timestamp: time::OffsetDateTime::now_utc(),
+            timestamp: self.clock.now(),
             hire_id: self.hire_id.clone(),
             generation: self.generation,
             event,
@@ -1612,11 +1636,11 @@ mod durable_dir_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let hires = dir.path().join("hires");
         chmod(&hires, 0o300);
-        let r = Writer::open(path.clone(), "h2");
+        let r = Writer::open(path.clone(), "h2", crate::clock::Clock::real());
         chmod(&hires, 0o755);
         assert!(r.is_err(), "the writer opened before the barrier");
         drop(r);
-        let mut w = Writer::open(path, "h2").unwrap();
+        let mut w = Writer::open(path, "h2", crate::clock::Clock::real()).unwrap();
         w.append(Event::Received(Received::from_brief("b")))
             .unwrap();
     }
@@ -1639,12 +1663,12 @@ mod writer_tests {
     #[test]
     fn appends_consecutive_seqs_and_survives_a_reopen() {
         let (_dir, path) = dir_journal();
-        let mut w = Writer::open(path.clone(), "h-1").unwrap();
+        let mut w = Writer::open(path.clone(), "h-1", crate::clock::Clock::real()).unwrap();
         assert_eq!(w.next_seq(), 1);
         assert_eq!(w.append(received("a")).unwrap(), 1);
         assert_eq!(w.append(received("b")).unwrap(), 2);
         drop(w);
-        let mut w = Writer::open(path.clone(), "h-1").unwrap();
+        let mut w = Writer::open(path.clone(), "h-1", crate::clock::Clock::real()).unwrap();
         assert_eq!(w.next_seq(), 3, "reopen continues the sequence");
         assert_eq!(w.append(received("c")).unwrap(), 3);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1656,13 +1680,13 @@ mod writer_tests {
     #[test]
     fn a_truncated_tail_refuses_writing() {
         let (_dir, path) = dir_journal();
-        let mut w = Writer::open(path.clone(), "h-1").unwrap();
+        let mut w = Writer::open(path.clone(), "h-1", crate::clock::Clock::real()).unwrap();
         w.append(received("a")).unwrap();
         drop(w);
         // Simulate a crash mid-write: cut the last line's final bytes.
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, &text[..text.len() - 5]).unwrap();
-        let err = Writer::open(path.clone(), "h-1").unwrap_err();
+        let err = Writer::open(path.clone(), "h-1", crate::clock::Clock::real()).unwrap_err();
         assert!(
             matches!(err, WriterError::TruncatedTail { line: 1, .. }),
             "{err}"
@@ -1675,7 +1699,7 @@ mod writer_tests {
         let (_dir, path) = dir_journal();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "").unwrap();
-        let mut w = Writer::open(path, "h-1").unwrap();
+        let mut w = Writer::open(path, "h-1", crate::clock::Clock::real()).unwrap();
         assert_eq!(w.next_seq(), 1);
         w.append(Event::Decision(Decision {
             decision: "accept".into(),
@@ -1688,12 +1712,12 @@ mod writer_tests {
     #[test]
     fn a_second_writer_on_the_same_journal_is_refused() {
         let (_dir, path) = dir_journal();
-        let w = Writer::open(path.clone(), "h-1").unwrap();
-        let err = Writer::open(path.clone(), "h-1").unwrap_err();
+        let w = Writer::open(path.clone(), "h-1", crate::clock::Clock::real()).unwrap();
+        let err = Writer::open(path.clone(), "h-1", crate::clock::Clock::real()).unwrap_err();
         assert!(matches!(err, WriterError::Locked { .. }), "{err}");
         drop(w);
         // After the first writer is gone, opening works again.
-        let mut w = Writer::open(path, "h-1").unwrap();
+        let mut w = Writer::open(path, "h-1", crate::clock::Clock::real()).unwrap();
         w.append(received("later")).unwrap();
     }
 
@@ -1703,7 +1727,7 @@ mod writer_tests {
         let (_dir, path) = dir_journal();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "not json at all\n").unwrap();
-        let err = Writer::open(path, "h-1").unwrap_err();
+        let err = Writer::open(path, "h-1", crate::clock::Clock::real()).unwrap_err();
         assert!(matches!(err, WriterError::Read(_)), "{err}");
     }
 }
@@ -1720,7 +1744,7 @@ mod poison_tests {
     fn a_failed_append_poisons_the_writer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h-1").join("journal.jsonl");
-        let mut w = Writer::open(path, "h-1").unwrap();
+        let mut w = Writer::open(path, "h-1", crate::clock::Clock::real()).unwrap();
         let mut read_only = std::fs::File::open("/dev/null").unwrap();
         std::mem::swap(&mut w.file, &mut read_only);
         let err = w
