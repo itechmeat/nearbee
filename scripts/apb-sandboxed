@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# APB_BIN for Nearbee when its apb instance is sandboxed: runs the apb CLI
+# inside the sandbox (scripts/apb-instance.sh apb, NEARBEE_APB_SANDBOX=1)
+# with the caller's working directory when the container mounts it, else
+# the workspace, and the APB_CONFIG_DIR the caller set. Name it by its
+# absolute path: Nearbee spawns it from the apb workspace.
+#
+#   APB_BIN=/abs/path/to/scripts/apb-sandboxed nearbee ...
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+if [ -n "${APB_CONFIG_DIR:-}" ]; then export NEARBEE_APB_CONFIG_DIR="$APB_CONFIG_DIR"; fi
+# APB_BIN names this wrapper; the instance script must not take it for the
+# host apb.
+unset APB_BIN
+export NEARBEE_APB_SANDBOX=1
+exec "$here/apb-instance.sh" apb "$@"

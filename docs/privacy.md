@@ -182,7 +182,20 @@ credential, and no apb profile setting confines file access. Egress the
 bindings do not declare, and an agent step reading the owner's files, are
 not prevented, and every statement says so ("The agent steps run without a
 sandbox"). An enforced boundary needs a dedicated execution environment with
-egress control; that is post-hackathon work.
+egress control.
+
+Since the change apb-sandbox the owner can run Nearbee's apb instance in a
+container (`NEARBEE_APB_SANDBOX=1`, `docs/apb.md`, "Sandboxed instance"):
+the steps then see only the workspace, the instance config directory, a
+dedicated home and named read-only paths, never the owner's home, keys or
+`.env`, and reach only the hosts of an allowlist, by TLS server name. What it
+does not do: hires share one container (worktrees keep them apart, the
+sandbox home and parts of the config directory are shared), the kernel is
+the host's, an allowed host that accepts uploads stays a channel out, and a
+host behind a shared CDN allows domain fronting. The data statement still
+says the steps run without a sandbox: the statement is generated from the
+listing's facts, and whether an instance runs sandboxed is not one of them
+yet.
 
 ### Repository audit: what apb enforces on the agent step
 
@@ -521,3 +534,6 @@ caches above.
 3. Platform-held copies (brief, thread, files) are outside the owner's control.
 4. Evidence depends on what the executor exposes; the signed path exists
    because general CLIs hide the bytes.
+5. The optional sandbox (`docs/apb.md`, "Sandboxed instance") limits file
+   access and egress per instance, not per hire, and filters egress by TLS
+   server name only.
