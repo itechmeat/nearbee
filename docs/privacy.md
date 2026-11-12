@@ -235,8 +235,12 @@ the smaller ones after it. The omitted files are counted per reason in
 `audit/review-coverage.json` (with at most 1,000 paths) and listed in the
 deliverable's "Not reported" section (at most 50 paths, grouped by
 reason). A pack with no manifest, source, config or test file fails the
-step with `nothing_packed` before any request. The request carries only the model, the two
-messages, `stream: false` and `max_tokens: 16384`; the brief, the buyer's
+step with `nothing_packed` before any request. The request carries the model, the two
+messages, `stream: false`, `max_tokens: 16384` and
+`chat_template_kwargs: {"thinking": false}`, nothing else. The last key
+turns DeepSeek's reasoning off: with it on, the model reasoned past the
+signed call's bound without answering, even for a 20-file repository
+(measured 2026-11-12); the digest request carries the same key. The brief, the buyer's
 change request and the files are labelled data blocks under a system
 message that forbids following them; the brief's and the change request's
 lines are numbered like the files', so a buyer cannot close a block. The model must be in the hire's
@@ -356,7 +360,14 @@ call (`signed_models`).
    list before sending.
 3. The signed call: `nearbee signed-call` sends the request file's exact
    bytes (`stream: false`, `max_tokens` at most 16,384, at most 1 MiB)
-   with `x-no-aliasing: true` and `Accept-Encoding: identity`, after it
+   with `x-no-aliasing: true` and `Accept-Encoding: identity`; the
+   review and digest requests also carry
+   `chat_template_kwargs: {"thinking": false}`, because the model's
+   reasoning otherwise outruns the bound (measured 2026-11-12). One
+   invocation is bounded by 360 s; the completion waits for the time left
+   in that bound minus a 30 s signature reserve (no shorter fixed
+   timeout), and fails before sending when nothing is left. It sends only
+   after it
    stored a fresh model attestation report (`provider=near`) with a
    non-empty `model_attestations` in which at least one attestation
    carries a signing address. It keeps the response bytes before

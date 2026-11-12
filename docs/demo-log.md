@@ -75,3 +75,35 @@ After the review round (the `audit` node now declares `writes:
 all location checked, a 19,581-byte deliverable. `nearbee list` of the
 fast listing passed the stricter attested check on the live instance
 (version `1.0.1828462250`).
+
+## 2026-11-12: the fast audit's model reasoned past the bound
+
+The first live runs of the fast listing's playbook (version
+`1.0.2808650427`, exported from Nearbee's apb instance and run by apb
+`1.0.0-beta.7` in a locked-down container: read-only root, all capabilities
+dropped, no host home, only `NEARAI_API_KEY`) failed at `review` with "the
+call timed out after 240 s", for `itechmeat/nearbee` and for the 20-file
+`sindresorhus/is-plain-obj` alike. The same request from the host timed
+out too, so the container was not the cause. A streamed copy showed
+DeepSeek V4.1 Flash writing only reasoning text (14,500 characters in 90
+seconds, no answer). With `chat_template_kwargs: {"thinking": false}` the
+exact request answered in 34 s with 0 reasoning tokens; `reasoning_effort:
+low` and `thinking.type: disabled` had no effect.
+
+After the change `model-thinking-off`, the same container run of
+`sindresorhus/is-plain-obj` succeeded in 30 s end to end: `fetch`,
+`review` and `finish` succeeded, `signature.json` written (completion
+`chatcmpl-521c7aa3-ccff-4b63-890b-e6ee2157101f`, ECDSA, signing address
+`0xfe0071895500a9755c18044948ab4f4e1a7f337e`), 3,483 prompt and 1,287
+completion tokens, 4 findings location checked and 1 rejected.
+
+The document digest playbook (`playbooks/doc-digest`, version 1.0.0) ran
+in the same container with the fix on a synthetic one-page invoice PNG
+(made-up supplier, person, email and phone): all four steps succeeded in
+37 s. One page rendered and transcribed, personal data counted as one
+`private_person`, one `private_email` and one `private_phone`, 12 figures
+kept and 3 dropped as not found on the cited page, 2 spans in the digest
+replaced by their category, and the digest call signed (completion
+`chatcmpl-dadc6716-fb94-4d9a-b1c2-0e057a4ade54`, the same signing address).
+The container image needs `poppler-utils`, `imagemagick` (the `magick`
+command) and `util-linux` (`prlimit`) for the `pages` step.

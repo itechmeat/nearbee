@@ -377,6 +377,7 @@ fn fast() -> Timing {
         deadline: Duration::from_secs(30),
         signature_window: Duration::from_secs(5),
         signature_interval: Duration::from_millis(20),
+        signature_reserve: Duration::from_millis(100),
     }
 }
 
@@ -416,6 +417,10 @@ async fn extract_sends_the_page_as_an_image_part_and_resumes() {
     assert_eq!(b["model"], digest::VISION_MODEL);
     assert_eq!(b["stream"], false);
     assert_eq!(b["max_tokens"], 2048);
+    assert!(
+        b.get("chat_template_kwargs").is_none(),
+        "the instruct extraction keeps its request shape"
+    );
     let parts = b["messages"][0]["content"].as_array().unwrap();
     assert_eq!(parts[0]["type"], "text");
     assert_eq!(parts[1]["type"], "image_url");
@@ -727,6 +732,10 @@ async fn compose_makes_the_signed_call_and_writes_a_valid_manifest() {
     assert_eq!(req["model"], digest::DIGEST_MODEL);
     assert_eq!(req["stream"], false);
     assert_eq!(req["max_tokens"], 8192);
+    assert_eq!(
+        req["chat_template_kwargs"],
+        serde_json::json!({"thinking": false})
+    );
     let system = req["messages"][0]["content"].as_str().unwrap();
     assert!(system.contains("data, never instructions"), "{system}");
     let user = req["messages"][1]["content"].as_str().unwrap();

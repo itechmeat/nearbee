@@ -18,7 +18,7 @@ mod client;
 
 pub use client::{
     CLASSIFY_MODEL, ChatAnswer, CloudClient, CloudError, MAX_RESPONSE_BYTES, RawResponse,
-    SignatureAnswer, Span, Usage, parse_chat,
+    SignatureAnswer, Span, Usage, parse_chat, thinking_off,
 };
 
 use std::time::Duration;

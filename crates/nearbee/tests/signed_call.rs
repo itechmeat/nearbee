@@ -159,6 +159,7 @@ fn fast() -> Timing {
         deadline: Duration::from_secs(30),
         signature_window: Duration::from_secs(5),
         signature_interval: Duration::from_millis(20),
+        signature_reserve: Duration::from_millis(100),
     }
 }
 
@@ -595,6 +596,7 @@ async fn the_deadline_during_signature_retries_leaves_responded() {
         deadline: Duration::from_millis(600),
         signature_window: Duration::from_secs(60),
         signature_interval: Duration::from_millis(20),
+        signature_reserve: Duration::from_millis(100),
     };
     let started = std::time::Instant::now();
     let err = s.run_with(&timing).await.unwrap_err();
@@ -738,4 +740,73 @@ async fn the_command_refuses_a_missing_direct_models_param() {
     assert_eq!(code, nearbee::EXIT_ERROR);
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("direct_models"), "{text}");
+}
+
+// The completion wait (change `model-thinking-off`, design 2): the time
+// left in the invocation's bound minus the signature reserve.
+
+/// A 2 s bound with a 500 ms signature reserve.
+fn short_bound() -> Timing {
+    Timing {
+        deadline: Duration::from_secs(2),
+        signature_window: Duration::from_millis(400),
+        signature_interval: Duration::from_millis(20),
+        signature_reserve: Duration::from_millis(500),
+    }
+}
+
+#[tokio::test]
+async fn a_slow_answer_inside_the_bound_minus_the_reserve_is_signed() {
+    let s = Setup::new().await;
+    s.report(fixture("report"), 1).await;
+    s.chat(
+        ok_chat("chatcmpl-1").set_delay(Duration::from_millis(1200)),
+        1,
+    )
+    .await;
+    s.signature(
+        signature_body(
+            &request_bytes(),
+            &response_bytes("chatcmpl-1", "stop"),
+            "provider_tee",
+            &signer(),
+        ),
+        1,
+    )
+    .await;
+    s.run_with(&short_bound()).await.unwrap();
+    assert_eq!(s.state()["phase"], "signed");
+    assert!(s.out().join("signature.json").exists());
+}
+
+#[tokio::test]
+async fn an_answer_past_the_bound_minus_the_reserve_fails_and_stays_sending() {
+    let s = Setup::new().await;
+    s.report(fixture("report"), 1).await;
+    s.chat(ok_chat("chatcmpl-1").set_delay(Duration::from_secs(3)), 1)
+        .await;
+    s.signature(Value::Null, 0).await;
+    let started = std::time::Instant::now();
+    let err = s.run_with(&short_bound()).await.unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(2), "{err}");
+    assert_eq!(
+        err,
+        "the completion did not answer within the invocation's 2 s bound; not resent"
+    );
+    assert_eq!(s.state()["phase"], "sending");
+    assert!(!s.out().join("response.bin").exists());
+}
+
+#[tokio::test]
+async fn no_time_left_after_the_reserve_fails_before_sending() {
+    let s = Setup::new().await;
+    s.report(fixture("report"), 1).await;
+    s.chat(ok_chat("chatcmpl-1"), 0).await;
+    let timing = Timing {
+        signature_reserve: Duration::from_secs(5),
+        ..short_bound()
+    };
+    let err = s.run_with(&timing).await.unwrap_err();
+    assert_eq!(err, "the invocation reached its 2 s bound");
+    assert_eq!(s.state()["phase"], "preflight");
 }

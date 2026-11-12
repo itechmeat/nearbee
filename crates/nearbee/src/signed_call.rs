@@ -41,6 +41,9 @@ pub struct Timing {
     pub signature_window: Duration,
     /// The wait between two signature fetches.
     pub signature_interval: Duration,
+    /// The time kept back from the completion wait for the signature
+    /// fetch, so a late answer can still be signed.
+    pub signature_reserve: Duration,
 }
 
 impl Default for Timing {
@@ -49,6 +52,7 @@ impl Default for Timing {
             deadline: Duration::from_secs(360),
             signature_window: Duration::from_secs(60),
             signature_interval: Duration::from_secs(5),
+            signature_reserve: Duration::from_secs(30),
         }
     }
 }
@@ -234,13 +238,17 @@ fn report_signers(report: &[u8]) -> Result<Vec<String>, String> {
 
 fn check_deadline(started: Instant, timing: &Timing) -> Result<(), String> {
     if started.elapsed() >= timing.deadline {
-        Err(format!(
-            "the invocation reached its {} s bound",
-            timing.deadline.as_secs()
-        ))
+        Err(bound_reached(timing))
     } else {
         Ok(())
     }
+}
+
+fn bound_reached(timing: &Timing) -> String {
+    format!(
+        "the invocation reached its {} s bound",
+        timing.deadline.as_secs()
+    )
 }
 
 fn refused_text(state: &State) -> String {
@@ -350,13 +358,29 @@ pub async fn signed_call(
     let completion_id = match phase {
         None | Some(Phase::Preflight) => {
             check_deadline(started, timing)?;
+            let limit = timing
+                .deadline
+                .saturating_sub(started.elapsed())
+                .saturating_sub(timing.signature_reserve);
+            if limit.is_zero() {
+                // Nothing left to wait with: fail while still `preflight`.
+                return Err(bound_reached(timing));
+            }
             write_state(out_dir, &State::at(Phase::Sending))?;
-            let raw = match client.chat_exact(&request).await {
+            let sent = Instant::now();
+            let raw = match client.chat_exact(&request, limit).await {
                 Ok(raw) => raw,
                 Err(CloudError::TooLarge(_)) => {
                     return Err(refuse(out_dir, None, Some("too_large")));
                 }
                 // No answer: the outcome is unknown and `sending` stays.
+                // The client's wait ends only once `limit` has passed.
+                Err(_) if sent.elapsed() >= limit => {
+                    return Err(format!(
+                        "the completion did not answer within the invocation's {} s bound; not resent",
+                        timing.deadline.as_secs()
+                    ));
+                }
                 Err(e) => return Err(format!("the completion failed: {e}; not resent")),
             };
             write_atomic(out_dir, RESPONSE_FILE, &raw.bytes)?;

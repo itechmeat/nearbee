@@ -833,6 +833,7 @@ pub fn build_request(
             "model": DIGEST_MODEL,
             "stream": false,
             "max_tokens": DIGEST_MAX_TOKENS,
+            "chat_template_kwargs": nearbee_cloud::thinking_off(),
             "messages": [
                 {"role": "system", "content": DIGEST_SYSTEM_PROMPT},
                 {"role": "user", "content": user}

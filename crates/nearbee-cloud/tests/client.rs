@@ -5,6 +5,7 @@
 //! completion's `finish_reason`, unknown and missing fields, and the key.
 
 use std::process::Command;
+use std::time::Duration;
 
 use nearbee_cloud::{CloudAttestor, CloudClient, CloudError};
 use nearbee_core::Secret;
@@ -42,6 +43,31 @@ fn chat_bytes() -> Vec<u8> {
 
 // chat_exact
 
+/// A completion limit no test reaches.
+const LIMIT: Duration = Duration::from_secs(30);
+
+#[tokio::test]
+async fn chat_exact_waits_for_the_given_limit_only() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(1))
+                .set_body_raw(chat_bytes(), "application/json"),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let c = client(&server);
+    let err = c
+        .chat_exact(b"{}", Duration::from_millis(300))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("timed out"), "{err}");
+    let raw = c.chat_exact(b"{}", Duration::from_secs(2)).await.unwrap();
+    assert_eq!(raw.status, 200);
+}
+
 #[tokio::test]
 async fn chat_exact_sends_the_bytes_unchanged_with_the_headers() {
     let server = MockServer::start().await;
@@ -57,7 +83,7 @@ async fn chat_exact_sends_the_bytes_unchanged_with_the_headers() {
         .expect(1)
         .mount(&server)
         .await;
-    let raw = client(&server).chat_exact(&body).await.unwrap();
+    let raw = client(&server).chat_exact(&body, LIMIT).await.unwrap();
     assert_eq!(raw.status, 200);
     assert_eq!(raw.bytes, chat_bytes());
     assert_eq!(raw.content_encoding, None);
@@ -71,7 +97,7 @@ async fn chat_exact_returns_a_non_2xx_with_its_status() {
         .expect(1)
         .mount(&server)
         .await;
-    let raw = client(&server).chat_exact(b"{}").await.unwrap();
+    let raw = client(&server).chat_exact(b"{}", LIMIT).await.unwrap();
     assert_eq!(raw.status, 402);
     assert_eq!(raw.bytes, b"no credits");
 }
@@ -87,7 +113,7 @@ async fn chat_exact_reports_the_content_encoding() {
         )
         .mount(&server)
         .await;
-    let raw = client(&server).chat_exact(b"{}").await.unwrap();
+    let raw = client(&server).chat_exact(b"{}", LIMIT).await.unwrap();
     assert_eq!(raw.content_encoding.as_deref(), Some("gzip"));
 }
 
@@ -106,7 +132,7 @@ async fn chat_exact_does_not_follow_a_redirect() {
         .expect(0)
         .mount(&server)
         .await;
-    let raw = client(&server).chat_exact(b"{}").await.unwrap();
+    let raw = client(&server).chat_exact(b"{}", LIMIT).await.unwrap();
     assert_eq!(raw.status, 307);
 }
 
@@ -119,7 +145,7 @@ async fn chat_exact_refuses_a_body_over_four_mebibytes() {
         .respond_with(ResponseTemplate::new(200).set_body_raw(big, "application/json"))
         .mount(&server)
         .await;
-    let err = client(&server).chat_exact(b"{}").await.unwrap_err();
+    let err = client(&server).chat_exact(b"{}", LIMIT).await.unwrap_err();
     assert!(matches!(err, CloudError::TooLarge(_)), "{err}");
     assert!(err.to_string().contains("4 MiB"), "{err}");
 }
@@ -489,7 +515,11 @@ async fn the_key_never_appears_in_an_error() {
         assert!(e.contains("401"), "{e}");
     }
     let closed = CloudClient::new("http://127.0.0.1:9/v1", Secret::new(KEY)).unwrap();
-    let e = closed.chat_exact(b"{}").await.unwrap_err().to_string();
+    let e = closed
+        .chat_exact(b"{}", LIMIT)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(!e.contains(KEY), "{e}");
     let e = closed
         .chat_json(&fixture_req())
@@ -533,7 +563,7 @@ async fn system_proxy_settings_are_ignored() {
     if let Ok(url) = std::env::var(CHILD) {
         let c = CloudClient::new(url, Secret::new(KEY)).unwrap();
         c.chat_json(&fixture_req()).await.unwrap();
-        c.chat_exact(b"{}").await.unwrap();
+        c.chat_exact(b"{}", LIMIT).await.unwrap();
         let a = CloudAttestor::new(std::env::var(CHILD).unwrap(), Secret::new(KEY)).unwrap();
         a.report("m/x", &"0f".repeat(32)).await.unwrap();
         return;

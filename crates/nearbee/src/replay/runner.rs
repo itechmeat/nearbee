@@ -178,6 +178,7 @@ fn signed_files() -> Result<SignedFiles, String> {
         "model": MODEL,
         "stream": false,
         "max_tokens": crate::audit::REVIEW_MAX_TOKENS,
+        "chat_template_kwargs": nearbee_cloud::thinking_off(),
         "messages": [
             {"role": "system", "content": "Replay fixture: the review rules."},
             {"role": "user", "content": "Replay fixture: the packed repository."}
@@ -477,5 +478,17 @@ mod tests {
         let off = r.start(request("h1-2", false)).await.unwrap();
         assert!(r.run(&on).await.unwrap().external_data);
         assert!(!r.run(&off).await.unwrap().external_data);
+    }
+
+    /// The replay's signed request has the real review request's shape,
+    /// reasoning off included.
+    #[test]
+    fn the_signed_request_turns_reasoning_off() {
+        let files = signed_files().unwrap();
+        let req: serde_json::Value = serde_json::from_slice(&files.request).unwrap();
+        assert_eq!(
+            req["chat_template_kwargs"],
+            serde_json::json!({"thinking": false})
+        );
     }
 }
