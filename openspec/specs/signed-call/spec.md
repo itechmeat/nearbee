@@ -102,6 +102,17 @@ The command SHALL refuse a request without `max_tokens` or with `max_tokens` abo
 - **WHEN** the answer's `finish_reason` is `length`
 - **THEN** the step fails saying the answer was cut at `max_tokens`
 
+### Requirement: Completion wait
+Inside the invocation's bound the completion wait SHALL use the time left minus a 30-second signature reserve, with no shorter fixed timeout, and the call SHALL fail before sending when nothing is left after the reserve.
+
+#### Scenario: Slow valid answer
+- **WHEN** the completion answers inside the bound minus the signature reserve
+- **THEN** the answer is accepted and the signature fetch still has the reserve
+
+#### Scenario: No time left to send
+- **WHEN** less than the signature reserve is left before the completion is sent
+- **THEN** the command fails without sending and the state stays `preflight`
+
 ### Requirement: Evidence entries
 On success the command SHALL write `<dir>/signature.json` for the manifest entry `{kind: tee_signature, visibility: public}`, and beside it, in the same directory, `request.bin` (`kind: tee_request`), `response.bin` (`kind: tee_response`) and `report.json` (`kind: tee_model_report`), each for a `visibility: private` entry.
 

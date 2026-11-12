@@ -277,7 +277,7 @@ fn a_non_utf8_file_is_omitted() {
 }
 
 #[test]
-fn the_request_has_only_model_messages_stream_and_max_tokens() {
+fn the_request_has_only_the_five_keys_and_reasoning_off() {
     let dir = worktree(&[("src/main.rs", LIB.as_bytes())]);
     let pack = audit::review_request(dir.path(), "Audit the repo.", "Shorter please.").unwrap();
     let req = request_of(&pack);
@@ -288,7 +288,20 @@ fn the_request_has_only_model_messages_stream_and_max_tokens() {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["max_tokens", "messages", "model", "stream"]);
+    assert_eq!(
+        keys,
+        [
+            "chat_template_kwargs",
+            "max_tokens",
+            "messages",
+            "model",
+            "stream"
+        ]
+    );
+    assert_eq!(
+        req["chat_template_kwargs"],
+        serde_json::json!({"thinking": false})
+    );
     assert_eq!(req["model"], audit::REVIEW_MODEL);
     assert_eq!(req["stream"], false);
     assert_eq!(req["max_tokens"], 16384);
@@ -407,6 +420,7 @@ fn fast() -> Timing {
         deadline: Duration::from_secs(30),
         signature_window: Duration::from_secs(5),
         signature_interval: Duration::from_millis(20),
+        signature_reserve: Duration::from_millis(100),
     }
 }
 

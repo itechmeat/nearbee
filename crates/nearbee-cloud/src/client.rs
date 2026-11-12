@@ -17,9 +17,6 @@ use std::time::Duration;
 use nearbee_core::Secret;
 use serde::{Deserialize, Serialize};
 
-/// The limit of one exact-bytes completion, request and whole body.
-pub const CHAT_EXACT_TIMEOUT: Duration = Duration::from_secs(240);
-
 /// The limit of one signature fetch.
 pub const SIGNATURE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -34,6 +31,14 @@ pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// The largest signature body read, in bytes.
 pub const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
+
+/// The request key that turns a reasoning model's thinking off:
+/// `"chat_template_kwargs": {"thinking": false}`. DeepSeek V4.1 Flash
+/// otherwise reasons past the signed call's bound without answering
+/// (measured 2026-11-12, change `model-thinking-off`).
+pub fn thinking_off() -> serde_json::Value {
+    serde_json::json!({"thinking": false})
+}
 
 /// The privacy classifier model.
 pub const CLASSIFY_MODEL: &str = "openai/privacy-filter";
@@ -193,8 +198,14 @@ impl CloudClient {
     /// `POST {base}/chat/completions` with `body` sent unchanged and the
     /// headers of a `provider_tee` signature (`x-no-aliasing: true`,
     /// `accept-encoding: identity`). Every status is returned; no retry.
-    pub async fn chat_exact(&self, body: &[u8]) -> Result<RawResponse, CloudError> {
-        Self::bounded(CHAT_EXACT_TIMEOUT, async {
+    /// The request and the whole body are bounded by `limit` alone: the
+    /// caller passes the time left in its invocation (spec `signed-call`).
+    pub async fn chat_exact(
+        &self,
+        body: &[u8],
+        limit: Duration,
+    ) -> Result<RawResponse, CloudError> {
+        Self::bounded(limit, async {
             let resp = self
                 .client
                 .post(format!("{}/chat/completions", self.base))
