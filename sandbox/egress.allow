@@ -1,0 +1,14 @@
+# Hosts the sandboxed apb instance may reach, one per line (TLS on port 443,
+# matched by the server name the client sends). Add hosts for one start with
+# NEARBEE_SANDBOX_ALLOW="host1 host2". Everything else has no DNS and no route.
+#
+# NEAR AI Cloud: the TEE models and Nearbee's direct calls.
+cloud-api.near.ai
+# GitHub: clones, the gh CLI and release downloads.
+github.com
+api.github.com
+codeload.github.com
+objects.githubusercontent.com
+# Agent CLIs with an API key or token.
+api.anthropic.com
+api.openai.com

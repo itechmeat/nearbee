@@ -50,8 +50,8 @@ hires (D-012, D-023). `scripts/apb-instance.sh`:
 | `start` | `APB_CONFIG_DIR=~/.local/share/nearbee/apb-config apb dashboard --no-open --port 7322` as the transient `systemd --user` unit `nearbee-apb` (`KillMode=process`, so stopping it leaves run drivers alone); prints the command instead on a machine without a systemd user session |
 | `stop`, `status` | stop the unit and remove the key file (and any temp key file a killed `start` left); unit state and `/api/health` |
 | `register <dir> --git` | `git init` plus an empty commit, `apb init --standing-block no --feedback-loop no`, and one registering command, all with this instance's `APB_CONFIG_DIR`: the directory becomes a project of this instance only |
-| `install [<workspace>]` | copies `playbooks/profiles/*.yaml` as project profiles (`.apb/profiles/<name>/profile.yaml` plus a one-line `SOUL.md`), `playbooks/workspace/opencode.json` to the workspace root, and imports each `playbooks/smoke/*.yaml` with its `scripts/` as a bundle (`apb import --accept <bundle digest>`), then approves the version, also an unchanged one, by its trust digest (`apb trust approve <id> --version <v> --digest <d>`): a version imported with scripts does not run until approved. Before and after the approval, `apb import <bundle> --preview` must say the current version is `<v>` and already holds the bundle just built (apb compares definition and scripts); otherwise nothing is approved, or the approval just made is revoked. A version that exists with other content (apb: "already exists") stops the install with "bump the version". Prints `playbook <id> <v> approved` per playbook and exits non-zero naming the playbook when apb prints no digest or refuses it |
-| `allow-billed` | writes `billing: {billed: allow, unknown_basis: allow}` to the instance's `policy.yaml`; see "Billed work" below. Only with the owner's go-ahead for Cloud spend |
+| `install [<workspace>]` | copies `playbooks/profiles/*.yaml` as project profiles (`.apb/profiles/<name>/profile.yaml` plus a one-line `SOUL.md`) and `playbooks/workspace/opencode.json` to the workspace root through `scripts/apb-workspace-write.py`, which follows no symlink, and imports each `playbooks/smoke/*.yaml` with its `scripts/` as a bundle on stdin (`apb import /dev/stdin --accept <bundle digest>`, the digest the sha256 of the bundle, computed by the script), then approves the version, also an unchanged one, by its trust digest (`apb trust approve <id> --version <v> --digest <d>`): a version imported with scripts does not run until approved. Before and after the approval, `apb import <bundle> --preview` must say the current version is `<v>` and already holds the bundle just built (apb compares definition and scripts); otherwise nothing is approved, or the approval just made is revoked. A version that exists with other content (apb: "already exists") stops the install with "bump the version". Prints `playbook <id> <v> approved` per playbook and exits non-zero naming the playbook when apb prints no digest or refuses it |
+| `allow-billed` | writes `billing: {billed: allow, unknown_basis: allow}` to the instance's `policy.yaml` in place, never through a symlink, and only over a file this script wrote (its first line `# nearbee: ...`); see "Billed work" below. Only with the owner's go-ahead for Cloud spend |
 | `apb <args>` | the apb CLI against this instance's config dir |
 
 Setup from scratch (2026-11-09):
@@ -84,6 +84,147 @@ directory that has `.apb/` registers that directory in Nearbee's instance (an
 `apb detect` from an apb source checkout did, 2026-11-09). Run instance
 commands from the workspace or a neutral directory; remove a stray entry with
 `scripts/apb-instance.sh apb projects remove <workspace_id>`.
+
+### Sandboxed instance (change apb-sandbox, 2026-11-12)
+
+With `NEARBEE_APB_SANDBOX=1` the same script runs the instance inside a
+container with an outbound allowlist; the default mode above is unchanged.
+It needs Docker. Setup:
+
+```sh
+sandbox/build.sh                       # image nearbee-sandbox:local
+export NEARBEE_APB_SANDBOX=1
+scripts/apb-instance.sh register ~/.local/share/nearbee/apb-workspace --git
+scripts/apb-instance.sh install
+scripts/apb-instance.sh start          # issues a server key on first start
+export APB_BIN="$PWD/scripts/apb-sandboxed"   # absolute path, for nearbee
+```
+
+1. Image (`sandbox/Dockerfile`, `sandbox/build.sh`): Ubuntu 26.04 (the host
+   release, so copied binaries find the same glibc) with git, gh, ripgrep,
+   jq, curl, python3, poppler-utils, ImageMagick, Node with OpenSpec 2.0.0
+   and OpenCodeReview 1.13.8-fork.1, Code Ranker 5.0.4, and the host's
+   `apb`, `nearbee` and self-contained `claude`, `codex` and `opencode`
+   binaries (`NEARBEE_SANDBOX_CLIS` changes the list; a CLI that is a
+   script is skipped). The image is labelled with the sha256 of the copied
+   `apb` and `nearbee`; `start` refuses when the host's binary (`APB_BIN`,
+   `NEARBEE_BIN` or PATH) differs and names the rebuild command.
+2. Networks: `nearbee-sbx-int` (internal, `NEARBEE_SANDBOX_SUBNET`, default
+   `172.30.77.0/24`, gateway mode `isolated`: the host has no address on
+   its bridge, so the container cannot reach host services at `.1` either;
+   measured 2026-11-12, every host port tried at `.1` is closed) and
+   `nearbee-sbx-out`. A start makes `nearbee-sbx-int` again when it exists
+   with another subnet or another gateway mode. The gateway `nearbee-apb-gw`
+   (`nginx:1.29-alpine`, `--restart unless-stopped`, as the image's `nginx`
+   user with no capability at all, `no-new-privileges`, read-only root,
+   tmpfs `/tmp` and `/var/cache/nginx`) sits on both at `.2`;
+   the dashboard container `nearbee-apb-sbx` at `.3` on the internal one
+   only. The gateway reads the TLS server name (`ssl_preread`) and passes
+   the connection through unchanged to that host when it is in
+   `sandbox/egress.allow` or `NEARBEE_SANDBOX_ALLOW`, else to a closed port;
+   it also publishes the dashboard on `127.0.0.1:$NEARBEE_APB_PORT` only.
+   A gateway is reused only when its configuration is unchanged and it is
+   attached at `.2`; one whose attach failed is removed at once.
+   The container's hosts file maps each allowed host to the gateway.
+   Docker's embedded resolver answers inside the internal network but
+   resolves no outside name (measured: `example.com` does not resolve, a
+   raw IP has no route).
+3. Container: the owner's uid and gid, read-only root, `/tmp` a 1 GB tmpfs,
+   all capabilities dropped, `no-new-privileges`, 1024 processes, 4 GB,
+   4 CPUs. Mounts, each at its resolved host path: the workspace
+   (`NEARBEE_APB_WORKSPACE`, read-write), the config directory (read-write,
+   with `policy.yaml`, `server-auth.yaml` and `run-origin.key` bound
+   read-only over it when they exist; a start creates `policy.yaml` with
+   no settings when it is missing, so it is always bound, and refuses any
+   of the three that is a symlink, not a regular file of the owner, or
+   does not resolve to its own path), the unit's `XDG_CONFIG_HOME`
+   (read-only), the sandbox home `~/.local/share/nearbee/sandbox-home`
+   (`NEARBEE_SANDBOX_HOME`, read-write, with an empty read-only directory
+   over its `.opencode`; `start` refuses entries there), and each path of
+   `NEARBEE_SANDBOX_MOUNTS_RO` (read-only; space separated, never
+   globbed, and a path with a comma, a quote or a newline is refused,
+   since it would add options to `docker --mount`). Nothing else of the
+   host home.
+4. Unit: still `nearbee-apb` (the tier check reads it). Its `Environment=`
+   entries are the ones the container receives with the same values
+   (`APB_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME` the sandbox home,
+   `NEARBEE_BIN=/usr/local/bin/nearbee`, the container `PATH`, the nearbee
+   git identity) plus `DOCKER_CONFIG` (a Nearbee-owned empty directory, for
+   the docker client only, never passed in); the provider keys come from
+   the same `EnvironmentFile` as in the default mode. `ExecStopPost`
+   removes the container, so a killed client leaves none (checked by
+   `kill -9` on the client).
+5. Server key: apb refuses a non-loopback bind without one. `start` issues
+   a key only when the instance has none and writes it as `APB_API_KEY` to
+   `NEARBEE_ENV_FILE` (keep that the `.env` next to `nearbee.yaml`), never
+   printing it and never passing it into the container; with a key issued
+   but no `APB_API_KEY` in that file it stops and says so.
+   `NEARBEE_APB_ENV_VARS` may not name `APB_API_KEY`, a variable the
+   sandbox sets itself (systemd's `EnvironmentFile=` would override the
+   unit's value, which the tier check reads, while the container got the
+   `.env` value) or a `DOCKER_` variable. The health check
+   reads the header from a 0600 file (`curl -H @file`). `/api/health`
+   answers without a key; every other route needs it. Changing keys
+   (`apb server key issue|revoke`) needs the instance stopped, because the
+   key file is bound read-only into the running container.
+6. CLI calls: the script's `apb`, `register` and `install`, and
+   `scripts/apb-sandboxed` (Nearbee's `APB_BIN`, named by its absolute
+   path) run apb with `docker exec` in the running container, or in a
+   one-off container on no network while it is down, from the caller's
+   directory when it is mounted (else the workspace), with
+   `timeout --kill-after=5 $NEARBEE_SANDBOX_CLI_TIMEOUT` (default 25 s)
+   inside the container. Host code never reads or writes a file in the
+   workspace, the config directory or the sandbox home that a step could
+   have swapped or turned into a symlink: steps write those under the
+   owner's uid, and a process a step left behind lives until `stop`. The
+   bundles of `install` and of `nearbee list` reach apb on stdin
+   (`apb import /dev/stdin`), with the accept digest computed from the
+   bundle itself, and the read-back comes from `apb export` on stdout;
+   `install` writes the profiles, `opencode.json` and the
+   `decisions: { enabled: false }` edit through
+   `scripts/apb-workspace-write.py` inside the container (no symlink is
+   followed, every file goes to a fresh random name and is renamed into
+   place); `register` makes the directory and runs git inside the
+   container. A start removes a leftover dashboard container before it
+   checks the shared directories. `start`
+   refuses when `nearbee.yaml` (or `nearbee.local.yaml`) next to the `.env`
+   names another `apb.workspace_path` than the mounted workspace.
+7. `stop` interrupts every run (the drivers live in the container); the
+   next `start` runs `apb resume --all` in the workspace once the dashboard
+   answers. A failed start removes the key file it wrote. `down` also
+   removes the gateway and both networks. `status`
+   shows the unit, both containers, whether the image matches the host
+   binaries and the health answer.
+8. Which config files apb writes, measured with a full run of apb's keyless
+   demo in the container (2026-11-12): only `projects.json` (replaced by
+   rename on every project touch) and the run's own state; `trust.json`
+   changes on an import or approval, also by rename. A file bound read-only
+   pins its inode, so a rename-written file cannot be: `trust.json` and
+   `projects.json` stay writable (design 2.5 listed them read-only; the
+   approval through `scripts/apb-sandboxed` and every run would fail).
+9. `NEARBEE_APB_UNIT` (default `nearbee-apb`) renames the unit, its
+   containers (`<unit>-sbx`, `<unit>-gw`) and networks; it exists only to
+   test a second instance next to a running one, since the tier check reads
+   `nearbee-apb`.
+
+Limits, stated as they are:
+
+1. One container per instance, not per hire: hires share it and are kept
+   apart by worktrees only. A step can leave files in the shared sandbox
+   home and in the writable parts of the config directory (including
+   `trust.json` and `projects.json`) that later hires see.
+2. A sandboxed `stop` interrupts every run; `start` resumes them.
+3. Containers share the host kernel.
+4. The allowlist is by TLS server name. An allowed host that accepts
+   uploads (GitHub with a token) remains a channel out, and a host behind a
+   shared CDN allows domain fronting.
+5. OpenCode fetches from `registry.npmjs.org` and `models.dev` at run time
+   unless its cache is warm in the sandbox home: add them to
+   `NEARBEE_SANDBOX_ALLOW`, or warm the cache once with them allowed.
+6. Agent CLI logins go in as API keys or tokens listed in
+   `NEARBEE_APB_ENV_VARS` (for example `CLAUDE_CODE_OAUTH_TOKEN`), never as
+   the owner's config directories; a CLI that needs more hosts than the
+   default allowlist needs them in `NEARBEE_SANDBOX_ALLOW`.
 
 ## REST endpoints Nearbee uses
 

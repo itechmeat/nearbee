@@ -107,3 +107,20 @@ replaced by their category, and the digest call signed (completion
 `chatcmpl-dadc6716-fb94-4d9a-b1c2-0e057a4ade54`, the same signing address).
 The container image needs `poppler-utils`, `imagemagick` (the `magick`
 command) and `util-linux` (`prlimit`) for the `pages` step.
+
+## 2026-11-12: Nearbee's apb instance in the sandbox
+
+Nearbee's own instance (unit `nearbee-apb`, port 7322, the real workspace)
+was switched to the sandboxed mode of change `apb-sandbox`: image
+`nearbee-sandbox:local` built from the host `apb` 1.0.0-beta.7 and the
+release `nearbee` of this change, gateway `nearbee-apb-gw`, dashboard
+container `nearbee-apb-sbx`. `status`: unit active, container and gateway
+running, image matching the host binaries, health 200; a server key was
+issued once and written to `.env`.
+
+A fast audit run started through the REST API with that key
+(`repo-audit-fast` 1.0.2808650427, `sindresorhus/is-plain-obj`, run
+`repo-audit-fast-1794521714830`) succeeded: `fetch`, `review` and `finish`
+all succeeded inside the container. From inside the container
+`https://cloud-api.near.ai/v1/models` answered 200, `https://example.com`
+did not resolve, and the owner's `~/.ssh` did not exist.

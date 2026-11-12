@@ -101,6 +101,13 @@ With Rust stable and `apb` 1.0.0-beta.7 or newer installed:
    `scripts/apb-instance.sh register ~/.local/share/nearbee/apb-workspace --git`
    and `scripts/apb-instance.sh install` create the dedicated workspace with
    the profiles and the smoke playbooks (`docs/apb.md`).
+   To run the instance in a container instead (Docker; the steps see only
+   the workspace and the instance's own directories, and reach only the
+   hosts in `sandbox/egress.allow`), build the image with
+   `sandbox/build.sh`, set `NEARBEE_APB_SANDBOX=1` for the same commands
+   and `APB_BIN=$PWD/scripts/apb-sandboxed` for `nearbee`. It is one
+   container per instance, not per hire, and filters egress by TLS server
+   name; `docs/apb.md`, "Sandboxed instance", lists the limits.
 3. `cargo run -p nearbee -- config check` prints one line per check (`ok`,
    `missing`, `failed`): the config file, each variable by name, the apb
    dashboard, the workspace and the apb version (Nearbee needs

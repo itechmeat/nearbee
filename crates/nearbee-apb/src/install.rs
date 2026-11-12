@@ -73,10 +73,25 @@ impl ApbCli {
     const CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     fn run(&self, step: &'static str, args: &[&str]) -> Result<String, InstallError> {
-        // stdin is null, so a prompting apb reads EOF instead of blocking.
+        self.run_io(step, args, None).map(|(_, text)| text)
+    }
+
+    /// Runs the CLI with `input` on its stdin (null when `None`, so a
+    /// prompting apb reads EOF instead of blocking). Returns its stdout
+    /// alone and stdout plus stderr.
+    fn run_io(
+        &self,
+        step: &'static str,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<(String, String), InstallError> {
         let mut child = std::process::Command::new(&self.bin)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .current_dir(&self.workspace)
             .env("APB_CONFIG_DIR", &self.config_dir)
             .env_remove("NO_COLOR")
@@ -87,6 +102,18 @@ impl ApbCli {
                 step,
                 detail: format!("cannot run {}: {e}", self.bin.display()),
             })?;
+        // The input is written on its own thread and the pipe closed after
+        // it, so a child that reads slowly never blocks this side.
+        let writer = match (input, child.stdin.take()) {
+            (Some(bytes), Some(mut pipe)) => {
+                let bytes = bytes.to_vec();
+                Some(std::thread::spawn(move || {
+                    use std::io::Write;
+                    let _ = pipe.write_all(&bytes);
+                }))
+            }
+            _ => None,
+        };
         let deadline = std::time::Instant::now() + Self::CLI_TIMEOUT;
         // The pipes are drained on threads while the child runs, so a big
         // answer can never block the child on a full pipe buffer (N10).
@@ -124,12 +151,16 @@ impl ApbCli {
             step,
             detail: "the output reader failed".into(),
         })?;
+        if let Some(w) = writer {
+            let _ = w.join();
+        }
         let out = std::process::Output {
             status,
             stdout,
             stderr,
         };
-        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        let stdout_text = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut text = stdout_text.clone();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
             return Err(InstallError {
@@ -142,7 +173,7 @@ impl ApbCli {
                 ),
             });
         }
-        Ok(text)
+        Ok((stdout_text, text))
     }
 }
 
@@ -449,6 +480,9 @@ fn extract_digest(output: &str) -> Option<String> {
         })
 }
 
+/// The file name under which apb reads an import from its stdin.
+const STDIN_FILE: &str = "/dev/stdin";
+
 /// What a read-back of the installed playbook found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadBack {
@@ -470,39 +504,32 @@ pub fn install_playbook(
         detail: "the materialised text has no id or version".into(),
     })?;
     let bundle = build_bundle(materialised, scripts);
-    // A private temp directory (random name, 0700), removed on drop: no
-    // predictable path in the shared temp dir for the bundle to be swapped.
-    let tmp = tempfile::tempdir().map_err(|e| InstallError {
-        step: "bundle",
-        detail: e.to_string(),
-    })?;
-    let bundle_path = tmp.path().join(format!("{id}.json"));
-    std::fs::write(
-        &bundle_path,
-        serde_json::to_vec(&bundle).expect("bundle serializes"),
-    )
-    .map_err(|e| InstallError {
-        step: "bundle",
-        detail: e.to_string(),
-    })?;
-    // The digest is derived from the bundle just built, never from apb's
-    // free-form output.
+    // The bundle never touches a disk: every import call reads these bytes
+    // on stdin. The config directory and the workspace are writable by a
+    // sandboxed step under the same uid, so a file there could be swapped
+    // or replaced by a symlink between the write and apb's read.
+    let bundle_bytes = serde_json::to_vec(&bundle).expect("bundle serializes");
+    // apb's digest is over the raw bytes it read; it is derived here from
+    // the bundle just built, never from apb's free-form output.
     let bundle_digest = format!(
         "sha256:{}",
-        nearbee_core::journal::sha256_hex(&serde_json::to_vec(&bundle).expect("bundle serializes"))
+        nearbee_core::journal::sha256_hex(&bundle_bytes)
     );
-    let bundle_arg = bundle_path.display().to_string();
-    // `tmp` lives to the end of the function, so every apb call below sees
-    // the bundle at this path.
+    let import = |step: &'static str, extra: &[&str]| -> Result<String, InstallError> {
+        let mut args = vec!["import", STDIN_FILE];
+        args.extend_from_slice(extra);
+        cli.run_io(step, &args, Some(&bundle_bytes))
+            .map(|(_, text)| text)
+    };
 
-    let holds_bundle = |cli: &ApbCli| -> Result<bool, InstallError> {
-        let out = cli.run("preview", &["import", &bundle_arg, "--preview"])?;
+    let holds_bundle = || -> Result<bool, InstallError> {
+        let out = import("preview", &["--preview"])?;
         Ok(out.contains(&format!("bundle {id} @ {version}: {UNCHANGED_PREFIX}")))
     };
 
     // 1. Import the bundle. Without a terminal, apb prints the preview and
     //    exits without writing unless the call names the bundle digest.
-    let _imported: String = match cli.run("import", &["import", &bundle_arg]) {
+    let _imported: String = match import("import", &[]) {
         Ok(text) if text.contains("nothing to import") || text.contains(UNCHANGED_PREFIX) => {
             // apb compared the bundle with its current version: same
             // definition and same scripts.
@@ -522,12 +549,12 @@ pub fn install_playbook(
             // never text apb happened to print.
             let _ = e;
             let accept_arg = bundle_digest.as_str();
-            cli.run("accept", &["import", &bundle_arg, "--accept", accept_arg])?;
+            import("accept", &["--accept", accept_arg])?;
             String::new()
         }
     };
     // 2. The workspace must hold exactly this bundle before the approval.
-    if !holds_bundle(cli)? {
+    if !holds_bundle()? {
         return Err(InstallError {
             step: "verify",
             detail: format!(
@@ -566,7 +593,7 @@ pub fn install_playbook(
         }
     }
     // 4. Still the same bundle after the approval, else revoke.
-    if !holds_bundle(cli)? {
+    if !holds_bundle()? {
         if approved_via_digest {
             let _ = cli.run(
                 "trust revoke",
@@ -608,20 +635,9 @@ pub fn install_playbook(
 /// Reads the installed current version back through `apb export`: the
 /// bundle JSON's version and playbook text.
 pub fn read_back_export(cli: &ApbCli, id: &str) -> Result<ReadBack, InstallError> {
-    // A private temp file (random name), removed on drop.
-    let out = tempfile::Builder::new()
-        .prefix("nearbee-readback-")
-        .tempfile()
-        .map_err(|e| InstallError {
-            step: "read back",
-            detail: e.to_string(),
-        })?;
-    let out_arg = out.path().display().to_string();
-    cli.run("export", &["export", id, "--out", &out_arg])?;
-    let text = std::fs::read_to_string(out.path()).map_err(|e| InstallError {
-        step: "read back",
-        detail: format!("{}: {e}", out.path().display()),
-    })?;
+    // From apb's stdout, never a file: a file in a directory a sandboxed
+    // step can write could be swapped for forged JSON before this read.
+    let (text, _) = cli.run_io("export", &["export", id], None)?;
     let v: Value = serde_json::from_str(&text).map_err(|e| InstallError {
         step: "read back",
         detail: format!("not JSON: {e}"),
@@ -886,7 +902,11 @@ STATE="${APB_CONFIG_DIR:?}"
 printf '%s\n' "$*" >> "$STATE/argv.log"
 case "$1" in
   import)
-    bundle="$2"
+    # The bundle arrives on stdin (/dev/stdin); a copy is kept only while
+    # this call runs.
+    bundle="$(mktemp "$STATE/fake-in.XXXXXX")"
+    trap 'rm -f "$bundle"' EXIT
+    cat "$2" > "$bundle"
     id="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$bundle")"
     ver="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$bundle")"
     if [ "$3" = "--preview" ]; then
@@ -946,13 +966,14 @@ case "$1" in
     exit 2
     ;;
   export)
-    # export <id> --out <file> (apb 1.0.0-beta.6)
-    [ "$3" = "--out" ] || { echo "error: unexpected argument '$3' found" >&2; exit 2; }
-    set -- "$1" "$2" "$4"
+    # export <id> [--out <file>]: stdout when --out is omitted (apb 1.0.0-beta.7)
+    out=/dev/stdout
+    if [ "$3" = "--out" ]; then out="$4"; fi
     version="$(cat "$STATE/version.txt" 2>/dev/null || echo 1.0.0)"
     playbook="$(cat "$STATE/playbook.txt" 2>/dev/null || echo "id: x")"
     escaped="$(printf '%s\n' "$playbook" | sed 's/\\/\\\\/g; s/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')"
-    printf '{"apb_bundle":2,"id":"%s","version":"%s","playbook":"%s"}\n' "$2" "$version" "$escaped" > "$3"
+    echo "exported $2" >&2
+    printf '{"apb_bundle":2,"id":"%s","version":"%s","playbook":"%s"}\n' "$2" "$version" "$escaped" > "$out"
     ;;
   *)
     echo "fake apb: unknown command $*" >&2
@@ -1040,6 +1061,61 @@ esac
         );
         assert!(argv.contains(&want), "argv log: {argv}");
         assert!(fake.state().join("approved").exists());
+    }
+
+    /// No install file ever lies in a directory a sandboxed step can write
+    /// (the config directory, the workspace): the bundle goes to apb on
+    /// stdin and the export read-back comes from its stdout, so nothing can
+    /// be swapped or planted as a symlink between the write and the read
+    /// (change apb-sandbox, code review finding 3).
+    #[test]
+    fn the_bundle_goes_on_stdin_and_the_export_comes_from_stdout() {
+        let fake = fake_apb();
+        let m = materialised_for("repo-audit-fast");
+        serve_export_state(&fake, &m);
+        let before: Vec<_> = std::fs::read_dir(fake.state())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        install_playbook(&fake.cli, &m, &scripts()).unwrap();
+        let argv = std::fs::read_to_string(fake.state().join("argv.log")).unwrap();
+        let mut imports = 0;
+        let mut exports = 0;
+        for line in argv.lines() {
+            let args: Vec<&str> = line.split(' ').collect();
+            match args.as_slice() {
+                ["import", file, ..] => {
+                    assert_eq!(*file, "/dev/stdin", "argv log: {argv}");
+                    imports += 1;
+                }
+                ["export", rest @ ..] => {
+                    assert!(!rest.contains(&"--out"), "argv log: {argv}");
+                    exports += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(imports >= 2 && exports == 1, "argv log: {argv}");
+        // Nothing but the fake's own state appeared in the config directory.
+        let fake_state = [
+            "argv.log",
+            "accepted-digest.txt",
+            "holds",
+            "approved",
+            "version.txt",
+            "playbook.txt",
+        ];
+        let added: Vec<_> = std::fs::read_dir(fake.state())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| !before.contains(n))
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !fake_state.contains(&n.as_str()))
+            .collect();
+        assert!(
+            added.is_empty(),
+            "written to the config directory: {added:?}"
+        );
     }
 
     /// An answer larger than the pipe buffer never blocks the child: the

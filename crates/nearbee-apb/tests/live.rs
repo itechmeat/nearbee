@@ -168,3 +168,59 @@ async fn live_smoke_qwen() {
 async fn live_smoke_deepseek() {
     smoke("smoke-deepseek").await;
 }
+
+/// The publish-side install (import, approval, export read-back) through
+/// the apb CLI that `APB_BIN` names, against Nearbee's instance; with
+/// `APB_BIN` set to the absolute path of `scripts/apb-sandboxed` it checks
+/// the sandboxed instance (change apb-sandbox). No run starts, nothing is
+/// billed. Environment: `APB_BIN`, `APB_CONFIG_DIR`, `NEARBEE_WORKSPACE`.
+///
+/// ```text
+/// NEARBEE_LIVE=1 APB_BIN=$PWD/scripts/apb-sandboxed cargo test -p nearbee-apb --test live -- --ignored live_publish_install
+/// ```
+#[test]
+#[ignore = "live: needs Nearbee's apb instance"]
+fn live_publish_install() {
+    use nearbee_apb::install::{ApbCli, Script, install_source};
+    assert!(
+        enabled(),
+        "live test run without NEARBEE_LIVE=1: set it (and start Nearbee's apb instance) or do not pass --ignored"
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../playbooks/repo-audit");
+    let source = std::fs::read_to_string(root.join("playbook.fast.yaml")).unwrap();
+    let mut scripts = Vec::new();
+    let mut names: Vec<_> = std::fs::read_dir(root.join("scripts"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    names.sort();
+    for p in names {
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
+        scripts.push(Script {
+            name: p.file_name().unwrap().to_string_lossy().into_owned(),
+            bytes: std::fs::read(&p).unwrap(),
+            executable,
+        });
+    }
+    let cli = ApbCli {
+        bin: std::env::var("APB_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("apb")),
+        workspace: workspace(),
+        config_dir: std::env::var("APB_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap())
+                    .join(".local/share/nearbee/apb-config")
+            }),
+    };
+    let installed = install_source(&cli, &source, "live-install-check", None, &scripts).unwrap();
+    assert_eq!(installed.playbook_id, "live-install-check");
+    eprintln!("installed {} {}", installed.playbook_id, installed.version);
+}

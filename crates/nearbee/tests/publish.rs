@@ -18,14 +18,16 @@ const HANDLE: &str = "repo-audit-fast";
 const AGENT_ID: &str = "ag_123";
 
 /// A fake apb CLI that imports and approves anything, with a fixed
-/// installed version.
+/// installed version. Like the install, it takes the bundle on stdin and
+/// writes the export to stdout.
 const FAKE: &str = r#"#!/bin/sh
 STATE="${APB_CONFIG_DIR:?}"
-bundle="$2"
-id="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$bundle")"
-ver="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$bundle")"
 case "$1" in
   import)
+    [ "$2" = /dev/stdin ] || { echo "fake: the bundle must come on stdin" >&2; exit 2; }
+    bundle="$STATE/in.$$"; cat "$2" > "$bundle"; trap 'rm -f "$bundle"' EXIT
+    id="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$bundle")"
+    ver="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$bundle")"
     if [ "$3" = "--accept" ]; then touch "$STATE/holds"; printf '%s' "$ver" > "$STATE/installed-version.txt"; echo imported; exit 0; fi
     if [ -f "$STATE/holds" ]; then printf '%s' "$ver" > "$STATE/installed-version.txt"; echo "bundle $id @ $ver: unchanged: the current version already holds this bundle"; exit 0; fi
     echo "bundle $id @ $ver is new"
@@ -38,8 +40,8 @@ case "$1" in
   export)
     version="$(cat "$STATE/installed-version.txt" 2>/dev/null || echo 1.0.0)"
     playbook="$(sed -n 's/.*"playbook": *"\(.*\)"}/\1/p' "$STATE/readback.json" 2>/dev/null)"
-    [ "$3" = "--out" ] || { echo "error: unexpected argument '$3' found" >&2; exit 2; }
-    printf '{"apb_bundle":2,"id":"%s","version":"%s","playbook":"%s"}\n' "$2" "$version" "$playbook" > "$4"
+    [ -z "$3" ] || { echo "error: unexpected argument '$3' found" >&2; exit 2; }
+    printf '{"apb_bundle":2,"id":"%s","version":"%s","playbook":"%s"}\n' "$2" "$version" "$playbook"
     exit 0 ;;
   *) echo "fake: $*"; exit 2 ;;
 esac
