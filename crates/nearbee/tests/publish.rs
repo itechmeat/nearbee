@@ -975,3 +975,38 @@ async fn the_report_prints_the_tier_and_the_statement_block() {
     assert!(text.contains("## Data handling"), "{text}");
     only_reads(&s.server).await;
 }
+
+/// Spec `listing-publish`, Script collection: a symbolic link anywhere
+/// under the source's `scripts/` refuses the publish, naming the path,
+/// before anything is installed or any market call is made.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_under_scripts_refuses_the_publish_before_the_install() {
+    let s = Setup::new().await;
+    mount_market(&s.server, old_default_plan("0.50", 86400)).await;
+    let scripts = s.dir.path().join("scripts");
+    std::fs::create_dir_all(scripts.join("lib")).unwrap();
+    std::fs::write(scripts.join("run.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(scripts.join("lib/real.py"), "x = 1\n").unwrap();
+    std::os::unix::fs::symlink(scripts.join("lib/real.py"), scripts.join("lib/link.py")).unwrap();
+    let err = publish(
+        &s.listing(),
+        &s.env,
+        &s.store,
+        &s.state_dir(),
+        s.secrets(),
+        RETENTION,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("lib/link.py"), "{err}");
+    assert!(
+        !s.apb_state().join("installed-version.txt").exists(),
+        "the playbook was installed"
+    );
+    assert!(
+        !s.state_dir().join("listings").exists(),
+        "a record was written"
+    );
+    assert!(s.server.received_requests().await.unwrap().is_empty());
+}

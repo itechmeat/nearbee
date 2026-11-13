@@ -634,7 +634,10 @@ A `script` node's file must live under the version's `scripts/`. Playbooks
 are installed as bundles (`apb_bundle: 2`, YAML plus base64 scripts) through
 `apb import`; a version imported with scripts runs only after `apb trust
 approve` names its trust digest. A dashboard or CLI start does not gate on
-playbook or profile-bundle trust otherwise.
+playbook or profile-bundle trust otherwise. `nearbee list` bundles every
+regular file under the source playbook's `scripts/`, subdirectories included,
+named by its path relative to `scripts/` (`lib/a.py`) and sorted by it; a
+symbolic link anywhere under `scripts/` refuses the publish, naming the path.
 
 ### Measured runs
 

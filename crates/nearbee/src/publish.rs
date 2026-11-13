@@ -103,43 +103,66 @@ fn read_source(
     }
     let text = std::fs::read_to_string(&canonical)
         .map_err(|e| format!("source playbook {}: {e}", canonical.display()))?;
-    let mut scripts = Vec::new();
     let dir = canonical.parent().unwrap_or(Path::new(".")).join("scripts");
-    if dir.is_dir() {
-        let mut names: Vec<_> = std::fs::read_dir(&dir)
-            .map_err(|e| format!("{}: {e}", dir.display()))?
+    let scripts = if dir.is_dir() {
+        collect_scripts(&dir)?
+    } else {
+        Vec::new()
+    };
+    Ok((text, scripts))
+}
+
+/// Collects every regular file under one `scripts/` directory, its
+/// subdirectories too, named by its path relative to `scripts/` with `/`
+/// separators and sorted by that name (spec `listing-publish`, Script
+/// collection). A top-level file keeps its bare file name, so a flat
+/// directory gives the same names and derived version as before. A
+/// symbolic link at any depth refuses the publish, naming its path; other
+/// special files (sockets, fifos, devices) are skipped.
+pub fn collect_scripts(dir: &Path) -> Result<Vec<Script>, String> {
+    let mut found: Vec<(String, PathBuf, std::fs::Metadata)> = Vec::new();
+    let mut pending: Vec<(PathBuf, String)> = vec![(dir.to_path_buf(), String::new())];
+    while let Some((current, prefix)) = pending.pop() {
+        let entries = std::fs::read_dir(&current)
+            .map_err(|e| format!("{}: {e}", current.display()))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("{}: {e}", dir.display()))?
-            .into_iter()
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        names.sort();
-        for p in names {
-            let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            #[cfg(unix)]
-            let executable = {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(&p)
-                    .map(|m| m.permissions().mode())
-                    .unwrap_or(0)
-                    & 0o111
-                    != 0
-            };
-            #[cfg(not(unix))]
-            let executable = false;
-            scripts.push(Script {
-                name: p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-                bytes,
-                executable,
-            });
+            .map_err(|e| format!("{}: {e}", current.display()))?;
+        for entry in entries {
+            let path = entry.path();
+            let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            let meta =
+                std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let kind = meta.file_type();
+            if kind.is_symlink() {
+                return Err(format!("scripts/{name}: a symbolic link is not allowed"));
+            } else if kind.is_dir() {
+                pending.push((path, format!("{name}/")));
+            } else if kind.is_file() {
+                found.push((name, path, meta));
+            }
         }
     }
-    Ok((text, scripts))
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut scripts = Vec::with_capacity(found.len());
+    for (name, path, meta) in found {
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = {
+            let _ = &meta;
+            false
+        };
+        scripts.push(Script {
+            name,
+            bytes,
+            executable,
+        });
+    }
+    Ok(scripts)
 }
 
 /// Runs the tier check on one set of facts; a breach stops the publish
@@ -448,5 +471,88 @@ pub async fn publish_list(
             let _ = writeln!(out, "error: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write(root: &Path, rel: &str, body: &str, executable: bool) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        let mode = if executable { 0o755 } else { 0o644 };
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Spec `listing-publish`, Script collection: nested files.
+    #[test]
+    fn nested_files_are_bundled_by_relative_path_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("scripts");
+        write(&dir, "run.sh", "#!/bin/sh\necho run\n", true);
+        write(&dir, "lib/a.py", "print('a')\n", false);
+        write(&dir, "prompts/p.md", "# prompt\n", false);
+        let scripts = collect_scripts(&dir).unwrap();
+        assert_eq!(
+            scripts,
+            vec![
+                Script {
+                    name: "lib/a.py".into(),
+                    bytes: b"print('a')\n".to_vec(),
+                    executable: false,
+                },
+                Script {
+                    name: "prompts/p.md".into(),
+                    bytes: b"# prompt\n".to_vec(),
+                    executable: false,
+                },
+                Script {
+                    name: "run.sh".into(),
+                    bytes: b"#!/bin/sh\necho run\n".to_vec(),
+                    executable: true,
+                },
+            ]
+        );
+        let bundle = install::build_bundle("id: x\nversion: 1.0.0\n", &scripts);
+        let paths: Vec<&str> = bundle["scripts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["lib/a.py", "prompts/p.md", "run.sh"]);
+    }
+
+    /// Spec `listing-publish`, Script collection: a flat directory keeps
+    /// the names and the derived version it had before nested scripts.
+    #[test]
+    fn a_flat_directory_keeps_its_names_and_derived_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("scripts");
+        write(&dir, "fetch.sh", "#!/bin/sh\necho fetch\n", true);
+        write(&dir, "common.py", "X = 1\n", false);
+        let scripts = collect_scripts(&dir).unwrap();
+        let names: Vec<&str> = scripts.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["common.py", "fetch.sh"]);
+        // Fixture recorded with the flat collector before this change.
+        assert_eq!(
+            install::derived_version("id: x\nversion: 0.0.0\n", &scripts),
+            "1.0.371096829"
+        );
+    }
+
+    /// Spec `listing-publish`, Script collection: a symlink is refused.
+    #[test]
+    fn a_symlink_under_scripts_is_refused_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("scripts");
+        write(&dir, "run.sh", "#!/bin/sh\n", true);
+        write(&dir, "lib/real.py", "x = 1\n", false);
+        std::os::unix::fs::symlink(dir.join("lib/real.py"), dir.join("lib/link.py")).unwrap();
+        let err = collect_scripts(&dir).unwrap_err();
+        assert_eq!(err, "scripts/lib/link.py: a symbolic link is not allowed");
     }
 }
