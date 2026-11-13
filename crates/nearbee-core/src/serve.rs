@@ -2222,9 +2222,21 @@ struct StatementSnapshot {
     /// The listing's signed models, frozen with the statement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     signed_models: Vec<String>,
+    /// The listing's script models, frozen with the statement (change
+    /// `script-models`, design 5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    script_models: Vec<String>,
 }
 
-/// The direct and signed models a generation's statement snapshot froze.
+/// The model lists a generation's statement snapshot froze.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FrozenModels {
+    direct: Vec<String>,
+    signed: Vec<String>,
+    script: Vec<String>,
+}
+
+/// The direct, signed and script models a generation's statement snapshot froze.
 /// Never taken from the live record, so a republish does not change a
 /// started generation. An absent snapshot reads as no models only when
 /// the generation has none to freeze (`required` false: a legacy
@@ -2236,7 +2248,7 @@ fn frozen_models(
     row_id: &str,
     generation: u32,
     required: bool,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<FrozenModels, String> {
     let bytes = match journal::read_snapshot(state_dir, row_id, generation, STATEMENT_SNAPSHOT) {
         Ok(b) => b,
         Err(journal::SnapshotError::Io { source, .. })
@@ -2251,7 +2263,11 @@ fn frozen_models(
         }
     };
     serde_json::from_slice::<StatementSnapshot>(&bytes)
-        .map(|s| (s.direct_models, s.signed_models))
+        .map(|s| FrozenModels {
+            direct: s.direct_models,
+            signed: s.signed_models,
+            script: s.script_models,
+        })
         .map_err(|_| "the generation's statement snapshot does not parse".to_owned())
 }
 
@@ -2374,6 +2390,7 @@ fn prepare_statement_snapshot(
         evidence_models: record.evidence_models.clone(),
         direct_models: record.direct_models.clone(),
         signed_models: record.signed_models.clone(),
+        script_models: record.script_models.clone(),
     };
     journal::write_snapshot(
         state_dir,
@@ -4787,13 +4804,12 @@ async fn admit<M: Market, R: Runner>(
             None,
         )?));
     }
-    // The direct models the generation froze, read before anything is
-    // journaled: a generation of a listing with a record always has a
-    // statement snapshot, so an unreadable one declines `failed` without
-    // a run (fail closed).
-    let direct_models = match frozen_models(state_dir, &row.id, generation, v.ctx.record.is_some())
-    {
-        Ok(f) => f.0,
+    // The direct and script models the generation froze, read before
+    // anything is journaled: a generation of a listing with a record
+    // always has a statement snapshot, so an unreadable one declines
+    // `failed` without a run (fail closed).
+    let frozen = match frozen_models(state_dir, &row.id, generation, v.ctx.record.is_some()) {
+        Ok(f) => f,
         Err(detail) => {
             append_attention(&mut w, &fresh_records, "statement_missing", &detail)?;
             open_decline_intent(&mut w, &row.id, "failed", &detail, BUYER_RUN_FAILED)?;
@@ -4882,7 +4898,8 @@ async fn admit<M: Market, R: Runner>(
     if let Some(f) = feedback {
         req.params.insert("feedback".into(), f);
     }
-    req.direct_models = direct_models;
+    req.direct_models = frozen.direct;
+    req.script_models = frozen.script;
     match runner.start(req).await {
         Ok(id) => {
             w.append(Event::RunObserved(RunObserved {
@@ -5775,6 +5792,7 @@ fn start_request(
         budget,
         continued_from,
         direct_models: Vec::new(),
+        script_models: Vec::new(),
         // Every market run is an apb external-data run (S6 design 3.5).
         external_data: true,
     }
@@ -5861,7 +5879,7 @@ fn validate_deliverable(
     limits: &Limits,
     opts: &ServeOptions,
     statement: Option<&str>,
-    frozen: &(Vec<String>, Vec<String>),
+    frozen: &FrozenModels,
 ) -> Result<Submission, DeliveryRefusal> {
     let validated = manifest::validate(wt, limits).map_err(|e| {
         DeliveryRefusal::new(
@@ -5882,12 +5900,13 @@ fn validate_deliverable(
     }
     // The response signature recheck (change `doc-digest-and-paid-demo`,
     // design 6) against the generation's frozen direct and signed models.
-    let signed =
-        signature::recheck(&validated, &frozen.0, &frozen.1).map_err(|e| DeliveryRefusal {
+    let signed = signature::recheck(&validated, &frozen.direct, &frozen.signed).map_err(|e| {
+        DeliveryRefusal {
             journal: e.to_string(),
             buyer: BUYER_INVALID_RESULT,
             attention: Some(e.code()),
-        })?;
+        }
+    })?;
     let mut markdown = validated.markdown_text;
     let mut appended = false;
     // The signature section goes between the playbook Markdown and the
@@ -6373,7 +6392,7 @@ mod tests {
         // Absent: no models for a legacy generation, an error otherwise.
         assert_eq!(
             frozen_models(state, "a1", 1, false).unwrap(),
-            (Vec::new(), Vec::new())
+            FrozenModels::default()
         );
         let err = frozen_models(state, "a1", 1, true).unwrap_err();
         assert!(err.contains("unreadable"), "{err}");
@@ -6387,6 +6406,7 @@ mod tests {
             evidence_models: Vec::new(),
             direct_models: vec!["m/direct".into()],
             signed_models: vec!["m/direct".into()],
+            script_models: vec!["claude/claude-opus-5-5".into()],
         };
         journal::write_snapshot(
             state,
@@ -6399,7 +6419,11 @@ mod tests {
         for required in [false, true] {
             assert_eq!(
                 frozen_models(state, "a1", 1, required).unwrap(),
-                (vec!["m/direct".to_owned()], vec!["m/direct".to_owned()])
+                FrozenModels {
+                    direct: vec!["m/direct".to_owned()],
+                    signed: vec!["m/direct".to_owned()],
+                    script: vec!["claude/claude-opus-5-5".to_owned()],
+                }
             );
         }
         // Present but unparseable: an error whatever `required` says,

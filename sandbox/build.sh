@@ -6,7 +6,9 @@
 # Copies into sandbox/bin/ (git-ignored, removed afterwards): apb (APB_BIN,
 # else apb on PATH), nearbee (NEARBEE_BIN, else nearbee on PATH) and, when
 # found, the resolved binaries of the agent CLIs named in
-# NEARBEE_SANDBOX_CLIS (default: claude codex opencode). A CLI that is
+# NEARBEE_SANDBOX_CLIS (default: codex opencode; the Dockerfile pins the
+# Claude Code CLI, so a host claude copied over it would replace the pinned
+# version). A CLI that is
 # missing or is a script rather than a self-contained binary is skipped with
 # a line saying so. The image is labelled with the sha256 of the copied apb
 # and nearbee: a sandboxed start refuses an image whose binaries differ from
@@ -33,7 +35,7 @@ is_elf() { [ "$(head -c 4 "$1" | od -An -c | tr -d ' ')" = '177ELF' ]; }
 
 install -m 0755 "$(readlink -f "$apb")" "$BIN/apb"
 install -m 0755 "$(readlink -f "$nearbee")" "$BIN/nearbee"
-for cli in ${NEARBEE_SANDBOX_CLIS:-claude codex opencode}; do
+for cli in ${NEARBEE_SANDBOX_CLIS:-codex opencode}; do
   found="$(command -v "$cli" || true)"
   if [ -z "$found" ]; then
     echo "sandbox/build: $cli not found; skipped"

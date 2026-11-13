@@ -29,6 +29,7 @@ pub fn render(tier: Tier, facts: &ExecutionFacts, retention_days: u32) -> String
     out.push_str("\n\n");
     out.push_str(&models_section(facts));
     out.push_str(&direct_section(facts));
+    out.push_str(&script_section(facts));
     out.push('\n');
     out.push_str(&channels_section(facts));
     out.push_str(&run_place_section(tier, facts.sandbox.as_ref()));
@@ -58,7 +59,8 @@ pub fn drift(
     // record, as at `nearbee list` (design 5.1).
     let facts = &facts
         .clone()
-        .with_direct_models(&record.direct_models, &record.signed_models);
+        .with_direct_models(&record.direct_models, &record.signed_models)
+        .with_script_models(&record.script_models);
     let mut reasons: Vec<String> = Vec::new();
     if !record.serveable() {
         if record.tier.is_none() {
@@ -135,6 +137,16 @@ fn model_line(agent: &str, model: &str, checked_nearai: bool) -> String {
     }
     if agent == "codex" {
         return format!("- `codex`, model `{model}`: the owner's OpenAI subscription.\n");
+    }
+    if agent == "dsh" {
+        return match model.split_once('/') {
+            Some((provider, _)) => format!(
+                "- `dsh` (DeepSeek Harness), model `{model}`: through the owner's own provider account `{provider}`.\n"
+            ),
+            None => format!(
+                "- `dsh` (DeepSeek Harness), model `{model}`: through the owner's own provider account.\n"
+            ),
+        };
     }
     if agent == "opencode" && checked_nearai {
         let id = model.strip_prefix("nearai/").unwrap_or(model);
@@ -261,6 +273,32 @@ fn direct_section(facts: &ExecutionFacts) -> String {
             "\nThe signed step: the call to {} carries a response signature from the model TEE (`provider_tee`), shown in the deliverable with a link to check it.\n",
             names.join(", ")
         ));
+    }
+    out.push('\n');
+    out
+}
+
+/// The model calls the playbook's script steps make through the owner's
+/// agent CLIs, as declared in the listing's `script_models` (spec
+/// `data-statement`, Script models in the statement); empty when the
+/// listing has none, so an older statement is unchanged. Each line uses
+/// the Models section's wording, never the checked TEE wording: Nearbee
+/// does not observe these calls.
+fn script_section(facts: &ExecutionFacts) -> String {
+    if facts.script_models.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("### Script model calls\n\n");
+    out.push_str(
+        "The playbook's script steps call these models through the owner's agent CLIs, as declared by the owner in the listing (Nearbee does not observe these calls):\n\n",
+    );
+    for entry in &facts.script_models {
+        // Publish refuses an entry without `/`; should one reach here from a
+        // hand-edited record, it is still named whole, never dropped.
+        match entry.split_once('/') {
+            Some((agent, model)) => out.push_str(&model_line(agent, model, false)),
+            None => out.push_str(&format!("- `{entry}`: declared by the owner.\n")),
+        }
     }
     out.push('\n');
     out
@@ -435,6 +473,7 @@ mod tests {
             compaction_enabled: Known::Yes(false),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             sandbox: None,
         }
     }
@@ -542,6 +581,120 @@ mod tests {
         );
     }
 
+    /// The fingerprint of `plain_premium_facts` before `script_models`
+    /// existed (printed on main before the script-models change).
+    const PLAIN_PREMIUM_FINGERPRINT: &str =
+        "sha256:e6bae2a77a3096cdd002a885b47ae7505aac4bd9d896208b726e4fcf6079f455";
+
+    /// SHA-256 of the plain premium statement before `script_models`
+    /// existed.
+    const PLAIN_PREMIUM_TEXT_SHA256: &str =
+        "8ade797a17b508466cabde97079e4238ba93a6a4df788cb03bcff32601d17254";
+
+    #[test]
+    fn a_listing_without_script_models_keeps_its_text() {
+        assert_eq!(
+            sha256_hex(render(Tier::Plain, &plain_premium_facts(), 7).as_bytes()),
+            PLAIN_PREMIUM_TEXT_SHA256
+        );
+    }
+
+    #[test]
+    fn a_listing_without_script_models_keeps_its_fingerprint() {
+        assert_eq!(
+            fingerprint(Tier::Plain, &plain_premium_facts()),
+            PLAIN_PREMIUM_FINGERPRINT
+        );
+        let empty = plain_premium_facts().with_script_models(&[]);
+        assert_eq!(fingerprint(Tier::Plain, &empty), PLAIN_PREMIUM_FINGERPRINT);
+        assert_eq!(
+            render(Tier::Plain, &empty, 7),
+            render(Tier::Plain, &plain_premium_facts(), 7)
+        );
+    }
+
+    const OPUS: &str = "claude/claude-opus-5-5";
+    const NEAR_SCRIPT: &str = "opencode/nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017";
+
+    /// Spec `data-statement`, ux-flow statement: the script models are
+    /// named with the Models section's per-agent wording, as declared by
+    /// the owner and not observed by Nearbee.
+    #[test]
+    fn the_statement_names_script_models_as_declared_by_the_owner() {
+        let facts = plain_premium_facts().with_script_models(&[OPUS.into()]);
+        let text = render(Tier::Plain, &facts, 7);
+        let expected = "### Script model calls\n\nThe playbook's script steps call these models through the owner's agent CLIs, as declared by the owner in the listing (Nearbee does not observe these calls):\n\n- `claude`, model `claude-opus-5-5`: the owner's Claude subscription (Anthropic).\n";
+        assert!(text.contains(expected), "{text}");
+        // The section follows the Models section and precedes the others.
+        let models = text.find("### Models").unwrap();
+        let script = text.find("### Script model calls").unwrap();
+        let channels = text.find("### Other channels").unwrap();
+        assert!(models < script && script < channels, "{text}");
+        // The Models section's own text is unchanged.
+        let before = render(Tier::Plain, &plain_premium_facts(), 7);
+        assert_eq!(text.replace(&format!("{expected}\n"), ""), before);
+        // An opencode entry gets the generic wording: a declared model is
+        // never presented as a checked TEE model.
+        let near = plain_premium_facts().with_script_models(&[NEAR_SCRIPT.into()]);
+        let text = render(Tier::Plain, &near, 7);
+        assert!(
+            text.contains(
+                "- agent `opencode`, model `nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017`.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    /// Spec `data-statement`, DeepSeek Harness reviewer: a `dsh` entry
+    /// names the harness and the owner's own provider account from the
+    /// route; an agent without wording gets the generic line.
+    #[test]
+    fn a_dsh_script_model_names_the_owners_provider_account() {
+        let facts = plain_premium_facts().with_script_models(&[
+            "dsh/zai/glm-5.3-flash".into(),
+            "dsh/glm-5.3-flash".into(),
+            "gemini/gemini-3".into(),
+        ]);
+        let text = render(Tier::Plain, &facts, 7);
+        assert!(
+            text.contains("- `dsh` (DeepSeek Harness), model `zai/glm-5.3-flash`: through the owner's own provider account `zai`.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- `dsh` (DeepSeek Harness), model `glm-5.3-flash`: through the owner's own provider account.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- agent `gemini`, model `gemini-3`.\n"),
+            "{text}"
+        );
+    }
+
+    /// The fingerprint covers the script models in order.
+    #[test]
+    fn the_fingerprint_covers_script_models_in_order() {
+        let one = plain_premium_facts().with_script_models(&[OPUS.into(), NEAR_SCRIPT.into()]);
+        let two = plain_premium_facts().with_script_models(&[NEAR_SCRIPT.into(), OPUS.into()]);
+        assert_ne!(fingerprint(Tier::Plain, &one), PLAIN_PREMIUM_FINGERPRINT);
+        assert_ne!(
+            fingerprint(Tier::Plain, &one),
+            fingerprint(Tier::Plain, &two)
+        );
+    }
+
+    /// The drift pass adds the record's script models, as it does the
+    /// direct ones: a record published with them does not drift on facts
+    /// the runner reports without them.
+    #[test]
+    fn the_drift_pass_adds_the_records_script_models() {
+        let facts = plain_premium_facts().with_script_models(&[OPUS.into()]);
+        let mut rec = record(Tier::Plain, &facts);
+        rec.script_models = facts.script_models.clone();
+        assert_eq!(drift(&rec, &plain_premium_facts(), 7), None);
+        rec.script_models.clear();
+        assert!(drift(&rec, &plain_premium_facts(), 7).is_some());
+    }
+
     #[test]
     fn reordering_direct_models_moves_the_fingerprint() {
         let reordered = attested_facts()
@@ -614,6 +767,7 @@ mod tests {
             evidence_models: Vec::new(),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

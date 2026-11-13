@@ -201,7 +201,7 @@ async fn reserved_param_is_refused_before_sending() {
         .expect(0)
         .mount(&server)
         .await;
-    for name in ["hire_id", "execution_id", "direct_models"] {
+    for name in ["hire_id", "execution_id", "direct_models", "script_models"] {
         let (mut req, _, _dir) = start_request(&fixture("start"), "smoke-own");
         req.params.insert(name.into(), "x".into());
         let err = runner.start(req).await.unwrap_err();
@@ -225,6 +225,20 @@ fn sent_params_carry_the_direct_models() {
     assert_eq!(
         nearbee_apb::sent_params(&req)["direct_models"],
         r#"["Qwen/Qwen3-VL-30B-A3B-Instruct","openai/privacy-filter"]"#
+    );
+}
+
+/// Spec `apb-runner`, Script models run param: the frozen script models
+/// travel as the `script_models` param, compact JSON in order; none, no
+/// param.
+#[test]
+fn sent_params_carry_the_script_models() {
+    let (mut req, _, _dir) = start_request(&fixture("start"), "smoke-own");
+    assert!(!nearbee_apb::sent_params(&req).contains_key("script_models"));
+    req.script_models = vec!["claude/claude-opus-5-5".into(), "codex/gpt-5.5".into()];
+    assert_eq!(
+        nearbee_apb::sent_params(&req)["script_models"],
+        r#"["claude/claude-opus-5-5","codex/gpt-5.5"]"#
     );
 }
 

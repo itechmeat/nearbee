@@ -71,8 +71,9 @@ staleness in tests and in the replay.
 
 1. Read the listing file: handle, name, source playbook, `price_usd`
    (decimal string), `sla_seconds`, category, tags, description, bio, and
-   the optional `scope`, `protection` (default `on`) and `limits` (spec
-   `listing-publish`): a protected price must leave a per-hire ceiling
+   the optional `scope`, `protection` (default `on`), `limits`, `profile`,
+   `intake_check`, `direct_models`, `signed_models` and `script_models`
+   (spec `listing-publish`): a protected price must leave a per-hire ceiling
    above zero (`price * 0.95 - 0.25 > 0`).
 2. **Materialise** the playbook as its own apb playbook id `<handle>` with
    fixed profile names and `supervisor.policy.trial_candidates: off`, its
@@ -160,8 +161,10 @@ commands use `digest/<execution_id>/` (`src/`, `pages/`, `pages.json`,
 execution resumes and a rework or redo (a new execution id) starts fresh
 and never reads an earlier execution's directory; `nearbee cleanup`
 deletes it with the worktree. The generation's frozen direct models reach
-the run as the `direct_models` param (reserved like `hire_id` and
-`execution_id`).
+the run as the `direct_models` param, and its frozen script models (the
+`<agent>/<model>` pairs a plain listing's scripts call through the owner's
+agent CLIs, `docs/privacy.md`) as the `script_models` param, both JSON
+lists reserved like `hire_id` and `execution_id`.
 
 **Generations.** Every journal record carries `generation` (absent reads as
 1, so S2 journals stay valid). A generation's state is derived from its own

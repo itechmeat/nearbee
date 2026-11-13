@@ -739,6 +739,7 @@ impl ApbRunner {
             compaction_enabled: self.compaction().await?,
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             sandbox: self.sandbox().await,
         })
     }

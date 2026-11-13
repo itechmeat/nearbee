@@ -210,6 +210,7 @@ fn record() -> ResolvedListing {
         evidence_models: nearbee_core::tiers::evidence_models(&facts),
         direct_models: direct.clone(),
         signed_models: direct,
+        script_models: Vec::new(),
         published_at: START - time::Duration::days(1),
     }
 }

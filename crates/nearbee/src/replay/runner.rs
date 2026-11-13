@@ -155,6 +155,7 @@ pub fn facts() -> ExecutionFacts {
         compaction_enabled: Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        script_models: Vec::new(),
         sandbox: None,
     }
 }
@@ -298,14 +299,8 @@ impl Runner for ReplayRunner {
     async fn start(&self, req: StartRequest) -> Result<RunId, RunnerError> {
         let mut inner = self.lock();
         let id = run_id_of(req.execution_id.as_str());
-        let mut params = BTreeMap::from([
-            ("hire_id".to_owned(), req.hire_id.as_str().to_owned()),
-            (
-                "execution_id".to_owned(),
-                req.execution_id.as_str().to_owned(),
-            ),
-        ]);
-        params.extend(req.params.clone());
+        // The params a real runner sends: the reserved ones included.
+        let params = nearbee_apb::sent_params(&req);
         inner.runs.insert(
             id.clone(),
             Run {
@@ -468,8 +463,30 @@ mod tests {
             budget: None,
             continued_from: None,
             direct_models: Vec::new(),
+            script_models: Vec::new(),
             external_data,
         }
+    }
+
+    /// The replay runner records the params a real runner would send:
+    /// the frozen direct and script models included (change
+    /// `script-models`, design 5).
+    #[tokio::test]
+    async fn the_run_params_carry_the_frozen_models() {
+        let r = ReplayRunner::new();
+        let mut req = request("h1-1", false);
+        req.direct_models = vec!["m/direct".into()];
+        req.script_models = vec!["claude/claude-opus-5-5".into()];
+        let id = r.start(req).await.unwrap();
+        let detail = r.run(&id).await.unwrap();
+        assert_eq!(detail.params["direct_models"], r#"["m/direct"]"#);
+        assert_eq!(
+            detail.params["script_models"],
+            r#"["claude/claude-opus-5-5"]"#
+        );
+        let plain = r.start(request("h1-2", false)).await.unwrap();
+        let detail = r.run(&plain).await.unwrap();
+        assert!(!detail.params.contains_key("script_models"));
     }
 
     /// The scripted run detail echoes the start request's flag.

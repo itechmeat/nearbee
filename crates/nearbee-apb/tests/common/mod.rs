@@ -129,6 +129,7 @@ pub fn start_request(f: &Value, playbook: &str) -> (StartRequest, Value, tempfil
         }),
         continued_from: None,
         direct_models: Vec::new(),
+        script_models: Vec::new(),
         // No buyer data: not an external-data run.
         external_data: false,
     };

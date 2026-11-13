@@ -636,6 +636,7 @@ fn facts() -> nearbee_core::runner::ExecutionFacts {
         compaction_enabled: nearbee_core::tiers::Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        script_models: Vec::new(),
         sandbox: None,
     }
 }
@@ -844,6 +845,44 @@ impl Runner for FakeRunner {
     }
 }
 
+/// A plain S4 record whose listing declares script models (change
+/// `script-models`), consistent with the fake runner's facts.
+fn script_record(script: &[&str]) -> nearbee_core::listing::ResolvedListing {
+    use nearbee_core::statement;
+    let list: Vec<String> = script.iter().map(|s| s.to_string()).collect();
+    let tier = Tier::Plain;
+    let facts = facts().with_script_models(&list);
+    let text = statement::render(tier, &facts, RETENTION);
+    let mut r = s4_record(tier);
+    r.statement_sha256 = Some(nearbee_core::journal::sha256_hex(text.as_bytes()));
+    r.statement = Some(text);
+    r.fingerprint = Some(statement::fingerprint(tier, &facts));
+    r.script_models = list;
+    r
+}
+
+/// Spec `apb-runner`, Script models run param, "Param sent": the run
+/// request carries the generation's frozen script models, and a
+/// republish after the run started leaves the frozen list as it was.
+#[tokio::test]
+async fn the_run_gets_the_frozen_script_models_and_a_republish_keeps_them() {
+    const A: [&str; 1] = ["claude/claude-opus-5-5"];
+    let mut d = Driver::new(&[("a1", "in_progress", "fresh")])
+        .with_runner(vec!["running", "running", "running"])
+        .with_record(script_record(&A));
+    d.round().await;
+    d.round().await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 1, "{:?}", d.runner.calls.all());
+    assert_eq!(starts[0].script_models, A);
+    d.ctx.record = Some(script_record(&["codex/gpt-5.5"]));
+    d.round().await;
+    let snap = journal::read_snapshot(d.dir.path(), "a1", 1, "statement.json").unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&snap).unwrap();
+    assert_eq!(v["script_models"], serde_json::json!(A));
+    assert_eq!(d.runner.starts.lock().unwrap().len(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers and the multi-round driver (5.1)
 // ---------------------------------------------------------------------------
@@ -898,6 +937,7 @@ fn s4_record(tier: nearbee_core::listing::Tier) -> nearbee_core::listing::Resolv
         evidence_models: nearbee_core::tiers::evidence_models(&facts),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        script_models: Vec::new(),
         published_at: BASE,
     }
 }
@@ -7887,6 +7927,7 @@ fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
         compaction_enabled: Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        script_models: Vec::new(),
         sandbox: None,
     }
 }
@@ -8365,8 +8406,11 @@ async fn a_listing_without_direct_models_sends_none() {
     let starts = d.runner.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 1);
     assert!(starts[0].direct_models.is_empty());
+    // Spec `apb-runner`, "Param absent": no script models either.
+    assert!(starts[0].script_models.is_empty());
     let snap = journal::read_snapshot(d.dir.path(), "a1", 1, "statement.json").unwrap();
     assert!(!String::from_utf8_lossy(&snap).contains("direct_models"));
+    assert!(!String::from_utf8_lossy(&snap).contains("script_models"));
 }
 
 // ---------------------------------------------------------------------------

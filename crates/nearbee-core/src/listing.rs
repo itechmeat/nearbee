@@ -146,6 +146,10 @@ pub struct Listing {
     /// The direct models whose call carries a response signature; a
     /// subset of `direct_models`.
     pub signed_models: Vec<String>,
+    /// The `<agent>/<model>` pairs the playbook's script steps call through
+    /// the owner's agent CLIs, in order, as declared by the owner (spec
+    /// `listing-publish`, Script models field). Plain tier only.
+    pub script_models: Vec<String>,
 }
 
 /// A listing file failure. Errors never carry a token value.
@@ -211,6 +215,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         intake_check: Option<String>,
         direct_models: Option<Vec<String>>,
         signed_models: Option<Vec<String>>,
+        script_models: Option<Vec<String>>,
     }
     /// A price that accepts only a YAML string, never a number.
     #[derive(Deserialize)]
@@ -328,6 +333,13 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
             message,
         });
     }
+    let script_models = raw.script_models.unwrap_or_default();
+    if let Err(message) = check_script_models(&script_models) {
+        return Err(ListingError::Parse {
+            path: path.clone(),
+            message,
+        });
+    }
     // With protection on the per-hire ceiling must be above zero
     // (spec `listing-publish`, Listing file; the formula, not a cent rule).
     if protection == Protection::On {
@@ -361,7 +373,44 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         intake_check,
         direct_models,
         signed_models,
+        script_models,
     })
+}
+
+/// Splits a `script_models` entry into its agent and model, or `None` when
+/// it is not `<agent>/<model>` (spec `listing-publish`, Script models
+/// field): an agent CLI name of lowercase letters, digits and `-`, a
+/// non-empty model without whitespace, and no further `/` for `claude`
+/// and `codex` (other agents may name a provider route).
+pub fn split_script_model(entry: &str) -> Option<(&str, &str)> {
+    let (agent, model) = entry.split_once('/')?;
+    let agent_ok = !agent.is_empty()
+        && agent
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let ok = agent_ok
+        && !model.is_empty()
+        && !model.chars().any(char::is_whitespace)
+        && (!matches!(agent, "claude" | "codex") || !model.contains('/'))
+        && !model.starts_with('/')
+        && !model.ends_with('/');
+    ok.then_some((agent, model))
+}
+
+/// The shape rules of `script_models`: every entry `<agent>/<model>`, no
+/// duplicate. The tier rule (plain only) is the tier check's.
+fn check_script_models(entries: &[String]) -> Result<(), String> {
+    for (i, m) in entries.iter().enumerate() {
+        if split_script_model(m).is_none() {
+            return Err(format!(
+                "script_models entry `{m}` is not <agent>/<model> with agent a CLI name of lowercase letters, digits and -"
+            ));
+        }
+        if entries[..i].contains(m) {
+            return Err(format!("script_models lists `{m}` twice"));
+        }
+    }
+    Ok(())
 }
 
 /// The shape rules of `direct_models` and `signed_models` (spec
@@ -453,6 +502,9 @@ pub struct ResolvedListing {
     /// The listing's signed models, in order (absent: none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_models: Vec<String>,
+    /// The listing's script models, in order (absent: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_models: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub published_at: time::OffsetDateTime,
 }
@@ -710,6 +762,80 @@ tier: plain
         assert!(err.contains("Qwen/Qwen3.8-27B"), "{err}");
     }
 
+    /// Spec `listing-publish`, Script models field: a declared entry is
+    /// kept in order; absent means none.
+    #[test]
+    fn script_models_keep_their_order() {
+        let t = text().replace(
+            "bio_markdown:",
+            "script_models: [claude/claude-opus-5-5, opencode/nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017]\nbio_markdown:",
+        );
+        let l = parse(&t, Path::new("l.yaml")).unwrap();
+        assert_eq!(
+            l.script_models,
+            [
+                "claude/claude-opus-5-5",
+                "opencode/nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+            ]
+        );
+        let none = parse(&text(), Path::new("l.yaml")).unwrap();
+        assert!(none.script_models.is_empty());
+    }
+
+    /// Spec `listing-publish`, Any agent CLI: the agent is any CLI name,
+    /// not a fixed list, and a provider route after it is kept.
+    #[test]
+    fn script_models_take_any_agent_cli() {
+        let t = text().replace(
+            "bio_markdown:",
+            "script_models: [claude/claude-opus-5-5, dsh/zai/glm-5.3-flash, gemini-2/gemini-3]\nbio_markdown:",
+        );
+        let l = parse(&t, Path::new("l.yaml")).unwrap();
+        assert_eq!(
+            l.script_models,
+            [
+                "claude/claude-opus-5-5",
+                "dsh/zai/glm-5.3-flash",
+                "gemini-2/gemini-3"
+            ]
+        );
+    }
+
+    /// A malformed or duplicated `script_models` entry is refused naming it.
+    #[test]
+    fn a_malformed_or_duplicated_script_model_is_refused_naming_it() {
+        let with = |list: &str| {
+            text().replace(
+                "bio_markdown:",
+                &format!("script_models: {list}\nbio_markdown:"),
+            )
+        };
+        for bad in [
+            "claude-opus-5-5",
+            "Claude/x",
+            "cl aude/x",
+            "cl_aude/x",
+            "claude/",
+            "claude/a/b",
+            "codex/a/b",
+            "claude/claude opus",
+            "/claude-opus-5-5",
+        ] {
+            let err = parse(&with(&format!("['{bad}']")), Path::new("l.yaml"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("`{bad}`")), "{bad}: {err}");
+            assert!(err.contains("script_models"), "{bad}: {err}");
+        }
+        let err = parse(
+            &with("[claude/claude-opus-5-5, claude/claude-opus-5-5]"),
+            Path::new("l.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`claude/claude-opus-5-5` twice"), "{err}");
+    }
+
     #[test]
     fn unknown_keys_are_refused() {
         let bad = text().replace("bio_markdown:", "bio_markdown_x:");
@@ -889,6 +1015,7 @@ tier: plain
             evidence_models: vec!["DeepSeek-V4.1-Flash-1017".into()],
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             handle: "repo-audit-fast".into(),
             agent_id: "ag_1".into(),
             playbook_id: "repo-audit-fast".into(),
@@ -944,6 +1071,7 @@ tier: plain
             evidence_models: Vec::new(),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
         };
         write_resolved(dir.path(), &r).unwrap();
@@ -984,6 +1112,7 @@ mod resolved_tests {
             evidence_models: Vec::new(),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

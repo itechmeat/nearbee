@@ -1043,6 +1043,12 @@ pub fn sent_params(req: &StartRequest) -> BTreeMap<String, String> {
             serde_json::to_string(&req.direct_models).expect("a string list serializes"),
         );
     }
+    if !req.script_models.is_empty() {
+        p.insert(
+            "script_models".into(),
+            serde_json::to_string(&req.script_models).expect("a string list serializes"),
+        );
+    }
     p
 }
 

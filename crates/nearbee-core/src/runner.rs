@@ -58,7 +58,8 @@ id_type!(
 );
 
 /// Param names the runner sets itself; a caller may not pass them.
-pub const RESERVED_PARAMS: [&str; 3] = ["hire_id", "execution_id", "direct_models"];
+pub const RESERVED_PARAMS: [&str; 4] =
+    ["hire_id", "execution_id", "direct_models", "script_models"];
 
 /// A playbook as listed by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +129,10 @@ pub struct StartRequest {
     /// The generation's frozen direct models (design 3), sent as the
     /// `direct_models` param when not empty.
     pub direct_models: Vec<String>,
+    /// The generation's frozen script models (`<agent>/<model>`, change
+    /// `script-models`, design 5), sent as the `script_models` param when
+    /// not empty.
+    pub script_models: Vec<String>,
     /// Start the run as an apb external-data run (S6 design 3): serve sets
     /// it on every market run; callers that carry no buyer data do not.
     pub external_data: bool,

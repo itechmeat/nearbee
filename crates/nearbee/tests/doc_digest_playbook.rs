@@ -208,6 +208,7 @@ fn the_listing_materialises_and_passes_the_attested_check() {
         compaction_enabled: Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        script_models: Vec::new(),
         sandbox: None,
     }
     .with_direct_models(&l.direct_models, &l.signed_models);
