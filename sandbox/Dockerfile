@@ -8,7 +8,7 @@ FROM ubuntu:26.04
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates git gh curl jq ripgrep python3 python3-venv tini \
+      ca-certificates git gh curl jq ripgrep python3 python3-venv python3-yaml tini \
       poppler-utils imagemagick util-linux nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 

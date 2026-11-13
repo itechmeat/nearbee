@@ -102,7 +102,7 @@ export APB_BIN="$PWD/scripts/apb-sandboxed"   # absolute path, for nearbee
 
 1. Image (`sandbox/Dockerfile`, `sandbox/build.sh`): Ubuntu 26.04 (the host
    release, so copied binaries find the same glibc) with git, gh, ripgrep,
-   jq, curl, python3, poppler-utils, ImageMagick, Node with OpenSpec 2.0.0
+   jq, curl, python3 with PyYAML (script nodes read `$APB_RUN_DIR/run.yaml`), poppler-utils, ImageMagick, Node with OpenSpec 2.0.0
    and OpenCodeReview 1.13.8-fork.1, Code Ranker 5.0.4, and the host's
    `apb`, `nearbee` and self-contained `claude`, `codex` and `opencode`
    binaries (`NEARBEE_SANDBOX_CLIS` changes the list; a CLI that is a
