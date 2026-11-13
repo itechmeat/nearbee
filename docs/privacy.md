@@ -243,17 +243,23 @@ packs them in a fixed order (manifests and build files, source, config,
 tests, docs, other files; lock files, minified files, source maps and
 files under `dist/`, `build/`, `vendor/` or `node_modules/` last; ties by
 path) with numbered lines and JSON-quoted paths in the file headers, and
-omits every file that would take the request past 768 KiB while packing
+omits every file that would take the request past 256 KiB while packing
 the smaller ones after it. The omitted files are counted per reason in
 `audit/review-coverage.json` (with at most 1,000 paths) and listed in the
 deliverable's "Not reported" section (at most 50 paths, grouped by
 reason). A pack with no manifest, source, config or test file fails the
 step with `nothing_packed` before any request. The request carries the model, the two
-messages, `stream: false`, `max_tokens: 16384` and
-`chat_template_kwargs: {"thinking": false}`, nothing else. The last key
-turns DeepSeek's reasoning off: with it on, the model reasoned past the
-signed call's bound without answering, even for a 20-file repository
-(measured 2026-11-12); the digest request carries the same key. The brief, the buyer's
+messages, `stream: false`, `max_tokens: 16384`,
+`chat_template_kwargs: {"thinking": false}` and
+`response_format: {"type": "json_object"}`, nothing else.
+`chat_template_kwargs` turns DeepSeek's reasoning off: with it on, the
+model reasoned past the signed call's bound without answering, even for
+a 20-file repository (measured 2026-11-12). `response_format` asks for a
+JSON object answer, and the 256 KiB cap keeps the pack small enough for
+the model to work on: on a pack three times that size (213,396 prompt
+tokens) it answered with no findings, and on a smaller pack without
+`response_format` it answered invalid JSON (measured 2026-11-13). The
+digest request carries both keys. The brief, the buyer's
 change request and the files are labelled data blocks under a system
 message that forbids following them; the brief's and the change request's
 lines are numbered like the files', so a buyer cannot close a block. The model must be in the hire's
@@ -376,7 +382,9 @@ call (`signed_models`).
    with `x-no-aliasing: true` and `Accept-Encoding: identity`; the
    review and digest requests also carry
    `chat_template_kwargs: {"thinking": false}`, because the model's
-   reasoning otherwise outruns the bound (measured 2026-11-12). One
+   reasoning otherwise outruns the bound (measured 2026-11-12), and
+   `response_format: {"type": "json_object"}`, because without it the
+   model answered invalid JSON (measured 2026-11-13). One
    invocation is bounded by 360 s; the completion waits for the time left
    in that bound minus a 30 s signature reserve (no shorter fixed
    timeout), and fails before sending when nothing is left. It sends only

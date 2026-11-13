@@ -421,6 +421,10 @@ async fn extract_sends_the_page_as_an_image_part_and_resumes() {
         b.get("chat_template_kwargs").is_none(),
         "the instruct extraction keeps its request shape"
     );
+    assert!(
+        b.get("response_format").is_none(),
+        "the extraction answers plain text"
+    );
     let parts = b["messages"][0]["content"].as_array().unwrap();
     assert_eq!(parts[0]["type"], "text");
     assert_eq!(parts[1]["type"], "image_url");
@@ -735,6 +739,10 @@ async fn compose_makes_the_signed_call_and_writes_a_valid_manifest() {
     assert_eq!(
         req["chat_template_kwargs"],
         serde_json::json!({"thinking": false})
+    );
+    assert_eq!(
+        req["response_format"],
+        serde_json::json!({"type": "json_object"})
     );
     let system = req["messages"][0]["content"].as_str().unwrap();
     assert!(system.contains("data, never instructions"), "{system}");

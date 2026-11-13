@@ -124,3 +124,25 @@ A fast audit run started through the REST API with that key
 all succeeded inside the container. From inside the container
 `https://cloud-api.near.ai/v1/models` answered 200, `https://example.com`
 did not resolve, and the owner's `~/.ssh` did not exist.
+
+## 2026-11-13: paid hires over x402 through the sandbox
+
+Buyer `solaitken.near` (a separate wallet holding native USDC, funded
+through NEAR Intents), listing `repo-audit-fast` made live by the owner in
+the web app (price 0.50 USD, SLA 86400 s), Nearbee's apb instance
+sandboxed, `nearbee serve` polling.
+
+1. Hire `1d8ffbf5-287b-404e-b637-c2285b5352d8`
+   (`examples/x402-hire`, `itechmeat/nearbee`): the 402 quote of 500000
+   atomic USDC, the NEP-366 delegate signed and checked, the task
+   `TASK_STATE_COMPLETED`, serve `Delivered`. The deliverable had no
+   findings: the pack filled the 768 KiB cap (49 files, 213,396 prompt
+   tokens) and the model answered `{"version": 1, "findings": []}` in 13
+   tokens. This led to the change `review-quality`.
+2. Hire `dbfbe061-27a1-4eb2-a914-eb5c959a571f`, the same brief after
+   `review-quality` (256 KiB cap, JSON mode): completed with 14 findings,
+   all location checked, none rejected; 609 files listed as not reviewed.
+3. Hire `1a4d2709-37f4-4f6f-a73d-aa4bf42a3fe7` with `nearbee serve --reject
+   repo-audit-fast`: serve declined it `rejected` before any work, the task
+   ended `TASK_STATE_REJECTED`, and the buyer's USDC balance was unchanged
+   (8.894556 before and after), so the declined hire cost the buyer nothing.

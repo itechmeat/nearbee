@@ -834,6 +834,7 @@ pub fn build_request(
             "stream": false,
             "max_tokens": DIGEST_MAX_TOKENS,
             "chat_template_kwargs": nearbee_cloud::thinking_off(),
+            "response_format": nearbee_cloud::json_object(),
             "messages": [
                 {"role": "system", "content": DIGEST_SYSTEM_PROMPT},
                 {"role": "user", "content": user}

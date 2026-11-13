@@ -55,12 +55,14 @@ project's decisions are off, `docs/privacy.md`).
 - The fast variant's model step is `review` (script, `nearbee audit
   review`): it packs the snapshot's files (only those still matching their
   recorded SHA-256 and valid UTF-8, in a fixed priority order, numbered
-  lines, at most 768 KiB with every file that does not fit omitted and
+  lines, at most 256 KiB with every file that does not fit omitted and
   listed as not reviewed, generated, vendored and lock files last; a pack
   with no source-like file fails with `nothing_packed`) as data under a
   system message with the same rules as the agent prompt, and makes one
   signed call to `deepseek-ai/DeepSeek-V4.1-Flash-1017` on NEAR AI Cloud
-  (the listing's one direct and signed model). The answer becomes
+  (the listing's one direct and signed model), with reasoning off
+  (`chat_template_kwargs: {"thinking": false}`) and a JSON object answer
+  requested (`response_format: {"type": "json_object"}`). The answer becomes
   `audit/candidates.json` (at most 40 findings; anything else fails the
   step with `review_unparsed`), and `finish` checks every citation as for
   the premium variant and adds the signed evidence to the manifest.

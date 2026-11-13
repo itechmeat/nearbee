@@ -59,7 +59,7 @@ An error of a digest command or of the model client SHALL name the step and the 
 - **THEN** the step fails saying the answer does not match the schema, and the message does not contain `Jane`
 
 ### Requirement: Digest call
-`nearbee digest compose` SHALL build one request to `deepseek-ai/DeepSeek-V4.1-Flash-1017` with `chat_template_kwargs: {"thinking": false}` from the page texts, the PII counts and the `feedback` param (data, never instructions), at most 900 KiB, run it through `nearbee signed-call`, and require the model's JSON to be exactly `{"summary", "entities", "figures", "open_questions"}` as the scenarios bound it; a `pii` key in the answer SHALL be refused.
+`nearbee digest compose` SHALL build one request to `deepseek-ai/DeepSeek-V4.1-Flash-1017` with `chat_template_kwargs: {"thinking": false}` and `response_format: {"type": "json_object"}` from the page texts, the PII counts and the `feedback` param (data, never instructions), at most 900 KiB, run it through `nearbee signed-call`, and require the model's JSON to be exactly `{"summary", "entities", "figures", "open_questions"}` as the scenarios bound it; a `pii` key in the answer SHALL be refused.
 
 #### Scenario: Invalid JSON answer
 - **WHEN** the model's answer does not parse into the schema
@@ -79,7 +79,7 @@ An error of a digest command or of the model client SHALL name the step and the 
 
 #### Scenario: Reasoning off
 - **WHEN** the digest request is built
-- **THEN** its `chat_template_kwargs` is exactly `{"thinking": false}`
+- **THEN** its `chat_template_kwargs` is exactly `{"thinking": false}` and its `response_format` is exactly `{"type": "json_object"}`
 
 ### Requirement: Digest file
 Nearbee SHALL write `digest.json` as `{version: 1, summary, entities, figures, open_questions, pii, pages: {digested, skipped, truncated}, dropped_figures, dropped_personal_figures, redacted_spans}` with `pii` taken from `pii.json`, never from the model. A page counts once: a page cut to fit the request is counted in `skipped` only, and `truncated` counts digested pages only.

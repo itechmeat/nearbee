@@ -40,6 +40,14 @@ pub fn thinking_off() -> serde_json::Value {
     serde_json::json!({"thinking": false})
 }
 
+/// The request key that asks for a JSON object answer:
+/// `"response_format": {"type": "json_object"}`. Without it DeepSeek
+/// V4.1 Flash answered invalid JSON on a large pack (measured
+/// 2026-11-13, change `review-quality`).
+pub fn json_object() -> serde_json::Value {
+    serde_json::json!({"type": "json_object"})
+}
+
 /// The privacy classifier model.
 pub const CLASSIFY_MODEL: &str = "openai/privacy-filter";
 

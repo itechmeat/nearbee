@@ -85,6 +85,9 @@ own agent skills vendored under `.agents/skills/` (`.claude/skills` links there)
 10. **Documents are the handover.** Any decision, measured fact or gotcha learned
     while building goes into the fitting `docs/` file in the same change, so the
     next agent with a clean context can continue.
+11. **Search the code with `zg`** (zvec-grep) before reading files: `zg "<what you
+    look for>"` for meaning, `zg --rg -F "<text>"` for exact text. The index lives
+    in `.zvec-grep/` (ignored); refresh it with `zg --index` after large changes.
 
 ## Hackathon constraints
 

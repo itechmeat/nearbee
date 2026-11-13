@@ -147,7 +147,9 @@ fn the_pack_is_deterministic_and_ordered_by_priority() {
 
 #[test]
 fn every_file_that_does_not_fit_is_omitted_and_packing_continues() {
-    let big = "let a = 1;\n".repeat(200 * 1024 / 11);
+    // About 100 KiB per file once numbered: two fit under 256 KiB, the
+    // third does not.
+    let big = "let a = 1;\n".repeat(60 * 1024 / 11);
     let files: [(&str, &[u8]); 4] = [
         ("src/a.rs", big.as_bytes()),
         ("src/b.rs", big.as_bytes()),
@@ -156,11 +158,8 @@ fn every_file_that_does_not_fit_is_omitted_and_packing_continues() {
     ];
     let dir = worktree(&files);
     let pack = audit::review_request(dir.path(), "brief", "").unwrap();
-    assert!(
-        pack.request.len() <= audit::REVIEW_REQUEST_CAP,
-        "{}",
-        pack.request.len()
-    );
+    assert!(pack.request.len() <= 256 * 1024, "{}", pack.request.len());
+    assert!(pack.request.len() <= audit::REVIEW_REQUEST_CAP);
     let user = user_of(&request_of(&pack));
     let packed = headers(&user);
     assert_eq!(packed, ["src/a.rs", "src/b.rs", "src/d.rs"]);
@@ -277,7 +276,7 @@ fn a_non_utf8_file_is_omitted() {
 }
 
 #[test]
-fn the_request_has_only_the_five_keys_and_reasoning_off() {
+fn the_request_has_only_the_six_keys_reasoning_off_and_json_output() {
     let dir = worktree(&[("src/main.rs", LIB.as_bytes())]);
     let pack = audit::review_request(dir.path(), "Audit the repo.", "Shorter please.").unwrap();
     let req = request_of(&pack);
@@ -295,12 +294,17 @@ fn the_request_has_only_the_five_keys_and_reasoning_off() {
             "max_tokens",
             "messages",
             "model",
+            "response_format",
             "stream"
         ]
     );
     assert_eq!(
         req["chat_template_kwargs"],
         serde_json::json!({"thinking": false})
+    );
+    assert_eq!(
+        req["response_format"],
+        serde_json::json!({"type": "json_object"})
     );
     assert_eq!(req["model"], audit::REVIEW_MODEL);
     assert_eq!(req["stream"], false);
