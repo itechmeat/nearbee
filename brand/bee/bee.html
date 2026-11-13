@@ -1,0 +1,212 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#f2f1e9}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+// High-tech honey bee built on real anatomy (Apis mellifera worker):
+// flat head with lateral oval eyes, elbowed antennae, massive thorax carrying the wings,
+// petiole, telescoping abdominal plates open underneath to show the services,
+// veined fore and hind wings, segmented legs with a flat hind tibia.
+import * as THREE from 'three';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+const q=new URLSearchParams(location.search);
+const W=+q.get('w')||1000,H=+q.get('h')||1000,view=q.get('view')||'hero';
+// bg: light | dark | none (transparent, for posters and the logo); shadow: 1 | 0
+const bgName=q.get('bg')||'light',dark=bgName==='dark',clear=bgName==='none'||view==='logo';
+const num=(k,d)=>q.has(k)?+q.get(k):d;
+if(clear){document.documentElement.style.background=document.body.style.background='transparent';}
+const r=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true,alpha:true});
+r.setSize(W,H);r.setPixelRatio(1);r.toneMapping=THREE.NeutralToneMapping;
+r.shadowMap.enabled=true;r.shadowMap.type=THREE.PCFSoftShadowMap;
+document.body.appendChild(r.domElement);
+const s=new THREE.Scene();s.background=clear?null:new THREE.Color(dark?0x101114:0xf2f1e9);r.setClearColor(0x000000,0);
+const pm=new THREE.PMREMGenerator(r);s.environment=pm.fromScene(new RoomEnvironment(),0.03).texture;s.environmentIntensity=.85;
+const key=new THREE.DirectionalLight(0xffffff,1.9);key.position.set(3,7,5);key.castShadow=true;key.shadow.mapSize.set(2048,2048);key.shadow.radius=5;
+Object.assign(key.shadow.camera,{left:-4,right:4,top:4,bottom:-4});s.add(key);
+const fill=new THREE.DirectionalLight(0xffffff,.55);fill.position.set(-5,2,-3);s.add(fill);
+
+const M=(o)=>new THREE.MeshPhysicalMaterial(o);
+const alu=M({color:0xc9ccd2,metalness:1,roughness:.26});
+const satin=M({color:0xb9bdc4,metalness:1,roughness:.5});
+const graphite=M({color:0x1f2226,metalness:.55,roughness:.42,clearcoat:.3});
+const shell=M({color:0x17181b,metalness:.2,roughness:.55,clearcoat:.25,clearcoatRoughness:.5});
+// hexagonal facet bump map for the compound eyes
+function facetTex(){const c=document.createElement('canvas');c.width=c.height=1024;const g=c.getContext('2d');
+ g.fillStyle='#000';g.fillRect(0,0,1024,1024);const R=26,hw=Math.sqrt(3)*R;
+ for(let row=-1;row*1.5*R<1040;row++)for(let col=-1;col*hw<1040;col++){const cx=col*hw+(row&1?hw/2:0),cy=row*1.5*R;
+  const gr=g.createRadialGradient(cx,cy,0,cx,cy,R*.95);gr.addColorStop(0,'#fff');gr.addColorStop(.7,'#bbb');gr.addColorStop(1,'#000');
+  g.fillStyle=gr;g.beginPath();for(let k=0;k<6;k++){const a=Math.PI/6+k*Math.PI/3;g.lineTo(cx+R*.92*Math.cos(a),cy+R*.92*Math.sin(a));}g.fill();}
+ const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(1.4,.9);return t;}
+const ft=facetTex();
+
+const yellow=M({color:0xfcbb00,metalness:.15,roughness:.32,clearcoat:.8,clearcoatRoughness:.15});
+const green=M({color:0x00ec97,roughness:.35,clearcoat:.6});
+const eyeGlass=M({color:0x07110d,metalness:.3,roughness:.18,clearcoat:1,clearcoatRoughness:.05,bumpMap:ft,bumpScale:10,iridescence:1,iridescenceIOR:1.8,iridescenceThicknessRange:[250,520],sheen:1,sheenColor:new THREE.Color(0x00ec97),sheenRoughness:.35});
+const ocel=M({color:0x0a0b0d,metalness:.2,roughness:.05,clearcoat:1});
+const membrane=M({color:0xe9eef2,metalness:0,roughness:.22,transmission:.92,thickness:.012,ior:1.5,iridescence:1,iridescenceIOR:1.6,iridescenceThicknessRange:[180,620],side:THREE.DoubleSide,specularIntensity:1,clearcoat:1,clearcoatRoughness:.05});
+const vein=M({color:0x2f9e76,metalness:.4,roughness:.38});
+
+const bee=new THREE.Group();s.add(bee);
+const V=(...a)=>new THREE.Vector3(...a);
+const put=(g,m,par=bee,p=[0,0,0],rot=[0,0,0],sc=[1,1,1])=>{const o=new THREE.Mesh(g,m);o.position.set(...p);o.rotation.set(...rot);o.scale.set(...sc);o.castShadow=m!==membrane;o.receiveShadow=true;par.add(o);return o};
+const rod=(a,b,rad,m,par=bee,seg=12)=>put(new THREE.TubeGeometry(new THREE.LineCurve3(a.clone(),b.clone()),1,rad,seg),m,par);
+const ball=(p,rad,m,par=bee)=>put(new THREE.SphereGeometry(rad,24,16),m,par,p.toArray());
+const pin=(p,dir,rad,len,m,par=bee)=>{const o=put(new THREE.CylinderGeometry(rad,rad,len,20),m,par,p.toArray());o.quaternion.setFromUnitVectors(V(0,1,0),dir.clone().normalize());return o};
+
+// joint: a dark ball knuckle with a thin inset NEAR-green ring across the limb axis
+const joint=(p,axis,rad,par=bee)=>{ball(p,rad,graphite,par);const t=put(new THREE.TorusGeometry(rad*1.02,rad*.13,10,40),green,par,p.toArray());t.quaternion.setFromUnitVectors(V(0,0,1),axis.clone().normalize());};
+
+// ---------------- thorax: massive machined housing, panel seams, wing actuators
+const T=new THREE.Group();bee.add(T);
+put(new THREE.SphereGeometry(.56,72,48),shell,T,[0,0,0],[0,0,0],[1,.94,1.08]);
+// dorsal plate (scutum): a ring of six machined panels around a central hex hub, with gaps, vents and screws
+{const R=.585,sc=[1,.94,1.08],g=.035;
+ for(let k=0;k<6;k++){const a0=k*Math.PI/3+g,len=Math.PI/3-2*g;
+  put(new THREE.SphereGeometry(R,24,12,a0,len,Math.PI*.075,Math.PI*.2),satin,T,[0,0,0],[0,0,0],sc);
+  // two screws per panel, near its outer edge
+  for(const f of [.25,.75]){const a=a0+len*f,th=Math.PI*.24;
+   const v=V(Math.sin(th)*Math.cos(a),Math.cos(th),Math.sin(th)*Math.sin(a)).multiplyScalar(R+.004).multiply(V(...sc));
+   const sr=put(new THREE.CylinderGeometry(.018,.018,.012,16),graphite,T,v.toArray());sr.quaternion.setFromUnitVectors(V(0,1,0),v.clone().normalize());}
+  // vent slots on the two side panels
+  if(k===0||k===3) for(let j=0;j<4;j++){const a=a0+len*(.3+j*.13),th=Math.PI*.16;
+   const v=V(Math.sin(th)*Math.cos(a),Math.cos(th),Math.sin(th)*Math.sin(a)).multiplyScalar(R+.002).multiply(V(...sc));
+   const sl=put(new THREE.BoxGeometry(.012,.006,.08),graphite,T,v.toArray());sl.lookAt(V(0,v.y,0));}
+ }
+ put(new THREE.SphereGeometry(R,36,8,0,Math.PI*2,0,Math.PI*.06),alu,T,[0,0,0],[0,0,0],sc);
+ put(new THREE.CylinderGeometry(.075,.075,.03,6),graphite,T,[0,R*.94+.01,0]);
+ put(new THREE.CylinderGeometry(.03,.03,.035,20),green,T,[0,R*.94+.02,0]);
+ put(new THREE.TorusGeometry(R*Math.sin(Math.PI*.275),.01,8,72),graphite,T,[0,R*.94*Math.cos(Math.PI*.275),0],[Math.PI/2,0,0],[1,1.08,1]);
+}
+// lateral panel seams
+for(const a of [-.5,.5]) put(new THREE.TorusGeometry(.565,.008,8,72),graphite,T,[0,0,0],[0,Math.PI/2,a],[1,.94,1.08]);
+// wing actuators: piston housings on the flanks driving the wing hinges
+for(const sx of [1,-1]){
+ const top=V(.4*sx,.36,.08),bot=V(.55*sx,-.12,.05);
+ rod(bot,bot.clone().lerp(top,.55),.055,graphite,T);rod(bot.clone().lerp(top,.45),top,.025,alu,T);
+ pin(bot,V(0,0,1),.06,.1,alu,T);pin(top,V(0,0,1),.045,.12,alu,T);
+}
+// neck and petiole joints
+pin(V(0,.02,.62),V(0,0,1),.17,.12,graphite,T);put(new THREE.TorusGeometry(.17,.015,8,40),alu,T,[0,.02,.68]);
+pin(V(0,-.05,-.64),V(0,0,1),.13,.14,graphite,T);put(new THREE.TorusGeometry(.13,.015,8,40),alu,T,[0,-.05,-.71]);
+
+// ---------------- head: flat, triangular from the front, lateral oval eyes, ocelli, elbowed antennae
+const Hd=new THREE.Group();bee.add(Hd);Hd.position.set(0,.02,.86);Hd.rotation.x=0;
+put(new THREE.SphereGeometry(.4,64,40),shell,Hd,[0,0,0],[0,0,0],[1,1.02,.48]);
+// face plate (clypeus), aluminium, narrowing down
+put(new THREE.CylinderGeometry(.2,.1,.36,6),alu,Hd,[0,-.12,.17],[0,0,0],[1,1,.25]);
+for(const sx of [1,-1]){
+ const e=put(new THREE.SphereGeometry(.2,48,32),eyeGlass,Hd,[.33*sx,.04,.03],[0,0,0],[.55,1.15,.8]);
+ put(new THREE.TorusGeometry(.2,.012,8,48),alu,Hd,[.3*sx,.04,.03],[0,Math.PI/2,0]).scale.set(.8,1.15,1);
+ // mandible
+ rod(V(.12*sx,-.36,.12),V(.04*sx,-.46,.2),.028,graphite,Hd);
+}
+for(const [x,y] of [[0,.38],[.09,.33],[-.09,.33]]) put(new THREE.SphereGeometry(.035,16,12),ocel,Hd,[x,y,.06]);
+// antennae: scape -> elbow pin -> segmented flagellum curving down
+for(const sx of [1,-1]){
+ const base=V(.08*sx,.12,.22),elbow=V(.16*sx,.4,.46);
+ pin(base,V(1,0,0),.04,.08,graphite,Hd);
+ rod(base,elbow,.026,alu,Hd);
+ joint(elbow,V(.35*sx,.1,.93),.036,Hd);
+ let p=elbow.clone(),dir=V(.35*sx,.1,.93).normalize();
+ for(let k=0;k<10;k++){
+  const n=p.clone().addScaledVector(dir,.075);
+  rod(p,n,.022-.0008*k,k%2?graphite:alu,Hd,10);p=n;
+  dir.applyAxisAngle(V(1,0,0),.1).normalize();
+ }
+}
+
+// ---------------- abdomen: telescoping plates (tergites), open underneath, services visible
+const A=new THREE.Group();bee.add(A);A.position.set(0,-.08,-.72);A.rotation.x=-.2;
+const AL=1.65,prof=t=>.5*Math.pow(Math.sin(Math.PI*Math.min(.999,.1+t*.92)),.72)+.03;
+const NS=5,gap=.55;
+for(let i=0;i<NS;i++){
+ const t0=Math.max(0,i/NS-.03),t1=(i+1)/NS,grow=1+.045*(NS-i)/NS;
+ const pts=[];for(let k=0;k<=16;k++){const t=t0+(t1-t0)*k/16;pts.push(new THREE.Vector2(prof(t)*grow,t*AL));}
+ // front part yellow, rear band graphite: the bee's banding on each segment
+ const split=Math.round(16*(i<NS-1?.74:.45));
+ put(new THREE.LatheGeometry(pts.slice(0,split+1),72,Math.PI+gap,Math.PI*2-2*gap),yellow,A,[0,0,0],[-Math.PI/2,0,0]);
+ put(new THREE.LatheGeometry(pts.slice(split),72,Math.PI+gap,Math.PI*2-2*gap),graphite,A,[0,0,0],[-Math.PI/2,0,0]);
+ // rolled rear edge
+ const rr=prof(t1)*grow;put(new THREE.TorusGeometry(rr,.012,8,72,Math.PI*2-2*gap),green,A,[0,0,-t1*AL],[0,0,-Math.PI/2+gap],[1,1,1]);
+}
+// inner structure seen through the open belly: ribs, spine and colour-coded service lines
+for(let i=1;i<NS;i++){const t=i/NS;put(new THREE.TorusGeometry(prof(t)*.9,.016,8,48),alu,A,[0,0,-t*AL]);}
+rod(V(0,0,0),V(0,0,-AL*.95),.04,alu,A);
+[[green,.1],[green,0],[green,-.1]].forEach(([m,x])=>{
+ const pts=[];for(let k=0;k<=10;k++){const t=.02+k/10*.85;pts.push(V(x,-prof(t)*.62,-t*AL));}
+ put(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),80,.028,10),m,A);
+});
+// sting
+put(new THREE.ConeGeometry(.04,.26,16),graphite,A,[0,0,-AL-.1],[-Math.PI/2,0,0]);
+// services entering from the thorax through the petiole
+[[green,.1],[green,0],[green,-.1]].forEach(([m,x])=>{
+ put(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([V(x,-.42,-.3),V(x,-.38,-.62),V(x,-.36,-.8)]),30,.028,10),m,bee);
+});
+
+// ---------------- wings: real venation, glass cells, straight leading spar
+const fore=[[0,.03],[.35,.1],[.9,.17],[1.45,.2],[1.85,.15],[2.05,.02],[2.0,-.12],[1.75,-.24],[1.2,-.3],[.6,-.24],[.2,-.1],[0,-.02]];
+const hind=[[0,.02],[.5,.06],[1.0,.08],[1.28,.0],[1.2,-.12],[.85,-.19],[.4,-.15],[.1,-.06],[0,-.01]];
+const foreVeins=[[[0,.03],[.35,.1],[.9,.17],[1.45,.2]],[[.05,0],[.6,.02],[1.0,.0],[1.3,-.06]],[[.6,.02],[.95,.14]],[[1.0,0],[1.3,.16]],[[1.3,-.06],[1.55,.13]],[[1.0,0],[.95,-.2]],[[1.3,-.06],[1.4,-.22]],[[.6,.02],[.55,-.2]],[[1.45,.2],[1.75,.06],[1.85,.15]]];
+const hindVeins=[[[0,.02],[.5,.06],[.75,.07]],[[.05,0],[.5,-.03],[.85,-.06]],[[.5,-.03],[.55,-.15]]];
+const wing=(outline,veins,sx,sweep,lift,root,spar)=>{
+ const g=new THREE.Group();bee.add(g);g.position.copy(root);
+ const w=new THREE.Group();g.add(w);
+ w.rotation.order='YXZ';w.rotation.y=sx>0?-sweep:Math.PI+sweep;w.rotation.x=-Math.PI/2;
+ g.rotation.z=sx*lift;if(sx<0)w.scale.y=-1;
+ const sh=new THREE.Shape(outline.map(([x,y])=>new THREE.Vector2(x,y)));
+ put(new THREE.ExtrudeGeometry(new THREE.Shape(new THREE.SplineCurve(outline.map(([x,y])=>new THREE.Vector2(x,y))).getPoints(120)),{depth:.006,bevelEnabled:true,bevelThickness:.003,bevelSize:.004,bevelSegments:2,curveSegments:48}),membrane,w,[0,0,-.003]);
+ const edge=new THREE.CatmullRomCurve3(outline.map(([x,y])=>V(x,y,0)),true);
+ put(new THREE.TubeGeometry(edge,200,.0055,6,true),satin,w);
+ veins.forEach((pl,i)=>{const c=pl.length>2?new THREE.CatmullRomCurve3(pl.map(([x,y])=>V(x,y,0))):new THREE.LineCurve3(V(...pl[0],0),V(...pl[1],0));
+  put(new THREE.TubeGeometry(c,40,i===0?spar:.0045,8),i===0?satin:vein,w);});
+ pin(V(0,0,0),V(0,0,1),.05,.08,graphite,w);pin(V(0,0,0),V(0,0,1),.025,.1,green,w);
+};
+// sweep: angle back from straight sideways (0 = sideways)
+for(const sx of [1,-1]){wing(fore,foreVeins,sx,-.55,.2,V(.3*sx,.4,.12),.026);wing(hind,hindVeins,sx,-.82,.14,V(.3*sx,.36,-.12),.016);}
+
+// ---------------- legs: coxa, femur, tibia, segmented tarsus, claw; flat hind tibia
+const leg=(sx,root,knee,ankle,foot,flat)=>{
+ ball(root,.06,graphite);
+ rod(root,knee,.042,graphite);joint(knee,ankle.clone().sub(knee),.052);
+ if(flat){const mid=knee.clone().lerp(ankle,.5),len=knee.distanceTo(ankle);
+  const o=put(new THREE.BoxGeometry(.15,len,.035),satin,bee,mid.toArray());o.quaternion.setFromUnitVectors(V(0,1,0),ankle.clone().sub(knee).normalize());}
+ else rod(knee,ankle,.032,alu);
+ pin(ankle,V(0,0,1),.038,.08,graphite);
+ let p=ankle.clone();const step=foot.clone().sub(ankle).divideScalar(4);
+ for(let k=0;k<4;k++){const n=p.clone().add(step);rod(p,n,.02,k%2?graphite:alu,bee,8);p=n;}
+ rod(p,p.clone().add(V(.04*sx,-.05,.04)),.01,graphite);
+};
+for(const sx of [1,-1]){
+ leg(sx,V(.16*sx,-.42,.3),V(.4*sx,-.55,.5),V(.42*sx,-.85,.62),V(.46*sx,-1.0,.72),false);
+ leg(sx,V(.2*sx,-.46,0),V(.5*sx,-.6,.08),V(.56*sx,-.88,-.08),V(.6*sx,-1.0,-.2),false);
+ leg(sx,V(.18*sx,-.44,-.32),V(.5*sx,-.62,-.5),V(.6*sx,-.86,-.95),V(.64*sx,-1.0,-1.2),true);
+}
+
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(30,30),new THREE.ShadowMaterial({opacity:dark?.45:.13}));
+ground.rotation.x=-Math.PI/2;ground.position.y=-1.02;ground.receiveShadow=true;
+if(q.get('shadow')!=='0'&&view!=='logo')s.add(ground);
+
+// Camera. Presets set an orbit; any of az, el, dist, fov, tx, ty, tz overrides them.
+// az: degrees around the bee (0 = from its right side, 90 = from the front);
+// el: degrees above the horizon (90 = straight down); dist: distance to the target.
+const P={hero:[42,27,9.3,26],top:[90,89.9,13,26],side:[0,5,9,26],head:[38,20,2.95,22],
+ front:[90,8,8,26],rear:[-90,20,8.5,26],low:[35,-6,8.4,26],logo:[90,89.9,13,26]}[view]||[42,27,9.3,26];
+const T0={head:[0,0,.9]}[view]||[0,-.15,-.4];
+const az=num('az',P[0])*Math.PI/180,el=num('el',P[1])*Math.PI/180,dist=num('dist',P[2]);
+const target=V(num('tx',T0[0]),num('ty',T0[1]),num('tz',T0[2]));
+let cam;
+if(view==='logo'){
+ // orthographic top view, framed tight on the silhouette
+ const box=new THREE.Box3().setFromObject(bee),c=box.getCenter(V()),sz=box.getSize(V());
+ const pad=num('pad',.04),half=Math.max(sz.x,sz.z)/2*(1+pad*2);
+ const aspect=W/H,hw=aspect>=1?half*aspect:half,hh=aspect>=1?half:half/aspect;
+ cam=new THREE.OrthographicCamera(-hw,hw,hh,-hh,.1,100);cam.up.set(0,0,1);cam.position.set(c.x,20,c.z+.001);cam.lookAt(c.x,0,c.z);
+}else{
+ cam=new THREE.PerspectiveCamera(num('fov',P[3]),W/H,.1,100);
+ if(Math.abs(el)>1.5)cam.up.set(0,0,1);
+ cam.position.set(target.x+dist*Math.cos(el)*Math.cos(az),target.y+dist*Math.sin(el),target.z+dist*Math.cos(el)*Math.sin(az));
+ cam.lookAt(target);
+}
+cam.updateProjectionMatrix();
+r.render(s,cam);document.title='done';
+</script></body></html>

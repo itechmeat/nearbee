@@ -46,6 +46,7 @@ own agent skills vendored under `.agents/skills/` (`.claude/skills` links there)
   (not the default one), `config.yaml`, `specs/` (describes `main`), `changes/`.
 - `crates/` - the adapter (to be created; see `docs/architecture.md` for the module map).
 - `playbooks/` - the two example playbooks and profiles Nearbee lists (to be created).
+- `brand/` - the Nearbee mark: the 3D bee model, its renders, the logo and how to render posters (`brand/README.md`).
 - `examples/` - the demo buyer: an x402 caller that hires a Nearbee agent (to be created).
 
 ## Engineering rules
