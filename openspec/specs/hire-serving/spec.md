@@ -78,7 +78,7 @@ Serve SHALL write an intent before every external write (market start, decline, 
 - **THEN** serve resends the Markdown stored in the generation's snapshot, byte for byte, not the changed file
 
 ### Requirement: Delivery
-On a succeeded run serve SHALL validate the manifest, recheck any `tee_signature` evidence, append the signature section, the evidence section (attested hires) and the statement, check the result against the Markdown limit and the secret scan, upload every output file the manifest lists through the market's file API within the file limits, snapshot it and submit the Markdown with the file references; a failed, aborted or timed-out run, an invalid manifest, a file past a limit or with a secret SHALL be declined `failed` with a short reason; a run report SHALL never be submitted.
+On a succeeded run serve SHALL validate the manifest, recheck any `tee_signature` evidence, append the signature, evidence (attested hires) and statement sections, check the Markdown limit and the secret scan, deliver the output files, snapshot the result and submit it; a failed, aborted or timed-out run or an invalid manifest SHALL be declined `failed` with a short reason; a run report SHALL never be submitted.
 
 #### Scenario: Invalid manifest
 - **WHEN** the run succeeded but its manifest fails validation
@@ -115,6 +115,13 @@ On a succeeded run serve SHALL validate the manifest, recheck any `tee_signature
 #### Scenario: Recovered submit
 - **WHEN** serve restarts after the submission snapshot was written
 - **THEN** it resends the snapshotted bytes, statement, evidence and file references included, without assembling them again
+
+### Requirement: Output files
+Serve SHALL upload every output file the manifest lists through the market's file API within the file limits and SHALL submit the Markdown with the file references; a file past a limit or with a secret SHALL decline the hire `failed` with the reason.
+
+#### Scenario: Secret in an output file
+- **WHEN** a listed output file contains a token the secret scan finds
+- **THEN** serve declines `failed` and submits nothing
 
 ### Requirement: Refused or unknown submit
 A submit the market refuses SHALL decline with `failed` naming the machine code when the row is still `in_progress`, and otherwise SHALL be recorded and left. A submit whose outcome stays unknown after the client's one resend SHALL be recorded and reported to the operator, its intent SHALL stay open for the next restart, and no second deliverable SHALL be built.
