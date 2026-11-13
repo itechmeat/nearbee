@@ -84,10 +84,11 @@ brand/render.sh shot poster-a 2400 1350 'az=130&el=35&dist=8&bg=none&shadow=0'
 ## Repository poster
 
 `poster/banner.html` (1280 by 640) is the repository poster: the logo, the
-tagline and a diagram of how Nearbee works, with the bee above the Nearbee
-lane. `poster/banner.png` is taken at device scale 2 (2560 by 1280) and opens
-the top-level README; `poster/social-preview.png` (1280 by 640) is for the
-GitHub social preview, set by hand in the repository settings. The bee in it
+tagline, the services it is built on with their marks (`poster/logos/`, see
+its `NOTICE.md`) and a diagram of how Nearbee works, with the bee above the
+Nearbee lane. `poster/banner.png` is taken at device scale 2 (2560 by 1280,
+about 240 KB); it opens the top-level README and is also the image for the
+GitHub social preview (set by hand in the repository settings). The bee in it
 is `renders/poster-bee.png`, a shot cropped to the bee:
 
 ```sh
@@ -104,7 +105,7 @@ chromium --headless=new --hide-scrollbars --window-size=1280,640 --force-device-
    binary); it needs network access for the CDN.
 3. `renders/`: 1200 by 1200 renders, `bee-<view>-<ground>.png`.
 4. `logo/`: the mark, its small sizes, the lockups and `lockup.html`.
-5. `poster/`: the repository poster and the social preview.
+5. `poster/`: the repository poster, its source and the third-party marks it shows.
 
 ## Next
 
