@@ -81,6 +81,22 @@ brand/render.sh 1200                     # every preset on both grounds, and the
 brand/render.sh shot poster-a 2400 1350 'az=130&el=35&dist=8&bg=none&shadow=0'
 ```
 
+## Repository poster
+
+`poster/banner.html` (1280 by 640) is the repository poster: the logo, the
+tagline and a diagram of how Nearbee works, with the bee above the Nearbee
+lane. `poster/banner.png` is taken at device scale 2 (2560 by 1280) and opens
+the top-level README; `poster/social-preview.png` (1280 by 640) is for the
+GitHub social preview, set by hand in the repository settings. The bee in it
+is `renders/poster-bee.png`, a shot cropped to the bee:
+
+```sh
+brand/render.sh shot poster-bee 900 600 'az=34&el=30&dist=10.5&tx=0.15&tz=0&bg=none&shadow=0'
+# then crop renders/poster-bee.png to its opaque bounds
+chromium --headless=new --hide-scrollbars --window-size=1280,640 --force-device-scale-factor=2 \
+  --screenshot=brand/poster/banner.png brand/poster/banner.html
+```
+
 ## Files
 
 1. `bee/bee.html`: the model, three.js 0.170.0 loaded from cdn.jsdelivr.net.
@@ -88,8 +104,9 @@ brand/render.sh shot poster-a 2400 1350 'az=130&el=35&dist=8&bg=none&shadow=0'
    binary); it needs network access for the CDN.
 3. `renders/`: 1200 by 1200 renders, `bee-<view>-<ground>.png`.
 4. `logo/`: the mark, its small sizes, the lockups and `lockup.html`.
+5. `poster/`: the repository poster and the social preview.
 
 ## Next
 
 1. A flat mark for 16 px and the favicon, traced from the top view.
-2. The repository cover, then the agent cover template built on it.
+2. The agent cover template built on the repository poster.
