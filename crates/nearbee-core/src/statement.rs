@@ -12,7 +12,7 @@
 
 use crate::catalog::Catalog;
 use crate::journal::sha256_hex;
-use crate::listing::{ResolvedListing, Tier};
+use crate::listing::{ResolvedListing, ScriptAccount, Tier};
 use crate::tiers::{self, ExecutionFacts, Known, ProfileFact, SandboxFact};
 
 /// The statement format a record must carry to be serveable.
@@ -60,7 +60,8 @@ pub fn drift(
     let facts = &facts
         .clone()
         .with_direct_models(&record.direct_models, &record.signed_models)
-        .with_script_models(&record.script_models);
+        .with_script_models(&record.script_models)
+        .with_script_accounts(&record.script_accounts);
     let mut reasons: Vec<String> = Vec::new();
     if !record.serveable() {
         if record.tier.is_none() {
@@ -296,6 +297,13 @@ fn script_section(facts: &ExecutionFacts) -> String {
         // Publish refuses an entry without `/`; should one reach here from a
         // hand-edited record, it is still named whole, never dropped.
         match entry.split_once('/') {
+            Some(("claude", model))
+                if facts.script_accounts.get("claude") == Some(&ScriptAccount::AnthropicApi) =>
+            {
+                out.push_str(&format!(
+                    "- `claude`, model `{model}`: the owner's Anthropic API account (API key).\n"
+                ));
+            }
             Some((agent, model)) => out.push_str(&model_line(agent, model, false)),
             None => out.push_str(&format!("- `{entry}`: declared by the owner.\n")),
         }
@@ -433,6 +441,7 @@ mod tests {
     use crate::tiers::{
         ExecutorFact, NEARAI_API_KEY_REF, NEARAI_BASE_URL, NodeFact, ProfileRef, ProviderRoute,
     };
+    use std::collections::BTreeMap;
 
     const TEE_A: &str = "nearai/Qwen/Qwen3.8-27B";
     const TEE_B: &str = "nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017";
@@ -474,6 +483,7 @@ mod tests {
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             sandbox: None,
         }
     }
@@ -670,6 +680,77 @@ mod tests {
         );
     }
 
+    /// Spec `data-statement`, Script account wording: `claude` with the
+    /// `anthropic-api` account is named as the owner's Anthropic API
+    /// account; the subscription wording stays for the default.
+    #[test]
+    fn a_claude_script_model_on_the_api_account_names_the_api_key() {
+        let api = BTreeMap::from([("claude".to_string(), ScriptAccount::AnthropicApi)]);
+        let facts = plain_premium_facts()
+            .with_script_models(&[OPUS.into(), NEAR_SCRIPT.into()])
+            .with_script_accounts(&api);
+        let text = render(Tier::Plain, &facts, 7);
+        assert!(
+            text.contains("- `claude`, model `claude-opus-5-5`: the owner's Anthropic API account (API key).\n"),
+            "{text}"
+        );
+        // The account applies to the script calls only: the Models
+        // section keeps the profile's subscription wording.
+        let script = &text[text.find("### Script model calls").unwrap()..];
+        assert!(!script.contains("Claude subscription"), "{text}");
+        assert!(
+            text.contains(
+                "- agent `opencode`, model `nearai/deepseek-ai/DeepSeek-V4.1-Flash-1017`.\n"
+            ),
+            "{text}"
+        );
+        assert_ne!(
+            fingerprint(Tier::Plain, &facts),
+            fingerprint(
+                Tier::Plain,
+                &plain_premium_facts().with_script_models(&[OPUS.into(), NEAR_SCRIPT.into()])
+            )
+        );
+    }
+
+    /// Without `script_accounts`, or with only the default `subscription`,
+    /// the statement and the fingerprint are those of before the field.
+    #[test]
+    fn a_listing_without_script_accounts_keeps_its_statement_and_fingerprint() {
+        let empty = plain_premium_facts().with_script_accounts(&BTreeMap::new());
+        assert_eq!(fingerprint(Tier::Plain, &empty), PLAIN_PREMIUM_FINGERPRINT);
+        assert_eq!(
+            sha256_hex(render(Tier::Plain, &empty, 7).as_bytes()),
+            PLAIN_PREMIUM_TEXT_SHA256
+        );
+        let sub = BTreeMap::from([("claude".to_string(), ScriptAccount::Subscription)]);
+        let plain = plain_premium_facts().with_script_models(&[OPUS.into()]);
+        let declared = plain.clone().with_script_accounts(&sub);
+        assert_eq!(
+            fingerprint(Tier::Plain, &declared),
+            fingerprint(Tier::Plain, &plain)
+        );
+        assert_eq!(
+            render(Tier::Plain, &declared, 7),
+            render(Tier::Plain, &plain, 7)
+        );
+    }
+
+    /// The drift pass adds the record's script accounts too.
+    #[test]
+    fn the_drift_pass_adds_the_records_script_accounts() {
+        let api = BTreeMap::from([("claude".to_string(), ScriptAccount::AnthropicApi)]);
+        let facts = plain_premium_facts()
+            .with_script_models(&[OPUS.into()])
+            .with_script_accounts(&api);
+        let mut rec = record(Tier::Plain, &facts);
+        rec.script_models = facts.script_models.clone();
+        rec.script_accounts = api;
+        assert_eq!(drift(&rec, &plain_premium_facts(), 7), None);
+        rec.script_accounts.clear();
+        assert!(drift(&rec, &plain_premium_facts(), 7).is_some());
+    }
+
     /// The fingerprint covers the script models in order.
     #[test]
     fn the_fingerprint_covers_script_models_in_order() {
@@ -768,6 +849,7 @@ mod tests {
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

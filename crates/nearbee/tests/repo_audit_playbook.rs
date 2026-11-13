@@ -186,6 +186,7 @@ fn facts_of(
         direct_models: Vec::new(),
         signed_models: Vec::new(),
         script_models: Vec::new(),
+        script_accounts: Default::default(),
         sandbox: None,
     }
     .with_direct_models(&l.direct_models, &l.signed_models)

@@ -740,6 +740,7 @@ impl ApbRunner {
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             sandbox: self.sandbox().await,
         })
     }

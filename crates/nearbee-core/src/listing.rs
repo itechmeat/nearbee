@@ -4,6 +4,7 @@
 //! Configuration and listing files name agents by handle only; a
 //! token-like value in one is refused at load without printing the value.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
@@ -150,7 +151,45 @@ pub struct Listing {
     /// the owner's agent CLIs, in order, as declared by the owner (spec
     /// `listing-publish`, Script models field). Plain tier only.
     pub script_models: Vec<String>,
+    /// The account each agent CLI of `script_models` uses, as declared by
+    /// the owner (spec `listing-publish`, Script accounts); absent agents
+    /// use their default account.
+    pub script_accounts: BTreeMap<String, ScriptAccount>,
 }
+
+/// The account an agent CLI of `script_models` calls its model with
+/// (spec `listing-publish`, Script accounts). Closed per agent: `claude`
+/// takes `subscription` (the default) or `anthropic-api`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScriptAccount {
+    /// The owner's Claude subscription.
+    Subscription,
+    /// The owner's Anthropic API account (API key).
+    AnthropicApi,
+}
+
+impl ScriptAccount {
+    /// The account kind as written in a listing file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScriptAccount::Subscription => "subscription",
+            ScriptAccount::AnthropicApi => "anthropic-api",
+        }
+    }
+
+    /// Whether this kind is the agent's default account, which a listing
+    /// may leave out.
+    pub fn is_default(self) -> bool {
+        self == ScriptAccount::Subscription
+    }
+}
+
+/// The agent CLIs `script_accounts` knows, with their account kinds.
+const SCRIPT_ACCOUNT_KINDS: [(&str, &[ScriptAccount]); 1] = [(
+    "claude",
+    &[ScriptAccount::Subscription, ScriptAccount::AnthropicApi],
+)];
 
 /// A listing file failure. Errors never carry a token value.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -216,6 +255,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         direct_models: Option<Vec<String>>,
         signed_models: Option<Vec<String>>,
         script_models: Option<Vec<String>>,
+        script_accounts: Option<BTreeMap<String, String>>,
     }
     /// A price that accepts only a YAML string, never a number.
     #[derive(Deserialize)]
@@ -340,6 +380,16 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
             message,
         });
     }
+    let script_accounts =
+        match check_script_accounts(&raw.script_accounts.unwrap_or_default(), &script_models) {
+            Ok(accounts) => accounts,
+            Err(message) => {
+                return Err(ListingError::Parse {
+                    path: path.clone(),
+                    message,
+                });
+            }
+        };
     // With protection on the per-hire ceiling must be above zero
     // (spec `listing-publish`, Listing file; the formula, not a cent rule).
     if protection == Protection::On {
@@ -374,7 +424,44 @@ pub fn parse(text: &str, path: &Path) -> Result<Listing, ListingError> {
         direct_models,
         signed_models,
         script_models,
+        script_accounts,
     })
+}
+
+/// The rules of `script_accounts` (spec `listing-publish`, Script
+/// accounts): every key a known agent CLI that `script_models` uses, every
+/// value one of that agent's account kinds.
+fn check_script_accounts(
+    raw: &BTreeMap<String, String>,
+    script_models: &[String],
+) -> Result<BTreeMap<String, ScriptAccount>, String> {
+    let mut out = BTreeMap::new();
+    for (agent, kind) in raw {
+        let Some((_, kinds)) = SCRIPT_ACCOUNT_KINDS.iter().find(|(a, _)| a == agent) else {
+            let known: Vec<&str> = SCRIPT_ACCOUNT_KINDS.iter().map(|(a, _)| *a).collect();
+            return Err(format!(
+                "script_accounts names agent `{agent}`, which has no account kinds; known agents: {}",
+                known.join(", ")
+            ));
+        };
+        let Some(account) = kinds.iter().find(|k| k.as_str() == kind) else {
+            let allowed: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+            return Err(format!(
+                "script_accounts value `{kind}` for `{agent}` is not one of the allowed values: {}",
+                allowed.join(", ")
+            ));
+        };
+        let used = script_models
+            .iter()
+            .any(|m| split_script_model(m).is_some_and(|(a, _)| a == agent));
+        if !used {
+            return Err(format!(
+                "script_accounts names `{agent}`, which no script_models entry uses"
+            ));
+        }
+        out.insert(agent.clone(), *account);
+    }
+    Ok(out)
 }
 
 /// Splits a `script_models` entry into its agent and model, or `None` when
@@ -505,6 +592,9 @@ pub struct ResolvedListing {
     /// The listing's script models, in order (absent: none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_models: Vec<String>,
+    /// The listing's script accounts (absent: every agent's default).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub script_accounts: BTreeMap<String, ScriptAccount>,
     #[serde(with = "time::serde::rfc3339")]
     pub published_at: time::OffsetDateTime,
 }
@@ -801,6 +891,62 @@ tier: plain
         );
     }
 
+    /// Spec `listing-publish`, Script accounts: an account declared for an
+    /// agent CLI of `script_models` is kept; absent means none.
+    #[test]
+    fn script_accounts_are_kept() {
+        let t = text().replace(
+            "bio_markdown:",
+            "script_models: [claude/claude-opus-5-5]\nscript_accounts: {claude: anthropic-api}\nbio_markdown:",
+        );
+        let l = parse(&t, Path::new("l.yaml")).unwrap();
+        assert_eq!(
+            l.script_accounts.get("claude"),
+            Some(&ScriptAccount::AnthropicApi)
+        );
+        let t = text().replace(
+            "bio_markdown:",
+            "script_models: [claude/claude-opus-5-5]\nscript_accounts: {claude: subscription}\nbio_markdown:",
+        );
+        let l = parse(&t, Path::new("l.yaml")).unwrap();
+        assert_eq!(
+            l.script_accounts.get("claude"),
+            Some(&ScriptAccount::Subscription)
+        );
+        let none = parse(&text(), Path::new("l.yaml")).unwrap();
+        assert!(none.script_accounts.is_empty());
+    }
+
+    /// Spec `listing-publish`, Script accounts: an unknown agent key, a key
+    /// not used by `script_models` and an unknown kind are refused naming
+    /// `script_accounts` and the offending value.
+    #[test]
+    fn a_bad_script_account_is_refused_naming_it() {
+        let with =
+            |extra: &str| text().replace("bio_markdown:", &format!("{extra}\nbio_markdown:"));
+        for (extra, named) in [
+            (
+                "script_models: [claude/claude-opus-5-5]\nscript_accounts: {claude: team}",
+                "team",
+            ),
+            (
+                "script_models: [codex/gpt-5.5]\nscript_accounts: {codex: anthropic-api}",
+                "codex",
+            ),
+            (
+                "script_models: [codex/gpt-5.5]\nscript_accounts: {claude: anthropic-api}",
+                "claude",
+            ),
+            ("script_accounts: {claude: subscription}", "claude"),
+        ] {
+            let err = parse(&with(extra), Path::new("l.yaml"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("script_accounts"), "{extra}: {err}");
+            assert!(err.contains(&format!("`{named}`")), "{extra}: {err}");
+        }
+    }
+
     /// A malformed or duplicated `script_models` entry is refused naming it.
     #[test]
     fn a_malformed_or_duplicated_script_model_is_refused_naming_it() {
@@ -1016,6 +1162,7 @@ tier: plain
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             handle: "repo-audit-fast".into(),
             agent_id: "ag_1".into(),
             playbook_id: "repo-audit-fast".into(),
@@ -1072,6 +1219,7 @@ tier: plain
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             published_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
         };
         write_resolved(dir.path(), &r).unwrap();
@@ -1113,6 +1261,7 @@ mod resolved_tests {
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         }
     }

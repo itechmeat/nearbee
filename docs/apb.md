@@ -115,6 +115,38 @@ export APB_BIN="$PWD/scripts/apb-sandboxed"   # absolute path, for nearbee
    over the pinned one would replace its version. The image is labelled with the sha256 of the copied
    `apb` and `nearbee`; `start` refuses when the host's binary (`APB_BIN`,
    `NEARBEE_BIN` or PATH) differs and names the rebuild command.
+   Build and audit toolchains (change `sandbox-toolchains`, 2026-11-13),
+   for script steps that install, build, test and scan a buyer's
+   repository: from apt `build-essential` (`cc` is GCC 15.2.0),
+   `bubblewrap` 0.11.1 and `pkg-config` 2.5.1; Go 1.27.4 from go.dev in
+   `/usr/local/go` with `GOTOOLCHAIN=local`; Rust 1.100.0 through rustup
+   1.29.3 (minimal profile, `RUSTUP_HOME=/usr/local/rustup`,
+   `CARGO_HOME=/usr/local/cargo`, both read-only in the container, so a
+   step that fetches crates sets `CARGO_HOME` to a writable directory of
+   its own; `RUSTUP_TOOLCHAIN=1.100.0` overrides a repository's
+   `rust-toolchain.toml` or `rust-toolchain` file, whose channel rustup
+   would otherwise try to download and install: in the container that
+   fails with "Permission denied" on `RUSTUP_HOME`, measured 2026-11-13
+   with `channel = "1.88"`, so a repository pinned to another Rust builds
+   with 1.100.0 instead); uv 0.13.8 (static binary); `osv-scanner` 2.7.1
+   (release binary); `pip-audit` 2.10.1 in `/opt/pip-audit`, installed
+   with `pip install --require-hashes` from `sandbox/pip-audit.lock`,
+   which pins it and its 27 dependencies by version and SHA-256 (the file
+   says how to regenerate it). Each download is
+   pinned by version and SHA-256 and checked at build; all were the newest
+   stable releases on 2026-11-13. The image grew from 3.9 GB to 5.76 GB
+   (`docker images`, measured 2026-11-13). A step in the container with
+   the instance's flags built and ran a Rust, a Go and a C program in
+   `/tmp` (measured 2026-11-13).
+   `bubblewrap` does not start in the container: `bwrap --ro-bind / / true`
+   (also with `--unshare-user` or `--unshare-all`) fails with "No
+   permissions to create a new namespace", as root without the instance's
+   flags and as the owner's uid with `--cap-drop ALL` and
+   `no-new-privileges` (measured 2026-11-13; Docker's default seccomp
+   profile blocks the namespace calls, and the host sets
+   `kernel.apparmor_restrict_unprivileged_userns=1`). No privilege is added
+   for it: an agent that wants a nested sandbox gets none and runs its
+   steps in the container itself.
 2. Networks: `nearbee-sbx-int` (internal, `NEARBEE_SANDBOX_SUBNET`, default
    `172.30.77.0/24`, gateway mode `isolated`: the host has no address on
    its bridge, so the container cannot reach host services at `.1` either;
@@ -232,8 +264,10 @@ Limits, stated as they are:
    uploads (GitHub with a token) remains a channel out, and a host behind a
    shared CDN allows domain fronting.
 5. OpenCode fetches from `registry.npmjs.org` and `models.dev` at run time
-   unless its cache is warm in the sandbox home: add them to
-   `NEARBEE_SANDBOX_ALLOW`, or warm the cache once with them allowed.
+   unless its cache is warm in the sandbox home: `registry.npmjs.org` is in
+   the default allowlist since the `sandbox-toolchains` change; add
+   `models.dev` to `NEARBEE_SANDBOX_ALLOW`, or warm the cache once with it
+   allowed.
 6. Agent CLI logins go in as API keys or tokens listed in
    `NEARBEE_APB_ENV_VARS`, never as the owner's config directories; a CLI
    that needs more hosts than the default allowlist needs them in
@@ -244,13 +278,31 @@ Limits, stated as they are:
    provider (`dsh/zai/...`) gets the owner's provider key the same way,
    `api.z.ai` being in `sandbox/egress.allow` since the amendment of
    2026-11-13; the agent brings its own dsh profile (no credentials
-   plugin, the provider key from the environment):
+   plugin, the provider key from the environment). A listing whose script
+   `claude` calls run on the owner's Anthropic API account
+   (`script_accounts: {claude: anthropic-api}`, `docs/privacy.md`) passes
+   `ANTHROPIC_API_KEY` instead of the subscription token:
 
    ```bash
-   # .env holds CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and ZAI_API_KEY
-   export NEARBEE_APB_ENV_VARS="NEARAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN ZAI_API_KEY"
+   # .env holds CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or
+   # ANTHROPIC_API_KEY, and ZAI_API_KEY
+   export NEARBEE_APB_ENV_VARS="NEARAI_API_KEY ANTHROPIC_API_KEY ZAI_API_KEY"
    scripts/apb-instance.sh start
    ```
+7. Package registries and the OSV database are in the default allowlist
+   since the `sandbox-toolchains` change, for the build and audit
+   toolchains of item 1: `registry.npmjs.org`, `registry.yarnpkg.com`
+   (Yarn's default registry) and `repo.yarnpkg.com` (the Yarn releases
+   corepack fetches; added after the review of 2026-11-13); `pypi.org` and
+   `files.pythonhosted.org`; `proxy.golang.org` and `sum.golang.org`;
+   `index.crates.io` and `static.crates.io`;
+   `osv-vulnerabilities.storage.googleapis.com` and `api.osv.dev`. The
+   statement's "Where the run happens" lists the hosts the running unit
+   maps (read from its command line), so once the instance starts with
+   the new list every sandboxed listing's statement differs from its
+   record; the drift check holds such a listing until it is published
+   again. An allowed registry
+   is also a channel out (item 4).
 
 ## REST endpoints Nearbee uses
 

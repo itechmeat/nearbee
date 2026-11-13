@@ -14,8 +14,8 @@ use nearbee_core::config::Limits;
 use nearbee_core::journal;
 use nearbee_core::market::{
     AgentPatch, AgentRecord, DeclineOutcome, DeclineRequest, Market, MarketError, MessageRequest,
-    NewPricingPlan, PricingPlan, ProgressOutcome as MarketProgressOutcome, ProgressRequest, Row,
-    SubmitRequest, ThreadMessage as ThreadMessageT, UploadFile, UploadedFile,
+    NewPricingPlan, PricingPlan, ProgressOutcome as MarketProgressOutcome, ProgressRequest,
+    ReservedFile, Row, StoredFile, SubmitRequest, ThreadMessage as ThreadMessageT, UploadFile,
 };
 use nearbee_core::runner::{
     DecideOutcome as RunnerDecide, Estimate, PlaybookId, PlaybookSummary, RunDetail, RunId,
@@ -90,6 +90,28 @@ struct FakeMarket {
     now: Arc<Mutex<time::OffsetDateTime>>,
     /// The read cap of every download, in order.
     caps: Arc<Mutex<Vec<u64>>>,
+    /// What each upload answers, popped from the front at its reserve;
+    /// `Ok` when empty.
+    upload_plan: Arc<Mutex<std::collections::VecDeque<UploadPlan>>>,
+    /// The plan of each reserved file, by file id, for its complete.
+    reserved: Arc<Mutex<BTreeMap<String, UploadPlan>>>,
+    /// The file references of every submit, in order.
+    submit_files: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+/// One upload answer of the fake market.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UploadPlan {
+    /// Stored as sent; the complete reports the size and digest.
+    Ok,
+    /// Stored, but the complete reports another digest.
+    Mismatch,
+    /// The outcome is unknown (a timeout) at the complete.
+    Unknown,
+    /// The reserve is refused with this HTTP status.
+    ReserveRefused(u16),
+    /// The complete is refused with this HTTP status.
+    CompleteRefused(u16),
 }
 
 /// One download answer of the fake market.
@@ -156,7 +178,21 @@ impl FakeMarket {
             thread: std::sync::Arc::new(Mutex::new(Vec::new())),
             now: Arc::new(Mutex::new(BASE)),
             caps: Arc::new(Mutex::new(Vec::new())),
+            upload_plan: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            reserved: Arc::new(Mutex::new(BTreeMap::new())),
+            submit_files: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn plan_uploads(&self, plan: &[UploadPlan]) {
+        self.upload_plan
+            .lock()
+            .unwrap()
+            .extend(plan.iter().copied());
+    }
+
+    fn submitted_files(&self, i: usize) -> Vec<String> {
+        self.submit_files.lock().unwrap()[i].clone()
     }
 
     fn watching_journal(mut self, state_dir: &Path) -> Self {
@@ -353,6 +389,7 @@ impl Market for FakeMarket {
             .lock()
             .unwrap()
             .push(req.markdown.clone());
+        self.submit_files.lock().unwrap().push(req.files.clone());
         if self.refuse_then_accept && self.submit_result == SubmitResult::Refused400 {
             for r in self.rows.lock().unwrap().iter_mut() {
                 if r.id == row_id {
@@ -430,8 +467,84 @@ impl Market for FakeMarket {
     async fn make_default(&self, _a: &str, _p: &str) -> Result<(), MarketError> {
         unimplemented!()
     }
-    async fn upload_file(&self, _f: &UploadFile) -> Result<UploadedFile, MarketError> {
-        unimplemented!()
+    async fn reserve_file(&self, f: &UploadFile) -> Result<ReservedFile, MarketError> {
+        let digest = journal::sha256_hex(&f.bytes);
+        // The upload's intent, naming the file's digest, is durable first.
+        self.assert_intent_on_disk("a1", "market_upload", &digest);
+        self.calls
+            .push(format!("reserve {} {}", f.name, f.bytes.len()));
+        let n = self.calls.count("reserve ");
+        let plan = self
+            .upload_plan
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(UploadPlan::Ok);
+        if let UploadPlan::ReserveRefused(status) = plan {
+            return Err(MarketError::Refused {
+                status,
+                code: format!("http_{status}"),
+                detail: "refused".into(),
+            });
+        }
+        let file_id = format!("file-{n}");
+        self.reserved.lock().unwrap().insert(file_id.clone(), plan);
+        Ok(ReservedFile {
+            file_id,
+            upload_url: format!("https://market.test/put/{n}"),
+            file_url: format!("https://market.test/files/tok{n}/{}", f.name),
+        })
+    }
+    async fn complete_file(
+        &self,
+        r: &ReservedFile,
+        f: &UploadFile,
+    ) -> Result<Option<StoredFile>, MarketError> {
+        // The reserved file id is durable before the bytes move.
+        self.assert_intent_on_disk("a1", "market_upload_complete", &r.file_id);
+        self.calls
+            .push(format!("upload {} {}", f.name, f.bytes.len()));
+        let plan = self
+            .reserved
+            .lock()
+            .unwrap()
+            .get(&r.file_id)
+            .copied()
+            .unwrap_or(UploadPlan::Ok);
+        match plan {
+            UploadPlan::Unknown => Err(MarketError::WriteOutcomeUnknown {
+                detail: "timed out".into(),
+            }),
+            UploadPlan::CompleteRefused(status) => Err(MarketError::Refused {
+                status,
+                code: format!("http_{status}"),
+                detail: "refused".into(),
+            }),
+            _ => Ok(Some(StoredFile {
+                byte_size: f.bytes.len() as u64,
+                sha256: if plan == UploadPlan::Mismatch {
+                    "0".repeat(64)
+                } else {
+                    journal::sha256_hex(&f.bytes)
+                },
+            })),
+        }
+    }
+    async fn delete_file(&self, file_id: &str) -> Result<(), MarketError> {
+        // The deletion is journaled before the call (design 6.3), so a
+        // crash after it never lists the file as delivered.
+        if let Some(dir) = &self.state_dir {
+            let text = std::fs::read_to_string(journal::journal_path(dir, "a1")).unwrap();
+            let j = journal::read(&text).unwrap();
+            assert!(
+                j.records.iter().any(|r| matches!(&r.event,
+                    journal::Event::Result(res) if res.outcome == "deleted"
+                        && res.external_ids.get("file_id").map(String::as_str) == Some(file_id))),
+                "no deleted result for {file_id} before its delete in {text}"
+            );
+        }
+        self.calls.push(format!("delete {file_id}"));
+        Ok(())
     }
 }
 
@@ -637,6 +750,7 @@ fn facts() -> nearbee_core::runner::ExecutionFacts {
         direct_models: Vec::new(),
         signed_models: Vec::new(),
         script_models: Vec::new(),
+        script_accounts: Default::default(),
         sandbox: None,
     }
 }
@@ -938,6 +1052,7 @@ fn s4_record(tier: nearbee_core::listing::Tier) -> nearbee_core::listing::Resolv
         direct_models: Vec::new(),
         signed_models: Vec::new(),
         script_models: Vec::new(),
+        script_accounts: Default::default(),
         published_at: BASE,
     }
 }
@@ -5593,27 +5708,440 @@ async fn r1_c10_a_closed_scope_intent_without_its_record_is_not_asked_again() {
     );
 }
 
-/// C11: a manifest that lists output files is declined `failed`, nothing
-/// is submitted, and the operator is told.
-#[tokio::test]
-async fn r1_c11_a_manifest_with_output_files_declines_and_tells_the_operator() {
-    let mut d = Driver::with_rows(vec![fresh_row("a1", serde_json::json!({}))]);
-    d.runner = FakeRunner::new(vec!["running", "succeeded"]).with_decide(vec![yes("0.9")]);
-    let wt = deliverable_worktree(&d.ws(), "a1");
-    std::fs::write(wt.join("out/table.csv"), b"a,b\n").unwrap();
+/// Writes a deliverable worktree whose manifest lists `files` (path,
+/// bytes) beside the Markdown.
+fn files_worktree(ws: &Path, row_id: &str, files: &[(&str, &[u8])]) -> PathBuf {
+    let wt = deliverable_worktree(ws, row_id);
     let md = std::fs::read(wt.join("out/deliverable.md")).unwrap();
+    let mut entries = Vec::new();
+    for (path, bytes) in files {
+        let at = wt.join("out").join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, bytes).unwrap();
+        entries.push(serde_json::json!({
+            "path": path, "size": bytes.len(), "sha256": journal::sha256_hex(bytes)
+        }));
+    }
     let manifest = serde_json::json!({
         "version": 1,
         "markdown": {"path": "deliverable.md", "size": md.len(), "sha256": journal::sha256_hex(&md)},
-        "files": [{"path": "table.csv", "size": 4, "sha256": journal::sha256_hex(b"a,b\n")}]
+        "files": entries
     });
     std::fs::write(wt.join("out/result.json"), manifest.to_string()).unwrap();
+    wt
+}
+
+/// A driver whose one hire's run succeeds with `files` in its manifest;
+/// every market write checks its durable intent first.
+fn files_driver(files: &[(&str, &[u8])]) -> Driver {
+    let mut d = Driver::with_rows(vec![fresh_row("a1", serde_json::json!({}))]);
+    d.runner = FakeRunner::new(vec!["running", "succeeded"]).with_decide(vec![yes("0.9")]);
+    d.market = std::mem::replace(&mut d.market, FakeMarket::new(Vec::new()))
+        .watching_journal(d.dir.path());
+    files_worktree(&d.ws(), "a1", files);
+    d
+}
+
+/// The journal detail of the hire's decline intent.
+fn decline_intent_detail(dir: &Path, row_id: &str) -> String {
+    read_journal_records(dir, row_id)
+        .records
+        .iter()
+        .find_map(|r| match &r.event {
+            journal::Event::Intent(i) if i.kind == "market_decline" => {
+                i.refs.get("detail").cloned()
+            }
+            _ => None,
+        })
+        .expect("a decline intent")
+}
+
+/// Spec `hire-serving`, Delivery, "Manifest with output files": the file
+/// is uploaded under its intent, its size and digest checked, and the
+/// Markdown is submitted with its reference and a Files list.
+#[tokio::test]
+async fn output_files_are_uploaded_and_submitted_with_their_references() {
+    let flow = br#"{"steps":[]}"#;
+    let mut d = files_driver(&[("flow.json", flow)]);
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload flow.json 12"), 1);
+    assert_eq!(
+        d.market.submitted_files(0),
+        vec!["https://market.test/files/tok1/flow.json".to_owned()]
+    );
+    let md = d.market.submitted_markdown(0);
+    assert!(
+        md.starts_with(
+            "# Audit\n\nAll good.\n\n## Files\n\n- [`flow.json`](<https://market.test/files/tok1/flow.json>), 12 bytes\n"
+        ),
+        "{md}"
+    );
+    let j = read_journal_records(d.dir.path(), "a1");
+    let upload = j
+        .records
+        .iter()
+        .find_map(|r| match &r.event {
+            journal::Event::Intent(i) if i.kind == "market_upload" => Some(i.clone()),
+            _ => None,
+        })
+        .expect("an upload intent");
+    assert_eq!(upload.request_digest, journal::sha256_hex(flow));
+    // The reserve closes with the file id; the complete, naming that id,
+    // closes with the link.
+    assert!(j.records.iter().any(|r| matches!(&r.event,
+        journal::Event::Result(res) if res.operation_id == upload.operation_id
+            && res.outcome == "reserved"
+            && res.external_ids.get("file_id").map(String::as_str) == Some("file-1"))));
+    let complete = j
+        .records
+        .iter()
+        .find_map(|r| match &r.event {
+            journal::Event::Intent(i) if i.kind == "market_upload_complete" => Some(i.clone()),
+            _ => None,
+        })
+        .expect("a complete intent");
+    assert_eq!(
+        complete.refs.get("file_id").map(String::as_str),
+        Some("file-1")
+    );
+    assert!(j.records.iter().any(|r| matches!(&r.event,
+        journal::Event::Result(res) if res.operation_id == complete.operation_id
+            && res.outcome == "uploaded"
+            && res.external_ids.get("file_id").map(String::as_str) == Some("file-1"))));
+    assert!(j.open_intents.is_empty(), "{:?}", j.open_intents);
+}
+
+/// Two files of the same name in different directories: the second gets a
+/// numeric suffix.
+#[tokio::test]
+async fn clashing_output_file_names_get_a_numeric_suffix() {
+    let mut d = files_driver(&[("a/flow.json", b"1"), ("b/flow.json", b"2")]);
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload flow.json 1"), 1);
+    assert_eq!(d.market.calls.count("upload flow-2.json 1"), 1);
+    assert_eq!(d.market.submitted_files(0).len(), 2);
+}
+
+/// Spec `hire-serving`, Delivery, "Resume after a crash": an upload whose
+/// outcome was lost is retried on the next round, and the file that had
+/// completed is not uploaded again.
+#[tokio::test]
+async fn a_restart_after_an_upload_never_uploads_a_completed_file_twice() {
+    let mut d = files_driver(&[("a.json", b"{\"a\":1}"), ("b.json", b"{\"b\":2}")]);
+    d.market
+        .plan_uploads(&[UploadPlan::Ok, UploadPlan::Unknown]);
+    for _ in 0..12 {
+        d.round().await;
+        if d.market.calls.count("upload b.json") == 1 {
+            break;
+        }
+    }
+    assert_eq!(d.market.calls.count("upload a.json"), 1);
+    assert_eq!(d.market.calls.count("upload b.json"), 1);
+    assert_eq!(d.market.calls.count("submit"), 0);
+    // A restart: the round state is gone, the journal stays.
+    d.state = RoundState::default();
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(
+        d.market.calls.count("upload a.json"),
+        1,
+        "a completed file was uploaded again"
+    );
+    assert_eq!(d.market.calls.count("upload b.json"), 2);
+    let files = d.market.submitted_files(0);
+    assert_eq!(files.len(), 2);
+    assert!(files.contains(&"https://market.test/files/tok1/a.json".to_owned()));
+    // The lost upload's intent is closed; nothing stays open.
+    assert!(
+        read_journal_records(d.dir.path(), "a1")
+            .open_intents
+            .is_empty()
+    );
+}
+
+/// Design 6.3: a file whose upload ends without an answer three times
+/// declines the hire `failed`, and the completed uploads are deleted.
+#[tokio::test]
+async fn three_answerless_uploads_of_one_file_decline() {
+    let mut d = files_driver(&[("a.json", b"1"), ("b.json", b"2")]);
+    d.market.plan_uploads(&[
+        UploadPlan::Ok,
+        UploadPlan::Unknown,
+        UploadPlan::Unknown,
+        UploadPlan::Unknown,
+    ]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload b.json"), 3);
+    assert_eq!(d.market.calls.count("submit"), 0);
+    assert_eq!(d.market.calls.count("delete file-1"), 1);
+    assert!(decline_intent_detail(d.dir.path(), "a1").contains("3 times"));
+}
+
+/// Spec `hire-serving`, Delivery, "Recovered submit": a submit whose answer
+/// was lost is resent with the same file references, and no file is
+/// uploaded again.
+#[tokio::test]
+async fn a_recovered_submit_resends_the_snapshotted_file_references() {
+    let mut d = files_driver(&[("flow.json", b"{}")]);
+    d.market.submit_result = SubmitResult::Unknown;
+    d.run_until(|o| matches!(o, HireOutcome::OperatorNeeded { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("submit"), 1);
+    d.market.submit_result = SubmitResult::Ok;
+    d.state = RoundState::default();
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload "), 1);
+    assert_eq!(d.market.submitted_files(0), d.market.submitted_files(1));
+    assert_eq!(
+        d.market.submitted_markdown(0),
+        d.market.submitted_markdown(1)
+    );
+}
+
+/// Spec `hire-serving`, Delivery, "Too many files": 21 files decline
+/// `failed` naming the 20-file limit, and nothing is uploaded.
+#[tokio::test]
+async fn twenty_one_output_files_decline_naming_the_limit() {
+    let names: Vec<String> = (0..21).map(|i| format!("f{i}.txt")).collect();
+    let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+    let mut d = files_driver(&files);
+    // The general manifest limit is set wide, so the delivery limit decides.
+    d.limits.files = 100;
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload "), 0);
+    assert_eq!(d.market.calls.count("submit"), 0);
+    let detail = decline_intent_detail(d.dir.path(), "a1");
+    assert!(
+        detail.contains("21 output files") && detail.contains("20"),
+        "{detail}"
+    );
+}
+
+/// Design 6.2: one file over 10 MiB, or more than 50 MiB in all, declines
+/// before any upload, naming the limit.
+#[tokio::test]
+async fn output_files_over_the_size_limits_decline_before_any_upload() {
+    let big = vec![b'a'; 10 * 1024 * 1024 + 1];
+    let mut d = files_driver(&[("small.txt", b"x"), ("big.bin", &big)]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload "), 0);
+    let detail = decline_intent_detail(d.dir.path(), "a1");
+    assert!(
+        detail.contains("big.bin") && detail.contains("10 MiB"),
+        "{detail}"
+    );
+
+    let part = vec![b'b'; 9 * 1024 * 1024];
+    let files: Vec<(String, Vec<u8>)> = (0..6)
+        .map(|i| (format!("p{i}.bin"), part.clone()))
+        .collect();
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let mut d = files_driver(&refs);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload "), 0);
+    let detail = decline_intent_detail(d.dir.path(), "a1");
+    assert!(detail.contains("50 MiB"), "{detail}");
+}
+
+/// Design 6.2: a name outside `[A-Za-z0-9._-]` after the last `/`
+/// declines, naming the file.
+#[tokio::test]
+async fn an_output_file_name_outside_the_allowed_characters_declines() {
+    let mut d = files_driver(&[("dir/flow v1.json", b"{}")]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload "), 0);
+    let detail = decline_intent_detail(d.dir.path(), "a1");
+    assert!(detail.contains("flow v1.json"), "{detail}");
+}
+
+/// Design 6.2: the secret scan runs on every output file; a hit declines
+/// with the local safety check's reason and nothing is uploaded.
+#[tokio::test]
+async fn a_secret_in_an_output_file_declines() {
+    let mut d = files_driver(&[("notes.txt", b"token aat_0123456789abcdef0123456789abcdef\n")]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    d.round().await; // the decline goes out
+    assert_eq!(d.market.calls.count("upload "), 0);
+    assert_eq!(d.market.calls.count("submit"), 0);
+    assert_eq!(
+        d.market.decline_detail(0),
+        "the deliverable was refused by a local safety check"
+    );
+    assert!(decline_intent_detail(d.dir.path(), "a1").contains("notes.txt"));
+}
+
+/// Design 6.1: a stored digest that differs from the manifest declines and
+/// deletes the unbound upload.
+#[tokio::test]
+async fn a_stored_digest_mismatch_declines_and_deletes_the_upload() {
+    let mut d = files_driver(&[("flow.json", b"{}")]);
+    d.market.plan_uploads(&[UploadPlan::Mismatch]);
     d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
         .await;
     assert_eq!(d.market.calls.count("submit"), 0);
+    assert_eq!(d.market.calls.count("delete file-1"), 1);
+}
+
+/// Design 6.3: a refused submit leaves the uploads unbound; they are
+/// deleted before the decline.
+#[tokio::test]
+async fn a_refused_submit_deletes_its_uploaded_files() {
+    let mut d = files_driver(&[("flow.json", b"{}")]);
+    d.market.submit_result = SubmitResult::Refused400;
+    d.run_until(|_| false).await;
+    assert_eq!(d.market.calls.count("submit"), 1);
+    assert_eq!(d.market.calls.count("delete file-1"), 1);
+    assert_eq!(d.market.calls.count("decline a1 failed"), 1);
+}
+
+/// Cuts the journal of `row_id` just before the first record `cut`
+/// matches, as a crash before that write leaves it.
+fn crash_before(dir: &Path, row_id: &str, cut: impl Fn(&journal::Event) -> bool) {
+    let text = journal_text(dir, row_id);
+    let j = journal::read(&text).unwrap();
+    let at = j
+        .records
+        .iter()
+        .position(|r| cut(&r.event))
+        .expect("the record to cut before");
+    let kept: String = text.lines().take(at).map(|l| format!("{l}\n")).collect();
+    std::fs::write(journal::journal_path(dir, row_id), kept).unwrap();
+}
+
+/// Review 1: a rate limit (429) or another retryable status (408, 425) on
+/// an upload write leaves the delivery pending, counted as an attempt; the
+/// next round uploads and delivers, and nothing is declined.
+#[tokio::test]
+async fn a_rate_limited_upload_is_retried_and_delivered() {
+    for plan in [
+        UploadPlan::ReserveRefused(429),
+        UploadPlan::CompleteRefused(429),
+        UploadPlan::ReserveRefused(408),
+        UploadPlan::CompleteRefused(425),
+    ] {
+        let mut d = files_driver(&[("flow.json", b"{}")]);
+        d.market.plan_uploads(&[plan]);
+        d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+            .await;
+        assert_eq!(d.market.calls.count("reserve flow.json"), 2);
+        assert_eq!(d.market.calls.count("submit"), 1);
+        assert_eq!(d.market.calls.count("decline"), 0);
+        assert!(
+            journal_text(d.dir.path(), "a1").contains("\"outcome\":\"unknown\""),
+            "the retryable answer is not journaled as unknown"
+        );
+    }
+}
+
+/// Review 1: three retryable answers for one file use up its attempts and
+/// decline the hire, like three unknown outcomes.
+#[tokio::test]
+async fn three_rate_limited_uploads_of_one_file_decline() {
+    let mut d = files_driver(&[("flow.json", b"{}")]);
+    d.market.plan_uploads(&[UploadPlan::ReserveRefused(429); 3]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("reserve flow.json"), 3);
+    assert_eq!(d.market.calls.count("submit"), 0);
+}
+
+/// A final refusal (400) of an upload declines `failed` and deletes the
+/// files uploaded before it, each deletion journaled before its call.
+#[tokio::test]
+async fn a_refused_upload_declines_and_deletes_the_earlier_uploads() {
+    let mut d = files_driver(&[("a.json", b"1"), ("b.json", b"2")]);
+    d.market
+        .plan_uploads(&[UploadPlan::Ok, UploadPlan::ReserveRefused(400)]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("delete file-1"), 1);
+    assert_eq!(d.market.calls.count("submit"), 0);
+    assert!(decline_intent_detail(d.dir.path(), "a1").contains("400"));
+}
+
+/// Review 4: a crash after the uploads were deleted and before the decline
+/// intent never submits a deleted file's link: the next round uploads that
+/// file again.
+#[tokio::test]
+async fn a_crash_after_deleting_uploads_never_submits_a_deleted_link() {
+    let mut d = files_driver(&[("a.json", b"1"), ("b.json", b"2")]);
+    d.market
+        .plan_uploads(&[UploadPlan::Ok, UploadPlan::Mismatch]);
+    d.run_until(|o| matches!(o, HireOutcome::DeclinedFailed { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("delete file-1"), 1);
+    crash_before(d.dir.path(), "a1", |e| {
+        matches!(e, journal::Event::Intent(i) if i.kind == "market_decline")
+            || matches!(e, journal::Event::Attention(_))
+    });
+    d.state = RoundState::default();
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload a.json"), 2);
+    let files = d.market.submitted_files(0);
+    assert_eq!(files.len(), 2);
+    assert!(
+        !files.contains(&"https://market.test/files/tok1/a.json".to_owned()),
+        "a deleted upload was submitted: {files:?}"
+    );
+}
+
+/// Review 5: the file id is journaled after the reserve, so an upload a
+/// crash interrupted after the reserve is closed `lost` and its reserved
+/// file deleted; the file is then uploaded again.
+#[tokio::test]
+async fn a_crash_mid_upload_deletes_the_reserved_file() {
+    let mut d = files_driver(&[("flow.json", b"{}")]);
+    d.market.plan_uploads(&[UploadPlan::Unknown]);
+    for _ in 0..12 {
+        d.round().await;
+        if d.market.calls.count("upload flow.json") == 1 {
+            break;
+        }
+    }
+    // The crash: the complete's result never reached the journal.
+    let text = journal_text(d.dir.path(), "a1");
+    let complete_op = journal::read(&text)
+        .unwrap()
+        .records
+        .iter()
+        .find_map(|r| match &r.event {
+            journal::Event::Intent(i) if i.kind == "market_upload_complete" => Some(i.operation_id),
+            _ => None,
+        })
+        .expect("a complete intent naming the reserved file");
+    crash_before(
+        d.dir.path(),
+        "a1",
+        |e| matches!(e, journal::Event::Result(res) if res.operation_id == complete_op),
+    );
+    d.state = RoundState::default();
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("delete file-1"), 1);
+    assert_eq!(d.market.calls.count("upload flow.json"), 2);
+    assert_eq!(
+        d.market.submitted_files(0),
+        vec!["https://market.test/files/tok2/flow.json".to_owned()]
+    );
     let j = read_journal_records(d.dir.path(), "a1");
     assert!(j.records.iter().any(|r| matches!(&r.event,
-        journal::Event::Attention(a) if a.code == "unsupported_output")));
+        journal::Event::Result(res) if res.operation_id == complete_op && res.outcome == "lost"
+            && res.external_ids.get("file_id").map(String::as_str) == Some("file-1"))));
+    assert!(j.open_intents.is_empty(), "{:?}", j.open_intents);
 }
 
 /// C12: an `inputs` directory that is a symlink out of the hire worktree
@@ -7928,6 +8456,7 @@ fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
         direct_models: Vec::new(),
         signed_models: Vec::new(),
         script_models: Vec::new(),
+        script_accounts: Default::default(),
         sandbox: None,
     }
 }

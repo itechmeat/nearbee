@@ -72,8 +72,8 @@ staleness in tests and in the replay.
 1. Read the listing file: handle, name, source playbook, `price_usd`
    (decimal string), `sla_seconds`, category, tags, description, bio, and
    the optional `scope`, `protection` (default `on`), `limits`, `profile`,
-   `intake_check`, `direct_models`, `signed_models` and `script_models`
-   (spec `listing-publish`): a protected price must leave a per-hire ceiling
+   `intake_check`, `direct_models`, `signed_models`, `script_models` and
+   `script_accounts` (spec `listing-publish`): a protected price must leave a per-hire ceiling
    above zero (`price * 0.95 - 0.25 > 0`).
 2. **Materialise** the playbook as its own apb playbook id `<handle>` with
    fixed profile names and `supervisor.policy.trial_candidates: off`, its
@@ -130,8 +130,15 @@ through its own market client and token. No step of a round waits for a run:
    `budget_usd`), the version check (a first detail without a version is
    followed for up to 60 s), a budget pause, the wall clock (the SLA deadline
    minus `min(10 min, window / 5)`), cancellation, progress (a `409 too soon`
-   records a due time), then submit from the frozen
-   `gen-<n>/submission.md` or decline. Every wall clock is checked here.
+   records a due time), then the output files the manifest lists (design 6
+   of `sandbox-toolchains`: at most 20, 10 MiB each, 50 MiB in all, names
+   of `[A-Za-z0-9._-]`, a secret scan on every file; per file a
+   `market_upload` intent for the reserve, closed with the file id, and a
+   `market_upload_complete` intent naming that id for the PUT and
+   complete, closed with the link; the Markdown gains a linked "Files"
+   list),
+   then submit from the frozen `gen-<n>/submission.md` (and
+   `gen-<n>/submission-files.json`, the file links) or decline. Every wall clock is checked here.
 3. **Intake** for new first-time rows (`docs/pricing.md`): received, then
    daily loss, hard limits and cost admission, journaled one `intake` record
    per check without the brief; a decline is `rejected` with a fixed text.
@@ -170,8 +177,9 @@ lists reserved like `hire_id` and `execution_id`.
 1, so S2 journals stay valid). A generation's state is derived from its own
 records only; a `decision` closes only its generation, the hire is closed by
 a `lifecycle` record and frozen by `disputed`. Intents: `market_start`,
-`run_start`, `market_submit`, `market_decline`, `run_abort`,
-`market_progress`, `scope_check`.
+`run_start`, `market_upload`, `market_upload_complete`, `market_submit`,
+`market_decline`,
+`run_abort`, `market_progress`, `scope_check`.
 
 **The one slot (D-025).** Taken by an open run start, a run observed
 non-terminal, an open abort (closed hires included) and by any hire whose
@@ -235,9 +243,11 @@ journal, so a restart and a first serve run the same code.
 | `run_start` open, no run | - | several runs | adopt none, `attention start_ambiguous` |
 | `run_start` open, no run | - | none (complete or not) | start nothing; `attention start_unresolved` after 120 s; decline `failed` at the deadline; the slot stays taken and the lookup keeps running |
 | run observed, not terminal | row closed (cancelled, disputed, resolved, accepted) | run alive | `run_abort`, abort every round until terminal, then the lifecycle closes |
-| run terminal, no submit | in progress | - | validate `out/`, snapshot, `market_submit` intent, submit |
+| run terminal, no submit | in progress | - | validate `out/`; upload each output file not yet uploaded (`market_upload` intent, `reserved` result with the file id; `market_upload_complete` intent naming it, `uploaded` result with the link); snapshot, `market_submit` intent, submit |
+| `market_upload` or `market_upload_complete` open (a crash during the call) | - | - | close it as `lost`; a reserved file id with no answered complete is deleted (a `deleted` result first, then the `DELETE`); upload the file again; a file with an `uploaded` result and no `deleted` result is never uploaded again; three answerless (or `408`/`425`/`429`) uploads of one file decline `failed` |
 | `market_submit` open | `submittedAt` at or after the intent, or a new generation key | - | close it as landed, no resend |
-| `market_submit` open | in progress, same key, not submitted | - | resend the snapshot byte for byte; a missing or mismatching snapshot sends nothing (`attention snapshot_mismatch`) |
+| `market_submit` open | in progress, same key, not submitted | - | resend the snapshot byte for byte, file links included; a missing or mismatching snapshot sends nothing (`attention snapshot_mismatch`) |
+| `market_submit` refused | - | - | delete the submission's uploads (bound to no job), then decline `failed` |
 | `market_decline` open | cancelled | - | close it |
 | `scope_check` open | - | - | close it as skipped (`interrupted`), never asked again |
 | a later run found by `hire_id` | - | not the adopted one | abort it, record its cost, never submit it |

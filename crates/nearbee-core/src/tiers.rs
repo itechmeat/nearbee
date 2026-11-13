@@ -6,8 +6,9 @@
 //! the embedded catalog (`crate::catalog`).
 
 use crate::catalog::Catalog;
-use crate::listing::Tier;
+use crate::listing::{ScriptAccount, Tier};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// A fact apb could not provide, with the reason (design 2: a fact is
 /// unknown, never guessed).
@@ -115,6 +116,13 @@ pub struct ExecutionFacts {
     /// the serialized facts when empty so older fingerprints hold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_models: Vec<String>,
+    /// The listing's script accounts that are not the agent's default
+    /// account, filled by the caller with
+    /// [`ExecutionFacts::with_script_accounts`]; left out of the
+    /// serialized facts when empty, so a listing without the field (or
+    /// with only default accounts) keeps its fingerprint.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub script_accounts: BTreeMap<String, ScriptAccount>,
     /// The sandbox the instance runs in, when the runner found one. Left
     /// out of the serialized facts when absent, so the fingerprint of an
     /// instance without a sandbox is unchanged.
@@ -137,6 +145,17 @@ impl ExecutionFacts {
     /// reports either: used next to [`ExecutionFacts::with_direct_models`].
     pub fn with_script_models(mut self, script: &[String]) -> Self {
         self.script_models = script.to_vec();
+        self
+    }
+
+    /// The facts with the listing's script accounts, the default kinds
+    /// dropped: used next to [`ExecutionFacts::with_script_models`].
+    pub fn with_script_accounts(mut self, accounts: &BTreeMap<String, ScriptAccount>) -> Self {
+        self.script_accounts = accounts
+            .iter()
+            .filter(|(_, k)| !k.is_default())
+            .map(|(a, k)| (a.clone(), *k))
+            .collect();
         self
     }
 }
@@ -512,6 +531,7 @@ mod tests {
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             sandbox: None,
         }
     }

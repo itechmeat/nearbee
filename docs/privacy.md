@@ -289,6 +289,18 @@ findings, fails the step with `review_unparsed` and the hire is declined
 `finish`. What it gives up: one packed call reviews less than an agent
 that reads files on demand, and a large repository is cut and says so.
 
+Review notes (change `sandbox-toolchains`, 2026-11-13). The fast review
+of the owner's agents now makes several direct calls: review lenses on
+DeepSeek V4.1 Flash and a verdict on Qwen3.8 27B, and only the verdict
+call is signed (D-027 as amended). Facts the findings cannot carry, such
+as a lens that failed or findings the verifier dropped, travel as
+`notes` in `audit/candidates.json` (at most 10 strings of at most 300
+characters, more or longer fails `finish` with no `out/result.json`).
+`finish` renders them, in order and escaped like every other untrusted
+text, one list item per note with line breaks turned into spaces, under
+"Review notes" before "Not reported". Without notes, or with an empty
+list, the deliverable is byte for byte as before.
+
 A further limitation (live-audit finding b): the deliverable's secret scan
 matches configured secrets and `aat_` tokens as plain text only; an
 encoded (base64, hex) or split secret passes it. No scanner stops a
@@ -329,9 +341,21 @@ format 1). Under `## Data handling` it names, in this order:
 
    A sandbox fact with no `--add-host` says "limited to: none".
 4. What the market keeps: the brief, thread messages and uploaded files stay
-   with the market under its own policy.
+   with the market under its own policy; a file once used by a job cannot
+   be deleted there, and its link works for anyone holding it.
 5. Local retention: the days after acceptance, and what deletion does not
    cover.
+
+Output files (change `sandbox-toolchains`, design 6): the files a run's
+manifest lists beside the Markdown are uploaded to the market with a public
+link and listed, linked, in the deliverable's "Files" section, so the
+market keeps them as section 4 says. Before any upload they pass the same
+secret scan as the Markdown (a hit declines the hire), and at most 20 files,
+10 MiB each and 50 MiB in all are delivered. An upload the delivery does not
+use (a declined delivery, a refused submit) is deleted at once; one a crash
+left unbound is deleted by the market 7 days after its upload. The journal
+keeps each file's name, size, SHA-256, market file id and link, never its
+bytes.
 
 `nearbee list` prints the statement for the agent's bio in the market web
 app (an agent token cannot write it, D-024) and records it with its SHA-256,
@@ -511,7 +535,27 @@ provider route). A malformed or duplicated entry is refused naming it.
    and reaches the run as the reserved `script_models` param (a JSON list,
    like `direct_models`), so a script can refuse a model the listing did
    not declare.
-4. Sign-in failure: a script step whose model sign-in fails (an expired or
+4. Account (change `sandbox-toolchains`, owner 2026-11-13): a listing may
+   say which account an agent CLI of `script_models` uses,
+   `script_accounts: {claude: anthropic-api}`. The kinds are closed: for
+   `claude`, `subscription` (the default when absent) and `anthropic-api`;
+   no other agent has kinds yet. An agent key not used by `script_models`,
+   an agent without kinds or an unknown kind is refused naming it. The
+   accounts are recorded and frozen with the listing like `script_models`.
+   With `anthropic-api` the statement's `claude` lines read:
+
+   ```
+   - `claude`, model `claude-opus-5-5`: the owner's Anthropic API account (API key).
+   ```
+
+   The subscription wording is unchanged. Only a non-default kind enters
+   the fingerprint, so a listing without the field, or with `claude:
+   subscription`, keeps its statement and fingerprint byte for byte. The
+   owner's reading (2026-11-13): API-key calls are within the Anthropic
+   API terms; after the hackathon these calls move to Anthropic models
+   through NEAR AI Cloud. The script step gets the key through
+   `NEARBEE_APB_ENV_VARS` (`docs/apb.md`).
+5. Sign-in failure: a script step whose model sign-in fails (an expired or
    revoked token) exits non-zero; Nearbee then declines the hire `failed`,
    which refunds the buyer in full (`docs/market.md`, decline). A listing
    never switches to another provider.

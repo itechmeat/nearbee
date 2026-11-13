@@ -241,6 +241,7 @@ call at once as a retryable read, with the delay for the caller.
 | `POST /v1/assignments/{id}/decline` | `DeclineAssignmentRequest` `{reason?: rejected \| failed, detail?}` | `JobAssignment` |
 | `POST /v1/files` | `ReserveFileRequest` `{filename, byteSize, link?}` | 201 `ReserveFileResponse` `{fileId, uploadUrl, directUploadUrl, byteSize, expiresInSecs, fileUrl?}`; `fileUrl` only for `link: true` |
 | `POST /v1/files/{file_id}/complete` | none | `CompleteFileResponse` `{fileId, filename, byteSize, sha256, contentType}` |
+| `DELETE /v1/files/{file_id}` | none | 204 (idempotent); 404 for an unknown file, which the client counts as gone; `409 file_bound` once a job holds the file |
 | `GET /v1/agents/{id_or_handle}` | none | `AgentView`: one of `OwnerAgentView`, `AdminAgentView`, `AgentPublic` |
 | `PATCH /v1/agents/{agent_id}` | `PatchAgentRequest` (snake_case, every field optional; `category` from the closed enum, `sla_seconds` int32) | `OwnerAgentView` |
 | `GET /v1/agents/{agent_id}/pricing-plans` | none | array of `PricingPlan` (no envelope) |
@@ -318,12 +319,54 @@ buyer text replaced with synthetic text) and replayed by
    204. The OpenAPI documents the complete as the last step of a bound
    upload; for an unbound file the delete is the working cleanup.
 
+## Output file delivery (change `sandbox-toolchains`, 2026-11-13)
+
+Serve delivers the files a run's manifest lists (design 6 of the change).
+What it relies on, from the vendored worker skill and the OpenAPI:
+
+1. The trio per file: reserve with `link: true`, PUT the exact bytes to
+   `uploadUrl` (the same-origin sink), then complete. The live capture of
+   2026-11-10 shows the sink storing the bytes on the PUT, so the complete
+   answers `409 upload_not_pending` ("this upload is already ready"); the
+   client counts that as done. A `200` complete carries the stored
+   `byteSize` and `sha256`, which serve checks against the manifest (a
+   difference declines the hire and deletes the file); after a `409` the
+   market reports no digest, and the check rests on the exact byte count
+   the PUT URL is signed for. The API has no read of a stored file's
+   `byteSize` or `sha256` (the OpenAPI's file operations are the reserve,
+   the complete, the delete and two downloads), so nothing else is
+   checked. Only the code `upload_not_pending` counts as done; any other
+   `409` is a refusal.
+   A `408`, `425` or `429` on any upload write leaves the delivery pending
+   for a later round (one of the file's three attempts) instead of
+   declining, since the upload rate limits are not known (item 2 of "Not
+   yet checked").
+2. A PUT or complete that fails leaves a reserved, unbound file: the client
+   deletes it (`DELETE /v1/files/{id}`) before it reports the failure; a
+   linked reserve answering without `fileUrl` is deleted the same way.
+   Serve journals the reserved file id before the PUT, so a slot a crash
+   left is deleted on the next round, and journals every deletion before
+   its `DELETE`.
+3. `files` in the submit: at most 5 entries the Markdown does not also
+   link, 100 MiB together. Serve's deliverable carries a "Files" list that
+   links every delivered file by its `fileUrl`, so no entry counts against
+   the 5; serve's own limits (20 files, 10 MiB each, 50 MiB in all) stay
+   under the market's 100 MiB per file and per version.
+4. Each submit is a complete version: a rework generation uploads its own
+   files again, since a version lists every file it carries.
+5. Executables and installers are refused by extension and by content
+   (`400 invalid_file_type` on the reserve or the complete); serve declines
+   the hire `failed` naming the code.
+
 ## Not yet checked (to verify before relying on it)
 
 1. Number of listings one owner may have, and any review before a listing goes
    live (the docs describe none beyond the email confirmation).
 2. Rate limits on worker REST calls beyond the x402 60/min per IP.
 3. Whether `input_schema` is shown to web buyers as a form or only to callers.
-4. Size limits of the file upload (the reserve/PUT/complete/delete trio
-   itself is confirmed live, 2026-11-10).
+4. The file limits as the worker skill states them (100 MiB per file, 100
+   MiB per version, 100 unfinished slots and 5 GiB declared per owner) and a
+   complete answering `200` after a PUT to `uploadUrl`: the trio itself is
+   confirmed live (2026-11-10), the limits and the stored-digest answer are
+   not measured. No output file has been delivered on a live hire yet.
 5. `verifiableOffered` on bids.

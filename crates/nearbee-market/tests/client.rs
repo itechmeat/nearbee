@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use nearbee_core::market::{
     AgentPatch, DeclineOutcome, DeclineReason, DeclineRequest, Market, MarketError, MessageRequest,
-    NewPricingPlan, ProgressOutcome, ProgressRequest, RowKind, RowStatus, SubmitRequest,
-    UploadFile,
+    NewPricingPlan, ProgressOutcome, ProgressRequest, RowKind, RowStatus, StoredFile,
+    SubmitRequest, UploadFile,
 };
 use nearbee_core::secret::Secret;
 use nearbee_market::{MarketOptions, MarketTiming, NearAgentMarket};
@@ -823,10 +823,14 @@ async fn the_file_upload_trio() {
         .expect(1)
         .mount(&server)
         .await;
+    let digest = sha256_hex(&bytes);
     Mock::given(method("POST"))
         .and(path("/v1/files/f-1/complete"))
         .and(NoBody)
-        .respond_with(ok_json(fx::write_answer("CompleteFileResponse")))
+        .respond_with(ok_json(instance(
+            "CompleteFileResponse",
+            json!({"fileId": "f-1", "filename": "deliverable.md", "byteSize": 14, "sha256": digest}),
+        )))
         .expect(1)
         .mount(&server)
         .await;
@@ -842,6 +846,162 @@ async fn the_file_upload_trio() {
     assert_eq!(
         up.file_url,
         format!("{}/files/f-1/deliverable.md", server.uri())
+    );
+    // What the market stored comes back for the caller to check.
+    assert_eq!(
+        up.stored,
+        Some(StoredFile {
+            byte_size: 14,
+            sha256: digest,
+        })
+    );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    nearbee_core::journal::sha256_hex(bytes)
+}
+
+/// Mounts a linked reserve of `f-1` and a PUT answering `put_status`.
+async fn reserve_and_put(server: &MockServer, put_status: u16) {
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(fx::reserve_file_response(
+                "f-1",
+                &format!("{}/put-here", server.uri()),
+                &format!("{}/files/tok/flow.json", server.uri()),
+            )),
+        )
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/put-here"))
+        .respond_with(ResponseTemplate::new(put_status))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+/// The same-origin upload sink stores the bytes on the PUT, so the complete
+/// answers `409 upload_not_pending` (live capture 2026-11-10): the upload
+/// is done, with no stored digest reported.
+#[tokio::test]
+async fn a_complete_answering_upload_not_pending_counts_as_done() {
+    let server = MockServer::start().await;
+    reserve_and_put(&server, 201).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/files/f-1/complete"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(fx::refusal(
+            "upload_not_pending",
+            "this upload is already ready",
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let up = client_for(&server)
+        .await
+        .upload_file(&UploadFile {
+            name: "flow.json".into(),
+            bytes: b"{}".to_vec(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(up.file_id, "f-1");
+    assert_eq!(up.stored, None);
+}
+
+/// A PUT that fails leaves a reserved, unbound file: the client deletes it
+/// before it reports the failure (design 6.3).
+#[tokio::test]
+async fn a_failed_put_deletes_the_reserved_file() {
+    let server = MockServer::start().await;
+    reserve_and_put(&server, 500).await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/files/f-1"))
+        .and(NoBody)
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let err = client_for(&server)
+        .await
+        .upload_file(&UploadFile {
+            name: "flow.json".into(),
+            bytes: b"{}".to_vec(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, MarketError::WriteOutcomeUnknown { .. }),
+        "{err}"
+    );
+}
+
+/// A complete the market refuses (`400 upload_incomplete`) also deletes the
+/// reserved file.
+#[tokio::test]
+async fn a_refused_complete_deletes_the_reserved_file() {
+    let server = MockServer::start().await;
+    reserve_and_put(&server, 201).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/files/f-1/complete"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(fx::refusal("upload_incomplete", "the bytes did not arrive")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/files/f-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let err = client_for(&server)
+        .await
+        .upload_file(&UploadFile {
+            name: "flow.json".into(),
+            bytes: b"{}".to_vec(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, MarketError::Refused { code, .. } if code == "upload_incomplete"),
+        "{err}"
+    );
+}
+
+/// The delete: 204 and an unknown file (404) are both gone; a bound file
+/// (`409 file_bound`) is a refusal naming its code.
+#[tokio::test]
+async fn delete_file_answers() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/files/gone"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/files/unknown"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "not_found"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/files/bound"))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(fx::refusal("file_bound", "part of a job")),
+        )
+        .mount(&server)
+        .await;
+    let c = client_for(&server).await;
+    c.delete_file("gone").await.unwrap();
+    c.delete_file("unknown").await.unwrap();
+    let err = c.delete_file("bound").await.unwrap_err();
+    assert!(
+        matches!(&err, MarketError::Refused { status: 409, code, .. } if code == "file_bound"),
+        "{err}"
     );
 }
 
@@ -1251,5 +1411,14 @@ async fn a_linked_reserve_without_a_file_url_is_refused_before_the_put() {
         .await
         .unwrap_err();
     assert!(matches!(err, MarketError::Protocol { .. }), "{err}");
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    // No bytes moved, and the reservation the answer named is deleted
+    // (review 5): no unbound slot outlives the refusal.
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[1].method.as_str(), "DELETE");
+    assert!(
+        requests[1].url.path().starts_with("/v1/files/"),
+        "{}",
+        requests[1].url
+    );
 }

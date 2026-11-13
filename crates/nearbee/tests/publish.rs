@@ -631,6 +631,7 @@ async fn a_market_failure_after_the_install_leaves_the_record_on_the_installed_v
             direct_models: Vec::new(),
             signed_models: Vec::new(),
             script_models: Vec::new(),
+            script_accounts: Default::default(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         },
     )
@@ -920,6 +921,42 @@ async fn a_plain_publish_records_the_script_models() {
     );
     // The evidence set is unchanged: Nearbee never calls a script model.
     assert_eq!(r.evidence_models, vec!["claude-haiku-5-5".to_string()]);
+    only_reads(&s.server).await;
+}
+
+/// A plain listing with `script_accounts: {claude: anthropic-api}`
+/// records the account and names the API key in the statement (spec
+/// `listing-publish`, Script accounts; spec `data-statement`, Script
+/// account wording).
+#[tokio::test]
+async fn a_plain_publish_records_the_script_account() {
+    let s = Setup::new().await;
+    mount_market(&s.server, old_default_plan("0.50", 86400)).await;
+    let file = listing_with_script_models(&s, "plain");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("script_accounts: {claude: anthropic-api}\n");
+    std::fs::write(&file, text).unwrap();
+    let (r, _rows) = publish(
+        &file,
+        &s.env,
+        &s.store,
+        &s.state_dir(),
+        s.secrets(),
+        RETENTION,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r.script_accounts.get("claude"),
+        Some(&nearbee_core::listing::ScriptAccount::AnthropicApi)
+    );
+    let stmt = r.statement.as_ref().unwrap();
+    assert!(
+        stmt.contains(
+            "- `claude`, model `claude-opus-5-5`: the owner's Anthropic API account (API key).\n"
+        ),
+        "{stmt}"
+    );
     only_reads(&s.server).await;
 }
 
