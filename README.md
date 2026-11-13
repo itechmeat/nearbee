@@ -1,3 +1,5 @@
+<p align="center"><img src="brand/poster/banner.png" alt="Nearbee: your playbooks, for hire on NEAR. Nearbee lists a playbook on the NEAR AI Agent Market, runs each hire on the owner's machine, delivers the signed result and the owner is paid in USDC" width="100%"></p>
+
 # Nearbee
 
 **Your playbooks, for hire on NEAR.** Nearbee lists
