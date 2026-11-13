@@ -35,6 +35,20 @@ never read as safe. A failed read of the instance (a transport error, a
 server error, a failed `systemctl`) fails the whole inspection instead, so a
 transient error never changes the facts or their fingerprint.
 
+One fact is read best effort instead: the sandbox (change statement-sandbox).
+The inspection reads `systemctl --user show nearbee-apb -p ExecStart` and
+reports a sandbox fact only when the unit's command line is a `docker run` of
+a `nearbee-sandbox:<tag>` image with `--read-only`, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, `--dns 127.0.0.1` and a `--network`
+other than `host`; its hosts are the names of every `--add-host`, sorted and
+deduplicated. An option the parser does not know (`--privileged` and
+`--cap-add` among them), any other command line or a failed read gives no
+sandbox fact, never a failed inspection. The fact comes from what the unit
+runs, not from a setting the owner types. Without it the serialized facts
+and their fingerprint are what they were before the field existed; with it
+the fingerprint moves, so a listing published before the instance was
+sandboxed drifts until `nearbee list` runs again.
+
 ### What the check refuses
 
 Every tier: a `human_review` node, an interactive node, a node kind the
@@ -192,10 +206,11 @@ dedicated home and named read-only paths, never the owner's home, keys or
 does not do: hires share one container (worktrees keep them apart, the
 sandbox home and parts of the config directory are shared), the kernel is
 the host's, an allowed host that accepts uploads stays a channel out, and a
-host behind a shared CDN allows domain fronting. The data statement still
-says the steps run without a sandbox: the statement is generated from the
-listing's facts, and whether an instance runs sandboxed is not one of them
-yet.
+host behind a shared CDN allows domain fronting. Since the change
+statement-sandbox the data statement says so: the sandbox is an execution
+fact read from the unit's command line ("The execution facts"), and the
+statement's "Where the run happens" names the container, its limits and the
+allowed hosts ("The data statement").
 
 ### Repository audit: what apb enforces on the agent step
 
@@ -292,9 +307,27 @@ format 1). Under `## Data handling` it names, in this order:
    off (an unknown setting is stated as unknown without its reason, so no
    machine path reaches the public bio); when any is on, that these
    channels may send data to providers Nearbee has not validated.
-3. Where the run happens: the owner's machine, which can read the data; the
-   agent steps run without a sandbox, so reading the owner's files and
-   undeclared network access are not prevented.
+3. Where the run happens: the owner's machine, which can read the data
+   (an attested listing first says its model steps are configured to run on
+   NEAR AI Cloud Confidential TEE models). The rest depends on the sandbox
+   fact. Without one the text is unchanged since S4:
+
+   > The run happens on the owner's self-hosted machine, which can read the
+   > data. The steps run without a sandbox: reading files the owner's
+   > account can read and network access the bindings above do not declare
+   > are not prevented.
+
+   With one (change statement-sandbox), the hosts in backticks, sorted:
+
+   > The run happens on the owner's self-hosted machine, which can read the
+   > data. The steps run in a container on that machine: a read-only
+   > system, no added privileges, and only the instance's own directories
+   > mounted (not the owner's home or keys). Outbound connections are
+   > limited to: `cloud-api.near.ai`, `github.com`. Hires of every listing
+   > on that machine share the container and are kept apart by working
+   > directories only.
+
+   A sandbox fact with no `--add-host` says "limited to: none".
 4. What the market keeps: the brief, thread messages and uploaded files stay
    with the market under its own policy.
 5. Local retention: the days after acceptance, and what deletion does not
@@ -544,4 +577,7 @@ caches above.
    because general CLIs hide the bytes.
 5. The optional sandbox (`docs/apb.md`, "Sandboxed instance") limits file
    access and egress per instance, not per hire, and filters egress by TLS
-   server name only.
+   server name only. The statement names the sandbox only when the unit's
+   command line shows it; without it the statement says the steps run
+   without a sandbox, and with it that hires share the container and are
+   kept apart by working directories only.

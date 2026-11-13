@@ -636,6 +636,7 @@ fn facts() -> nearbee_core::runner::ExecutionFacts {
         compaction_enabled: nearbee_core::tiers::Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        sandbox: None,
     }
 }
 
@@ -7886,6 +7887,7 @@ fn attested_facts() -> nearbee_core::runner::ExecutionFacts {
         compaction_enabled: Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        sandbox: None,
     }
 }
 

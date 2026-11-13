@@ -78,6 +78,15 @@ pub struct ProviderRoute {
     pub model_overrides: Vec<String>,
 }
 
+/// The container the runner's instance runs in, read from the service
+/// unit's command line (change `statement-sandbox`, spec `privacy-tiers`,
+/// Sandbox fact).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SandboxFact {
+    /// The hosts outbound connections are limited to; sorted, deduplicated.
+    pub allowed_hosts: Vec<String>,
+}
+
 /// The facts the check and the statement are built from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecutionFacts {
@@ -100,6 +109,11 @@ pub struct ExecutionFacts {
     /// The listing's signed models, in order; same rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_models: Vec<String>,
+    /// The sandbox the instance runs in, when the runner found one. Left
+    /// out of the serialized facts when absent, so the fingerprint of an
+    /// instance without a sandbox is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxFact>,
 }
 
 impl ExecutionFacts {
@@ -477,6 +491,7 @@ mod tests {
             compaction_enabled: Known::Yes(false),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            sandbox: None,
         }
     }
 

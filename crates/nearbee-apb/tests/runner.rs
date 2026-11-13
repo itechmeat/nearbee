@@ -1644,6 +1644,65 @@ async fn inspect_source_gives_the_same_facts_as_inspect() {
     assert_eq!(from_route, from_source);
 }
 
+/// Spec `privacy-tiers`, Sandbox fact: the inspection reads the unit's
+/// ExecStart and reports the sandbox with its hosts; a unit that is not
+/// the sandbox, or an ExecStart read that fails while the environment
+/// read works, gives no fact and no failed inspection.
+#[tokio::test]
+async fn inspect_reports_the_sandbox_from_the_units_exec_start() {
+    let exec_start = "ExecStart={ path=/usr/bin/docker ; argv[]=/usr/bin/docker run --rm --network nearbee-sbx-int --dns 127.0.0.1 --add-host github.com:172.30.77.2 --add-host cloud-api.near.ai:172.30.77.2 --read-only --cap-drop ALL --security-opt no-new-privileges nearbee-sandbox:local apb dashboard --port 7322 ; ignore_errors=no ; status=0/0 }";
+    let cases = [
+        (
+            exec_start.to_owned(),
+            Some(vec![
+                "cloud-api.near.ai".to_owned(),
+                "github.com".to_owned(),
+            ]),
+        ),
+        (exec_start.replace(" --read-only", ""), None),
+        (String::new(), None),
+    ];
+    for (line, expected) in cases {
+        let server = MockServer::start().await;
+        let ws = workspace_with(Some(OPENCODE_JSON), Some("decisions:\n  enabled: false\n"));
+        let sys = ws.path().join("systemctl");
+        let exec_branch = if line.is_empty() {
+            "exit 1".to_owned()
+        } else {
+            format!("printf '%s\\n' '{line}'")
+        };
+        std::fs::write(
+            &sys,
+            format!(
+                "#!/bin/sh\nif [ \"$5\" = ExecStart ]; then {exec_branch}; else printf '%s\\n' 'Environment=XDG_CONFIG_HOME={TEST_XDG}'; fi\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sys, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = connected_at(&server, ws.path(), Some(&sys)).await;
+        recorded(&fixture("playbook_detail_live"), false)
+            .mount(&server)
+            .await;
+        recorded(&fixture("profile_detail_project_live"), false)
+            .mount(&server)
+            .await;
+        recorded(&fixture("health_live"), false)
+            .mount(&server)
+            .await;
+        let f = runner
+            .inspect(&PlaybookId::new("repo-audit-fast"))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.sandbox.map(|s| s.allowed_hosts),
+            expected,
+            "ExecStart line: {line:?}"
+        );
+        assert!(matches!(f.routes, Known::Yes(_)), "{:?}", f.routes);
+    }
+}
+
 // --- Attempts (spec `apb-runner`, Requested models per attempt) ---
 
 #[tokio::test]

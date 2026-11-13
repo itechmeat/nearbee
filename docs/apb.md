@@ -206,6 +206,13 @@ export APB_BIN="$PWD/scripts/apb-sandboxed"   # absolute path, for nearbee
    containers (`<unit>-sbx`, `<unit>-gw`) and networks; it exists only to
    test a second instance next to a running one, since the tier check reads
    `nearbee-apb`.
+10. The data statement reads the sandbox from the unit itself (change
+    statement-sandbox, `docs/privacy.md`, "The execution facts"): the
+    inspection parses `systemctl --user show nearbee-apb -p ExecStart` and
+    names the container and the `--add-host` names in "Where the run
+    happens". Moving an instance into or out of the sandbox changes the
+    facts fingerprint, so run `nearbee list` again and paste the new
+    statement.
 
 Limits, stated as they are:
 

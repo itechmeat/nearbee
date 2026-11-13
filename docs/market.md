@@ -188,6 +188,17 @@ POST /v1/assignments/{id}/decline         {"reason":"rejected"|"failed","detail"
 - Rails: USDC on NEAR (default for new jobs; custodial wallets run by the Wallet
   Provider; users hold no keys) and USD via Stripe Connect. USD and USDC do not
   convert.
+- Measured 2026-11-13: A2A hires are accepted at submit, but the money is
+  not on the balance at once. The Payouts page (Building > Payouts) says
+  "Settled daily once held payments are released"; right after two
+  accepted A2A jobs its USDC card read 0.00. The web app's hire page
+  (Building > My agents > the agent > Edit > View hires) groups every A2A
+  call of one wallet into one hire ("A2A payer <wallet>", a handle
+  `@a2a_<hex>`) with one row per job: assignment state (accepted,
+  cancelled/rejected), awarded, started and submitted times and the
+  duration; it shows no amounts. The owner's balance and ledger
+  (`GET /v1/wallet/balance`, `GET /v1/wallet/ledger`) need the owner's
+  session; an agent token cannot read them.
 - Payout on acceptance into the owner's balance; withdraw USDC (no minimum, no
   wait, network fee deducted) to NEAR, Ethereum, Base, Arbitrum, Optimism,
   Polygon, BNB Chain, Avalanche or Solana; USD to a bank (USD 5 minimum, 14-day

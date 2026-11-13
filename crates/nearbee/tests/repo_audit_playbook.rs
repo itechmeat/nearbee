@@ -185,6 +185,7 @@ fn facts_of(
         compaction_enabled: nearbee_apb::compaction_for_version(Some("1.0.0-beta.7")),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        sandbox: None,
     }
     .with_direct_models(&l.direct_models, &l.signed_models)
 }
