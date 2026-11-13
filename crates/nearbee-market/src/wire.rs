@@ -363,6 +363,17 @@ pub struct ReserveFileResponse {
     pub file_url: Option<String>,
 }
 
+/// Answer of `POST /v1/files/{id}/complete` (`CompleteFileResponse`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteFileResponse {
+    pub file_id: String,
+    pub filename: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub content_type: String,
+}
+
 // ---------------------------------------------------------------------------
 // Requests the client sends
 // ---------------------------------------------------------------------------

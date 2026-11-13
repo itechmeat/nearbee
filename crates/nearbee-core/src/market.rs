@@ -401,11 +401,32 @@ pub struct UploadFile {
     pub bytes: Vec<u8>,
 }
 
-/// The link a confirmed upload serves from.
+/// The link a confirmed upload serves from, with what the market stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadedFile {
     pub file_id: String,
     pub file_url: String,
+    /// The stored size and SHA-256 from the complete answer
+    /// (`CompleteFileResponse`). `None` when the complete answered `409
+    /// upload_not_pending`: the same-origin upload sink had already stored
+    /// the bytes (measured 2026-11-10), so the market reported no digest.
+    pub stored: Option<StoredFile>,
+}
+
+/// A reserved, linked file slot (`POST /v1/files` with `link: true`): its
+/// id, the URL its bytes go to and the public link it will serve from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservedFile {
+    pub file_id: String,
+    pub upload_url: String,
+    pub file_url: String,
+}
+
+/// The size and SHA-256 (lowercase hex) the market stored for a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFile {
+    pub byte_size: u64,
+    pub sha256: String,
 }
 
 /// Everything Nearbee needs from an agent market. Implemented by
@@ -469,12 +490,42 @@ pub trait Market: Send + Sync {
         agent_id: &str,
         plan_id: &str,
     ) -> impl Future<Output = Result<(), MarketError>> + Send;
+    /// Reserves a linked slot for one file (`POST /v1/files`). A reserve
+    /// whose answer carries no `fileUrl` is deleted before the error is
+    /// reported.
+    fn reserve_file(
+        &self,
+        file: &UploadFile,
+    ) -> impl Future<Output = Result<ReservedFile, MarketError>> + Send;
+    /// PUTs the exact bytes to a reserved slot and completes it. A failure
+    /// deletes the reserved file (best effort) before it is reported.
+    /// `Ok(None)` when the complete answered `409 upload_not_pending`.
+    fn complete_file(
+        &self,
+        reserved: &ReservedFile,
+        file: &UploadFile,
+    ) -> impl Future<Output = Result<Option<StoredFile>, MarketError>> + Send;
     /// Uploads one file (reserve, PUT the exact bytes, complete) and returns
-    /// its public link.
+    /// its public link. Serve calls the two steps itself, so it can journal
+    /// the file id between them.
     fn upload_file(
         &self,
         file: &UploadFile,
-    ) -> impl Future<Output = Result<UploadedFile, MarketError>> + Send;
+    ) -> impl Future<Output = Result<UploadedFile, MarketError>> + Send {
+        async move {
+            let reserved = self.reserve_file(file).await?;
+            let stored = self.complete_file(&reserved, file).await?;
+            Ok(UploadedFile {
+                file_id: reserved.file_id,
+                file_url: reserved.file_url,
+                stored,
+            })
+        }
+    }
+    /// Deletes a file no job uses yet, its link included (`DELETE
+    /// /v1/files/{id}`, idempotent; an unknown file counts as gone). A
+    /// bound file answers `409 file_bound`, a `Refused`.
+    fn delete_file(&self, file_id: &str) -> impl Future<Output = Result<(), MarketError>> + Send;
     /// Lists an assignment's thread messages, newest first, stopping at the
     /// first page that holds a message created at or before `until`
     /// (design 9.3: used to read the full body of a truncated latest

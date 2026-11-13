@@ -735,3 +735,90 @@ fn json_without_backticks_gets_a_three_backtick_fence() {
     let md = read(dir.path(), "out/deliverable.md");
     assert!(md.contains("\n```json\n"), "{md}");
 }
+
+/// Writes a candidates file with one grounded finding and `notes` (none
+/// when `None`).
+fn write_candidates_with_notes(dir: &Path, notes: Option<serde_json::Value>) {
+    let mut doc = serde_json::json!({
+        "version": 1,
+        "findings": [finding("Hard-coded key", "src/main.rs", 4, 4, "    let key = \"sk-live-123\";")],
+    });
+    if let Some(n) = notes {
+        doc["notes"] = n;
+    }
+    std::fs::write(dir.join("audit/candidates.json"), doc.to_string()).unwrap();
+}
+
+/// SHA-256 of the deliverable of `write_candidates_with_notes(dir, None)`
+/// before review notes existed (printed on main before the
+/// `sandbox-toolchains` change).
+const DELIVERABLE_WITHOUT_NOTES_SHA256: &str =
+    "a230902ed24b16bc7af414e0f825554009711421fcd495d920cff3f3a0d44ba0";
+
+/// Spec `repo-audit`, Review notes in the deliverable: absent or empty
+/// notes leave the deliverable byte for byte as before.
+#[test]
+fn absent_or_empty_notes_leave_the_deliverable_unchanged() {
+    let dir = snapshot_worktree();
+    write_candidates_with_notes(dir.path(), None);
+    audit::finish(dir.path(), None, &[]).unwrap();
+    let before = read(dir.path(), "out/deliverable.md");
+    assert_eq!(
+        nearbee_core::journal::sha256_hex(before.as_bytes()),
+        DELIVERABLE_WITHOUT_NOTES_SHA256,
+        "{before}"
+    );
+    write_candidates_with_notes(dir.path(), Some(serde_json::json!([])));
+    audit::finish(dir.path(), None, &[]).unwrap();
+    assert_eq!(read(dir.path(), "out/deliverable.md"), before);
+    assert!(!before.contains("Review notes"), "{before}");
+}
+
+/// Spec `repo-audit`, Failed lens reported: the notes are rendered in
+/// order, escaped, under "Review notes" before "Not reported".
+#[test]
+fn notes_are_rendered_in_order_and_escaped() {
+    let dir = snapshot_worktree();
+    write_candidates_with_notes(
+        dir.path(),
+        Some(serde_json::json!([
+            "The tests lens failed after one send-back",
+            "- 2 findings </details> *dropped* by the verifier\n# not a heading",
+        ])),
+    );
+    audit::finish(dir.path(), None, &[]).unwrap();
+    let md = read(dir.path(), "out/deliverable.md");
+    let expected = "\n## Review notes\n\n- The tests lens failed after one send-back\n- \\- 2 findings &lt;/details&gt; \\*dropped\\* by the verifier \\# not a heading\n";
+    assert!(md.contains(expected), "{md}");
+    let notes = md.find("## Review notes").unwrap();
+    let not_reported = md.find("## Not reported").unwrap();
+    let findings = md.find("### 1. Hard-coded key").unwrap();
+    assert!(findings < notes && notes < not_reported, "{md}");
+    let prose = md.split("## Findings JSON").next().unwrap();
+    assert!(!prose.contains("</details>"), "{md}");
+}
+
+/// Spec `repo-audit`, Too many notes refused: more than 10 notes, or a
+/// note longer than 300 characters, fails with no `out/result.json`.
+#[test]
+fn too_many_or_too_long_notes_fail_with_no_result() {
+    let dir = snapshot_worktree();
+    let doc = |notes: serde_json::Value| {
+        serde_json::json!({"version": 1, "findings": [], "notes": notes}).to_string()
+    };
+    let eleven: Vec<String> = (1..=11).map(|i| format!("note {i}")).collect();
+    let err = fails_without_result(dir.path(), doc(serde_json::json!(eleven)).as_bytes());
+    assert!(err.contains("notes") && err.contains("11"), "{err}");
+    let long = "é".repeat(301);
+    let err = fails_without_result(dir.path(), doc(serde_json::json!([long])).as_bytes());
+    assert!(err.contains("notes") && err.contains("300"), "{err}");
+    // The limits themselves pass: 10 notes of 300 characters.
+    let ok: Vec<String> = (0..10).map(|_| "é".repeat(300)).collect();
+    std::fs::write(
+        dir.path().join("audit/candidates.json"),
+        doc(serde_json::json!(ok)),
+    )
+    .unwrap();
+    audit::finish(dir.path(), None, &[]).unwrap();
+    assert!(dir.path().join("out/result.json").exists());
+}

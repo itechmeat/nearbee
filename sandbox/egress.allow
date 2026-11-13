@@ -14,3 +14,23 @@ api.anthropic.com
 api.openai.com
 # DeepSeek Harness on the z.ai provider (ZAI_API_KEY).
 api.z.ai
+# Package registries: script steps that install, build and test a buyer's
+# repository (bug-repro-fix) or upgrade its dependencies (vuln-deps-fix).
+# npm (npm, pnpm, yarn).
+registry.npmjs.org
+# Yarn's default registry (Yarn classic and Berry), and the Berry releases
+# corepack fetches for a repository that pins yarn in package.json.
+registry.yarnpkg.com
+repo.yarnpkg.com
+# PyPI (uv, pip).
+pypi.org
+files.pythonhosted.org
+# Go modules and their checksum database.
+proxy.golang.org
+sum.golang.org
+# crates.io (cargo).
+index.crates.io
+static.crates.io
+# The OSV vulnerability database: osv-scanner and pip-audit.
+osv-vulnerabilities.storage.googleapis.com
+api.osv.dev

@@ -28,8 +28,8 @@ pub mod wire;
 
 use nearbee_core::market::{
     AgentPatch, AgentRecord, DeclineOutcome, DeclineReason, DeclineRequest, Market, MarketError,
-    Message, MessageRequest, NewPricingPlan, PricingPlan, ProgressOutcome, ProgressRequest, Row,
-    RowStatus, SubmitRequest, ThreadMessage, UploadFile, UploadedFile,
+    Message, MessageRequest, NewPricingPlan, PricingPlan, ProgressOutcome, ProgressRequest,
+    ReservedFile, Row, RowStatus, StoredFile, SubmitRequest, ThreadMessage, UploadFile,
 };
 use nearbee_core::redact::{DETAIL_LIMIT, redact_detail, truncate};
 use nearbee_core::secret::{REDACTED, Secret};
@@ -1107,10 +1107,9 @@ impl Market for NearAgentMarket {
         }
     }
 
-    async fn upload_file(&self, file: &UploadFile) -> Result<UploadedFile, MarketError> {
-        // 1. reserve, with a link. `filename` and `byteSize` are the
-        // component's required properties; the signed URL carries the
-        // exact byte count.
+    async fn reserve_file(&self, file: &UploadFile) -> Result<ReservedFile, MarketError> {
+        // `filename` and `byteSize` are the component's required
+        // properties; the signed URL carries the exact byte count.
         let reserve = wire_body(wire::ReserveFileRequest {
             filename: file.name.clone(),
             byte_size: file.bytes.len() as i64,
@@ -1126,24 +1125,81 @@ impl Market for NearAgentMarket {
             serde_json::from_value(v).map_err(|e| MarketError::Protocol {
                 detail: format!("POST /v1/files: {e}"),
             })?;
-        let upload_url = r.upload_url;
-        let file_id = r.file_id;
         // `fileUrl` is present only for `link: true`, which this reserve
-        // always sends; a reserve without it cannot be delivered.
+        // always sends; a reserve without it cannot be delivered, and the
+        // slot it named is deleted so it does not outlive the refusal.
         let Some(file_url) = r.file_url else {
+            if let Err(cleanup) = self.delete_file(&r.file_id).await {
+                tracing::warn!(error = %cleanup, "deleting a reserve without fileUrl");
+            }
             return Err(MarketError::Protocol {
                 detail: "POST /v1/files: a linked reserve answered without fileUrl".into(),
             });
         };
         // The complete step needs the id; refuse before any bytes move.
-        segment(&file_id)?;
-        // 2. PUT the exact bytes to the presigned URL, with no extra
-        // headers (no auth, no JSON content type).
+        segment(&r.file_id)?;
+        Ok(ReservedFile {
+            file_id: r.file_id,
+            upload_url: r.upload_url,
+            file_url,
+        })
+    }
+
+    async fn complete_file(
+        &self,
+        reserved: &ReservedFile,
+        file: &UploadFile,
+    ) -> Result<Option<StoredFile>, MarketError> {
+        // A failure leaves a reserved, unbound file: it is deleted (best
+        // effort) before the failure is reported (design 6.3), so no slot
+        // outlives a failed upload.
+        match self
+            .put_and_complete(&reserved.upload_url, &reserved.file_id, &file.bytes)
+            .await
+        {
+            Ok(stored) => Ok(stored),
+            Err(e) => {
+                if let Err(cleanup) = self.delete_file(&reserved.file_id).await {
+                    tracing::warn!(error = %cleanup, "deleting a failed upload's reserved file");
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn delete_file(&self, file_id: &str) -> Result<(), MarketError> {
+        let path = format!("/v1/files/{}", segment(file_id)?);
+        // Idempotent: a second delete, or a file the market no longer
+        // knows, is gone all the same.
+        match self
+            .write_with_resend(reqwest::Method::DELETE, &path, None)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(MarketError::Refused { status: 404, .. }) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl NearAgentMarket {
+    /// The PUT of the exact bytes and the complete of one reserved file.
+    /// `Ok(None)` when the complete answered `409 upload_not_pending`: the
+    /// same-origin sink stored the bytes on the PUT (live capture
+    /// 2026-11-10), so the market reported no digest.
+    async fn put_and_complete(
+        &self,
+        upload_url: &str,
+        file_id: &str,
+        bytes: &[u8],
+    ) -> Result<Option<StoredFile>, MarketError> {
+        // PUT the exact bytes to the upload URL, with no extra headers (no
+        // auth, no JSON content type).
         let put = self
             .http
-            .put(&upload_url)
+            .put(upload_url)
             .timeout(self.timing.write)
-            .body(file.bytes.clone())
+            .body(bytes.to_vec())
             .send()
             .await;
         let put_status = match put {
@@ -1159,12 +1215,33 @@ impl Market for NearAgentMarket {
                 detail: self.redact(&format!("PUT <upload url>: HTTP {put_status}")),
             });
         }
-        // 3. complete.
-        let path = format!("/v1/files/{}/complete", segment(&file_id)?);
+        let path = format!("/v1/files/{}/complete", segment(file_id)?);
         // The operation defines no request body; none is sent.
-        self.write_with_resend(reqwest::Method::POST, &path, None)
-            .await?;
-        Ok(UploadedFile { file_id, file_url })
+        match self
+            .write_with_resend(reqwest::Method::POST, &path, None)
+            .await
+        {
+            Ok(Some(v)) => {
+                let c: wire::CompleteFileResponse =
+                    serde_json::from_value(v).map_err(|e| MarketError::Protocol {
+                        detail: format!("POST /v1/files/<id>/complete: {e}"),
+                    })?;
+                let byte_size = u64::try_from(c.byte_size).map_err(|_| MarketError::Protocol {
+                    detail: "POST /v1/files/<id>/complete: a negative byteSize".into(),
+                })?;
+                Ok(Some(StoredFile {
+                    byte_size,
+                    sha256: c.sha256.to_ascii_lowercase(),
+                }))
+            }
+            Ok(None) => Err(MarketError::Protocol {
+                detail: "POST /v1/files/<id>/complete: empty answer".into(),
+            }),
+            Err(MarketError::Refused {
+                status: 409, code, ..
+            }) if code == "upload_not_pending" => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 

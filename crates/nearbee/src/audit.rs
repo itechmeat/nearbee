@@ -603,7 +603,18 @@ fn sync_tree(root: &Path) -> Result<(), String> {
 struct Candidates {
     version: u32,
     findings: Vec<Candidate>,
+    /// Facts about the review the findings cannot carry (a failed lens,
+    /// findings a verifier dropped), rendered as "Review notes" (spec
+    /// `repo-audit`, Review notes in the deliverable).
+    #[serde(default)]
+    notes: Vec<String>,
 }
+
+/// At most this many review notes are read.
+pub const MAX_NOTES: usize = 10;
+
+/// A review note is at most this many characters.
+pub const MAX_NOTE_CHARS: usize = 300;
 
 /// One candidate finding (spec `repo-audit`, Candidate findings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -689,6 +700,23 @@ pub fn finish(
             candidates.findings.len()
         ));
     }
+    if candidates.notes.len() > MAX_NOTES {
+        return Err(format!(
+            "audit/candidates.json has {} notes; at most {MAX_NOTES} are read",
+            candidates.notes.len()
+        ));
+    }
+    if let Some(i) = candidates
+        .notes
+        .iter()
+        .position(|n| n.chars().count() > MAX_NOTE_CHARS)
+    {
+        return Err(format!(
+            "audit/candidates.json notes entry {} is longer than {MAX_NOTE_CHARS} characters",
+            i + 1
+        ));
+    }
+    let notes = candidates.notes;
     let source: SourceRecord =
         serde_json::from_slice(&read(&format!("{SNAPSHOT_DIR}/source.json"))?)
             .map_err(|e| format!("{SNAPSHOT_DIR}/source.json is invalid: {e}"))?;
@@ -729,7 +757,7 @@ pub fn finish(
         Err(e) => return Err(e),
     };
     let json = serde_json::to_string_pretty(&findings).expect("findings serialize");
-    let markdown = render(&source, &findings, &json, review_coverage.as_ref());
+    let markdown = render(&source, &findings, &json, review_coverage.as_ref(), &notes);
     write_replacing(&out, "findings.json", json.as_bytes())?;
     write_replacing(&out, "deliverable.md", markdown.as_bytes())?;
     let evidence = if direct_models.is_empty() {
@@ -954,6 +982,7 @@ fn render(
     f: &Findings,
     json: &str,
     review: Option<&ReviewCoverage>,
+    notes: &[String],
 ) -> String {
     let mut md = String::new();
     md.push_str(&format!(
@@ -1005,6 +1034,15 @@ fn render(
     }
     if f.accepted.is_empty() {
         md.push_str("\nNo finding passed the location check.\n");
+    }
+    if !notes.is_empty() {
+        md.push_str("\n## Review notes\n\n");
+        for note in notes {
+            // One list item per note: a line break inside a note becomes a
+            // space, so a note cannot start a block of its own.
+            let line = note.replace("\r\n", " ").replace(['\r', '\n'], " ");
+            md.push_str(&format!("- {}\n", escape(&line)));
+        }
     }
     md.push_str(&format!(
         "\n## Not reported\n\n{} candidate findings were rejected by the location check. {} archive members were skipped",

@@ -107,6 +107,7 @@ fn every_operation_the_client_calls_uses_the_component_its_wire_type_models() {
             "200",
             Some("CompleteFileResponse"),
         ),
+        ("/v1/files/{file_id}", "delete", None, "204", None),
         (
             "/v1/agents/{id_or_handle}",
             "get",
@@ -161,6 +162,18 @@ fn every_operation_the_client_calls_uses_the_component_its_wire_type_models() {
             ["application/json"]["schema"]["type"],
         "array"
     );
+}
+
+/// The complete answer parses with the size and digest serve checks.
+#[test]
+fn the_complete_answer_parses_with_its_size_and_digest() {
+    let c: wire::CompleteFileResponse = parse(
+        "CompleteFileResponse",
+        instance("CompleteFileResponse", Value::Null),
+    );
+    assert!(!c.file_id.is_empty());
+    assert!(!c.sha256.is_empty());
+    assert_eq!(c.byte_size, 0);
 }
 
 #[test]

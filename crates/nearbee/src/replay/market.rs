@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use nearbee_core::market::{
     AgentPatch, AgentRecord, DeclineOutcome, DeclineRequest, Market, MarketError, MessageRequest,
-    NewPricingPlan, PricingPlan, ProgressOutcome, ProgressRequest, Row, SubmitRequest,
-    ThreadMessage, UploadFile, UploadedFile,
+    NewPricingPlan, PricingPlan, ProgressOutcome, ProgressRequest, ReservedFile, Row, StoredFile,
+    SubmitRequest, ThreadMessage, UploadFile,
 };
 use time::OffsetDateTime;
 
@@ -172,8 +172,20 @@ impl Market for ReplayMarket {
         Err(unused("change pricing plans"))
     }
 
-    async fn upload_file(&self, _f: &UploadFile) -> Result<UploadedFile, MarketError> {
+    async fn reserve_file(&self, _f: &UploadFile) -> Result<ReservedFile, MarketError> {
         Err(unused("upload files"))
+    }
+
+    async fn complete_file(
+        &self,
+        _r: &ReservedFile,
+        _f: &UploadFile,
+    ) -> Result<Option<StoredFile>, MarketError> {
+        Err(unused("upload files"))
+    }
+
+    async fn delete_file(&self, _file_id: &str) -> Result<(), MarketError> {
+        Err(unused("delete files"))
     }
 
     async fn messages(

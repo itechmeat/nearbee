@@ -211,6 +211,7 @@ fn record() -> ResolvedListing {
         direct_models: direct.clone(),
         signed_models: direct,
         script_models: Vec::new(),
+        script_accounts: Default::default(),
         published_at: START - time::Duration::days(1),
     }
 }
