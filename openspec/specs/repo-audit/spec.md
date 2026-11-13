@@ -171,10 +171,10 @@ The path in a pack header SHALL be JSON-quoted (control characters escaped), and
 - **THEN** that line is numbered in the request and the block's real end marker appears once
 
 ### Requirement: Review size cap
-The pack SHALL keep the request at or below 768 KiB: it SHALL omit every file that does not fit as `size_cap` and keep packing the next ones. `audit/review-coverage.json` SHALL record the count of omitted files per reason and at most 1,000 omitted paths; the deliverable's coverage section SHALL list at most 50 omitted paths grouped by reason, each group with its count and "and N more" for the rest.
+The pack SHALL keep the request at or below 256 KiB: it SHALL omit every file that does not fit as `size_cap` and keep packing the next ones. `audit/review-coverage.json` SHALL record the count of omitted files per reason and at most 1,000 omitted paths; the deliverable's coverage section SHALL list at most 50 omitted paths grouped by reason, each group with its count and "and N more" for the rest.
 
 #### Scenario: Large repository
-- **WHEN** the snapshot's text passes 768 KiB
+- **WHEN** the snapshot's text passes 256 KiB
 - **THEN** every file that does not fit is omitted as `size_cap`, smaller later files are still packed, the request stays below the cap and the omitted files are listed
 
 #### Scenario: Many omitted files
@@ -186,7 +186,7 @@ The pack SHALL keep the request at or below 768 KiB: it SHALL omit every file th
 - **THEN** it is not packed and is listed as omitted
 
 ### Requirement: Review call
-The review SHALL make one signed call through `nearbee signed-call`'s code with the request `stream: false`, `max_tokens: 16384` and `chat_template_kwargs: {"thinking": false}`, a system message with the step's rules and a user message holding the brief, the feedback and the pack as labelled data blocks; its state SHALL live in `audit/signed/<execution_id>/`.
+The review SHALL make one signed call through `nearbee signed-call`'s code with the request `stream: false`, `max_tokens: 16384`, `chat_template_kwargs: {"thinking": false}` and `response_format: {"type": "json_object"}`, a system message with the step's rules and a user message holding the brief, the feedback and the pack as labelled data blocks; its state SHALL live in `audit/signed/<execution_id>/`.
 
 #### Scenario: Rework
 - **WHEN** a rework runs the review with a new execution id
@@ -194,7 +194,7 @@ The review SHALL make one signed call through `nearbee signed-call`'s code with 
 
 #### Scenario: Reasoning off
 - **WHEN** the review request is built
-- **THEN** its JSON has exactly the keys `model`, `stream`, `max_tokens`, `chat_template_kwargs` and `messages`, and `chat_template_kwargs` is exactly `{"thinking": false}`
+- **THEN** its JSON has exactly the keys `model`, `stream`, `max_tokens`, `chat_template_kwargs`, `response_format` and `messages`, `chat_template_kwargs` is exactly `{"thinking": false}` and `response_format` is exactly `{"type": "json_object"}`
 
 ### Requirement: Unparsable review answer
 An answer that is not a candidates object, or has more than 40 findings, SHALL fail the step with `review_unparsed` and the reason in `audit/review-coverage.json`, so the hire is declined `failed`.

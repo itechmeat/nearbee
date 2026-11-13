@@ -10,3 +10,4 @@ nearbee.local.yaml
 .apb/
 /target/
 sandbox/bin/
+.zvec-grep/
