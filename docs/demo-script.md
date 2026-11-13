@@ -7,8 +7,10 @@ whose owner item is still open is skipped, and the post says nothing about
 it (`docs/x-post.md`: every claim backed by `docs/demo-log.md`).
 
 Before recording: `cargo build -p nearbee` once, apb `1.0.0-beta.7` on
-Nearbee's own instance (`scripts/apb-instance.sh start`), `nearbee config
-check` all `ok`, a terminal with a large font, the market web app signed in
+Nearbee's own instance in the sandbox (`sandbox/build.sh`, then
+`NEARBEE_APB_SANDBOX=1 scripts/apb-instance.sh start`, and
+`APB_BIN=$PWD/scripts/apb-sandboxed` for every `nearbee` command),
+`nearbee config check` all `ok`, a terminal with a large font, the market web app signed in
 as the owner in a browser.
 
 | # | Shot | Command or page | What the viewer sees | Owner item |
@@ -21,7 +23,8 @@ as the owner in a browser.
 | 6 | The deliverable | the hire's deliverable in the market web app | Findings with checked file and line citations, the endpoint attestation disclosure, the `Response signature` section and the data statement | as shot 5 |
 | 7 | The receipt checks | the `Check the signature in the NEAR AI Verification Center` link of shot 6 | The Verification Center checking the response signature of the review call | as shot 5 |
 | 8 | Agent B on an invoice scan | a hire of `doc-digest-private` from the web app with one invoice PDF or PNG attached; `nearbee serve` running | The digest: summary, entities, checked figures, personal data counts by category, the response signature | O-2 (agent of `doc-digest-private`), O-3, O-6 |
-| 9 | Accepted and paid | the hire accepted in the web app, then the owner's balance | The held payment released on acceptance, the earnings in the owner's balance (withdrawal optional) | O-6; O-4 is the prize payout account, not shown |
+| 9 | Accepted and paid | Building > My agents > `repo-audit-fast` > Edit > View hires, then Building > Payouts | The A2A payer with one row per job (accepted, or cancelled for a declined one); A2A jobs are accepted at submit and Payouts settles them daily, so the balance shows the earnings only after the next settlement (`docs/market.md`) | O-6; O-4 is the prize payout account, not shown |
+| 10 | The sandbox | `NEARBEE_APB_SANDBOX=1 scripts/apb-instance.sh status`, then `docker exec nearbee-apb-sbx curl -sS -m 5 https://example.com` | The instance in its container, the image matching the host binaries; an outside host does not resolve from inside, while the statement lists the allowed hosts | none |
 
 Notes for the voice-over, all facts from the repository:
 
@@ -32,6 +35,10 @@ Notes for the voice-over, all facts from the repository:
    signed by the model TEE (D-026, D-027).
 3. Every market run is an apb external-data run, so apb learns nothing
    from buyer data (`docs/privacy.md`).
-4. The replay in shot 1 is scripted: it proves the state machine and the
+4. Every run executes in a container with a read-only system, no added
+   privileges, none of the owner's files or keys, and outbound traffic
+   limited to named hosts; the data statement says so from the unit's own
+   command line (`docs/apb.md`, "Sandboxed instance").
+5. The replay in shot 1 is scripted: it proves the state machine and the
    deliverable path, not the live market; shots 4 to 9 are the live
    proof, recorded in `docs/demo-log.md`.

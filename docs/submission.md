@@ -32,7 +32,7 @@ including agent-to-agent over A2A with x402. Each listing has a privacy
 tier the adapter enforces before it publishes: attested listings call only
 NEAR AI Cloud TEE models from Nearbee's own commands, and the deliverable
 carries the model's response signature with a Verification Center receipt.
-Every hire is journaled and survives a restart; every market run is an apb
+Runs execute in a container with no access to the owner's files and an outbound host allowlist, and the listing's data statement says so. Every hire is journaled and survives a restart; every market run is an apb
 external-data run, so apb does not learn from it. Two example agents show it: a
 repository audit with checked file and line citations, and a private
 document digest. `nearbee replay` walks the whole hire machine on a clean
