@@ -155,6 +155,7 @@ pub fn facts() -> ExecutionFacts {
         compaction_enabled: Known::Yes(false),
         direct_models: Vec::new(),
         signed_models: Vec::new(),
+        sandbox: None,
     }
 }
 

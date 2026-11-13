@@ -17,11 +17,22 @@ The statement SHALL be Markdown generated only from the listing's tier and execu
 - **THEN** the statement names the connector, says decisions are on, and says those channels may send data to providers Nearbee has not validated
 
 ### Requirement: Where the run happens
-The statement SHALL say that the run happens on the owner's self-hosted machine, which can read the data, that the agent steps run without a sandbox, and that reading files the owner's account can read and network access the bindings do not declare are not prevented.
+The statement SHALL say that the run happens on the owner's self-hosted machine, which can read the data. Without a sandbox fact it SHALL say that the steps run without a sandbox and that reading files the owner's account can read and network access the bindings do not declare are not prevented. With a sandbox fact it SHALL instead describe the sandbox as the next requirement says.
 
 #### Scenario: Attested listing
 - **WHEN** the statement of an attested listing is generated
 - **THEN** it still says the owner's machine can read the data
+
+#### Scenario: No sandbox fact
+- **WHEN** the facts carry no sandbox fact
+- **THEN** the section text is byte for byte the text before this change
+
+### Requirement: Sandbox wording
+With a sandbox fact the statement SHALL say that the steps run in a container on the owner's machine with a read-only system, no added privileges and only the instance's own directories mounted, that outbound connections are limited to the listed hosts, and that hires of every listing on that machine share the container and are kept apart by working directories only.
+
+#### Scenario: Sandboxed instance
+- **WHEN** the facts carry a sandbox fact with the hosts `cloud-api.near.ai` and `github.com`
+- **THEN** the statement names the container limits, lists exactly those two hosts in sorted order, says hires share the container, and does not contain "run without a sandbox"
 
 ### Requirement: Market and retention wording
 The statement SHALL say that the brief, thread messages and uploaded files stay with the market under its policy and that a file once used by a job cannot be deleted there; and that Nearbee deletes its own copies (the hire's worktree and snapshots) a configured number of days after acceptance, while apb run directories, decision logs and executor caches are not deleted by Nearbee.

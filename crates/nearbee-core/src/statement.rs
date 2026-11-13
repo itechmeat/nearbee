@@ -13,7 +13,7 @@
 use crate::catalog::Catalog;
 use crate::journal::sha256_hex;
 use crate::listing::{ResolvedListing, Tier};
-use crate::tiers::{self, ExecutionFacts, Known, ProfileFact};
+use crate::tiers::{self, ExecutionFacts, Known, ProfileFact, SandboxFact};
 
 /// The statement format a record must carry to be serveable.
 pub const STATEMENT_FORMAT: u32 = 1;
@@ -31,7 +31,7 @@ pub fn render(tier: Tier, facts: &ExecutionFacts, retention_days: u32) -> String
     out.push_str(&direct_section(facts));
     out.push('\n');
     out.push_str(&channels_section(facts));
-    out.push_str(&run_place_section(tier));
+    out.push_str(&run_place_section(tier, facts.sandbox.as_ref()));
     out.push_str(&market_keeps_section());
     out.push_str(&retention_section(retention_days, facts));
     out
@@ -310,16 +310,42 @@ fn channels_section(facts: &ExecutionFacts) -> String {
     out
 }
 
-fn run_place_section(tier: Tier) -> String {
+/// "Where the run happens" (spec `data-statement`): without a sandbox
+/// fact the text is the one before change `statement-sandbox`, byte for
+/// byte; with one it names the container, its limits and the hosts.
+fn run_place_section(tier: Tier, sandbox: Option<&SandboxFact>) -> String {
     let mut out = String::from("### Where the run happens\n\n");
     if tier == Tier::Attested {
         out.push_str(
             "The model steps are configured to run on NEAR AI Cloud Confidential TEE models.\n",
         );
     }
-    out.push_str(
-        "The run happens on the owner's self-hosted machine, which can read the data. The steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented.\n\n",
-    );
+    out.push_str("The run happens on the owner's self-hosted machine, which can read the data. ");
+    match sandbox {
+        None => out.push_str(
+            "The steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented.\n\n",
+        ),
+        Some(fact) => {
+            let mut hosts: Vec<&str> = fact.allowed_hosts.iter().map(String::as_str).collect();
+            hosts.sort_unstable();
+            hosts.dedup();
+            let hosts: Vec<String> = hosts.iter().map(|h| format!("`{h}`")).collect();
+            out.push_str(
+                "The steps run in a container on that machine: a read-only system, no added privileges, and only the instance's own directories mounted (not the owner's home or keys). ",
+            );
+            if hosts.is_empty() {
+                out.push_str("Outbound connections are limited to: none. ");
+            } else {
+                out.push_str(&format!(
+                    "Outbound connections are limited to: {}. ",
+                    hosts.join(", ")
+                ));
+            }
+            out.push_str(
+                "Hires of every listing on that machine share the container and are kept apart by working directories only.\n\n",
+            );
+        }
+    }
     out
 }
 
@@ -409,6 +435,7 @@ mod tests {
             compaction_enabled: Known::Yes(false),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            sandbox: None,
         }
     }
 
@@ -678,6 +705,78 @@ mod tests {
             text.contains("The steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented."),
             "the no-sandbox sentence appears: {text}"
         );
+    }
+
+    fn sandboxed(facts: ExecutionFacts) -> ExecutionFacts {
+        ExecutionFacts {
+            sandbox: Some(SandboxFact {
+                allowed_hosts: vec!["cloud-api.near.ai".into(), "github.com".into()],
+            }),
+            ..facts
+        }
+    }
+
+    /// Task 1.2 (spec `privacy-tiers`, Unchanged fingerprint): facts
+    /// without a sandbox fact serialize without the field and keep the
+    /// fingerprint main computed; a sandbox fact moves it.
+    #[test]
+    fn facts_without_a_sandbox_keep_the_fingerprint() {
+        let facts = attested_facts();
+        let json = serde_json::to_string(&facts).unwrap();
+        assert!(!json.contains("sandbox"), "{json}");
+        assert_eq!(fingerprint(Tier::Attested, &facts), S4_ATTESTED_FINGERPRINT);
+        assert_ne!(
+            fingerprint(Tier::Attested, &sandboxed(facts)),
+            S4_ATTESTED_FINGERPRINT
+        );
+    }
+
+    /// Scenario "No sandbox fact": the section is byte for byte the text
+    /// before change `statement-sandbox`, for both tiers.
+    #[test]
+    fn without_a_sandbox_fact_the_run_place_section_is_unchanged() {
+        const OLD: &str = "The run happens on the owner's self-hosted machine, which can read the data. The steps run without a sandbox: reading files the owner's account can read and network access the bindings above do not declare are not prevented.\n\n";
+        assert_eq!(
+            run_place_section(Tier::Plain, None),
+            format!("### Where the run happens\n\n{OLD}")
+        );
+        assert_eq!(
+            run_place_section(Tier::Attested, None),
+            format!(
+                "### Where the run happens\n\nThe model steps are configured to run on NEAR AI Cloud Confidential TEE models.\n{OLD}"
+            )
+        );
+    }
+
+    /// Scenario "Sandboxed instance": the container limits and exactly
+    /// the two hosts, sorted, appear; the no-sandbox sentence does not.
+    #[test]
+    fn a_sandboxed_statement_names_the_container_and_its_hosts() {
+        // Given out of order: the statement sorts them itself.
+        let mut facts = sandboxed(plain_premium_facts());
+        facts.sandbox = Some(SandboxFact {
+            allowed_hosts: vec!["github.com".into(), "cloud-api.near.ai".into()],
+        });
+        let text = render(Tier::Plain, &facts, 7);
+        assert!(!text.contains("run without a sandbox"), "{text}");
+        assert!(
+            text.contains("The run happens on the owner's self-hosted machine, which can read the data. The steps run in a container on that machine: a read-only system, no added privileges, and only the instance's own directories mounted (not the owner's home or keys). Outbound connections are limited to: `cloud-api.near.ai`, `github.com`. Hires of every listing on that machine share the container and are kept apart by working directories only.\n\n"),
+            "{text}"
+        );
+        assert_eq!(text.matches('`').count() % 2, 0);
+        assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'));
+    }
+
+    /// Scenario "Attested listing" with a sandbox: the TEE line and the
+    /// owner machine sentence stay.
+    #[test]
+    fn a_sandboxed_attested_statement_still_says_the_owner_machine_reads() {
+        let text = render(Tier::Attested, &sandboxed(attested_facts()), 7);
+        assert!(
+            text.contains("The model steps are configured to run on NEAR AI Cloud Confidential TEE models.\nThe run happens on the owner's self-hosted machine, which can read the data. The steps run in a container"),
+            "{text}"
+        );
+        assert!(!text.contains("run without a sandbox"), "{text}");
     }
 
     /// Scenario "Retention days": the configured days and the list of

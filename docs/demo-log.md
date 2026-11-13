@@ -146,3 +146,17 @@ sandboxed, `nearbee serve` polling.
    repo-audit-fast`: serve declined it `rejected` before any work, the task
    ended `TASK_STATE_REJECTED`, and the buyer's USDC balance was unchanged
    (8.894556 before and after), so the declined hire cost the buyer nothing.
+
+## 2026-11-13: the statement names the sandbox
+
+After the change `statement-sandbox` the fast listing was published again
+(`nearbee list`, version 1.0.2808650427 unchanged, a new fingerprint) on the
+sandboxed instance. Its "Where the run happens" section now reads that the
+steps run in a container with a read-only system, no added privileges and
+only the instance's own directories mounted, that outbound connections are
+limited to `api.anthropic.com`, `api.github.com`, `api.openai.com`,
+`cloud-api.near.ai`, `codeload.github.com`, `github.com` and
+`objects.githubusercontent.com`, and that hires share the container. The
+TEE response signature of the paid hire `dbfbe061` was checked locally: the
+address recovered from the signature over the signed text is the signing
+address in the deliverable (`0xfe0071895500a9755c18044948ab4f4e1a7f337e`).

@@ -11,6 +11,7 @@
 use nearbee_core::runner::{PlaybookId, RunnerError};
 use nearbee_core::tiers::{
     ExecutionFacts, ExecutorFact, Known, NodeFact, ProfileFact, ProfileRef, ProviderRoute,
+    SandboxFact,
 };
 use yaml_serde::Value as Yaml;
 
@@ -272,6 +273,122 @@ pub(crate) fn redirecting_variable(show: &str) -> Option<String> {
     })
 }
 
+/// The `docker run` options that take a value, as the sandbox unit and
+/// its generator write them. Any other option makes the command line
+/// unparsable, so it gives no sandbox fact.
+const DOCKER_RUN_VALUE_FLAGS: [&str; 22] = [
+    "--name",
+    "--network",
+    "--ip",
+    "--dns",
+    "--add-host",
+    "--user",
+    "-u",
+    "--tmpfs",
+    "--cap-drop",
+    "--security-opt",
+    "--pids-limit",
+    "--memory",
+    "-m",
+    "--cpus",
+    "--mount",
+    "-e",
+    "--env",
+    "--label",
+    "-l",
+    "-w",
+    "--workdir",
+    "--stop-timeout",
+];
+
+/// The `docker run` options without a value the sandbox may carry.
+const DOCKER_RUN_BOOL_FLAGS: [&str; 3] = ["--rm", "--read-only", "--init"];
+
+/// The image the sandbox runs, before the `:<tag>`.
+const SANDBOX_IMAGE: &str = "nearbee-sandbox";
+
+/// The sandbox fact of `systemctl show -p ExecStart` output (spec
+/// `privacy-tiers`, Sandbox fact): the `argv[]=` part up to ` ;`, split
+/// on spaces, must be a `docker run` of a `nearbee-sandbox:<tag>` image
+/// with `--read-only`, `--cap-drop ALL`, `--security-opt
+/// no-new-privileges`, `--dns 127.0.0.1` and a `--network` other than
+/// `host`; the hosts are the `--add-host` names, sorted and deduplicated.
+/// An option outside the known sets (`--privileged` and `--cap-add`
+/// among them) or anything else gives `None`.
+pub(crate) fn sandbox_fact(show: &str) -> Option<SandboxFact> {
+    let start = show.find("argv[]=")? + "argv[]=".len();
+    let rest = &show[start..];
+    let argv = &rest[..rest.find(" ;")?];
+    let mut tokens = argv.split(' ').filter(|t| !t.is_empty());
+    let program = tokens.next()?;
+    if program != "docker" && !program.ends_with("/docker") {
+        return None;
+    }
+    if tokens.next()? != "run" {
+        return None;
+    }
+    let mut options: Vec<(String, Option<String>)> = Vec::new();
+    let image = loop {
+        let token = tokens.next()?;
+        if !token.starts_with('-') {
+            break token;
+        }
+        let (flag, inline) = match token.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_owned())),
+            _ => (token, None),
+        };
+        if DOCKER_RUN_BOOL_FLAGS.contains(&flag) {
+            if inline.is_some() {
+                return None;
+            }
+            options.push((flag.to_owned(), None));
+        } else if DOCKER_RUN_VALUE_FLAGS.contains(&flag) {
+            let value = match inline {
+                Some(v) => v,
+                None => tokens.next()?.to_owned(),
+            };
+            options.push((flag.to_owned(), Some(value)));
+        } else {
+            return None;
+        }
+    };
+    match image.split_once(':') {
+        Some((name, tag)) if name == SANDBOX_IMAGE && !tag.is_empty() => {}
+        _ => return None,
+    }
+    let has = |flag: &str, value: Option<&str>| {
+        options
+            .iter()
+            .any(|(f, v)| f == flag && v.as_deref() == value)
+    };
+    if !has("--read-only", None)
+        || !has("--cap-drop", Some("ALL"))
+        || !has("--security-opt", Some("no-new-privileges"))
+        || !has("--dns", Some("127.0.0.1"))
+    {
+        return None;
+    }
+    let networks: Vec<&str> = options
+        .iter()
+        .filter(|(f, _)| f == "--network")
+        .filter_map(|(_, v)| v.as_deref())
+        .collect();
+    if networks.is_empty() || networks.iter().any(|n| *n == "host" || n.is_empty()) {
+        return None;
+    }
+    let mut allowed_hosts = Vec::new();
+    for (_, value) in options.iter().filter(|(f, _)| f == "--add-host") {
+        let (host, _ip) = value.as_deref()?.split_once([':', '='])?;
+        if host.is_empty() {
+            return None;
+        }
+        allowed_hosts.push(host.to_owned());
+    }
+    allowed_hosts.sort();
+    allowed_hosts.dedup();
+    Some(SandboxFact { allowed_hosts })
+}
+
 /// The provider routes of an `opencode.json` text, sorted by name; `Err`
 /// with the reason when it does not parse or has no provider object.
 pub(crate) fn parse_routes(text: &str) -> Result<Vec<ProviderRoute>, String> {
@@ -394,11 +511,28 @@ impl ApbRunner {
     /// read (the program cannot run, a non-zero exit, a signal) fails the
     /// inspection: it says nothing about the configuration.
     pub(crate) async fn instance_env(&self) -> Result<String, RunnerError> {
+        self.show_unit("Environment")
+            .await
+            .map_err(|detail| RunnerError::Protocol {
+                detail: format!("the instance environment cannot be read: {detail}"),
+            })
+    }
+
+    /// The sandbox the instance runs in, from `systemctl --user show
+    /// nearbee-apb -p ExecStart` (spec `privacy-tiers`, Sandbox fact).
+    /// Best effort: a failed read gives `None`, never a failed inspection.
+    pub(crate) async fn sandbox(&self) -> Option<SandboxFact> {
+        sandbox_fact(&self.show_unit("ExecStart").await.ok()?)
+    }
+
+    /// The output of `systemctl --user show nearbee-apb -p <property>`;
+    /// `Err` when the program cannot run, exits non-zero or is killed.
+    async fn show_unit(&self, property: &'static str) -> Result<String, String> {
         let bin = self.systemctl_bin.clone();
         let workspace = self.workspace_path.clone();
         let config_dir = self.cli_config_dir.clone();
         tokio::task::spawn_blocking(move || {
-            let borrowed = ["--user", "show", "nearbee-apb", "-p", "Environment"];
+            let borrowed = ["--user", "show", "nearbee-apb", "-p", property];
             crate::cli::run(
                 &bin,
                 &borrowed,
@@ -410,7 +544,7 @@ impl ApbRunner {
             .map_err(|e| e.to_string())
         })
         .await
-        .map_err(|e| format!("the instance environment task failed: {e}"))
+        .map_err(|e| format!("the systemctl task failed: {e}"))
         .and_then(|r| r)
         .and_then(|out| {
             if out.status == Some(0) {
@@ -424,9 +558,6 @@ impl ApbRunner {
                     out.stderr.trim()
                 ))
             }
-        })
-        .map_err(|detail| RunnerError::Protocol {
-            detail: format!("the instance environment cannot be read: {detail}"),
         })
     }
 
@@ -608,6 +739,106 @@ impl ApbRunner {
             compaction_enabled: self.compaction().await?,
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            sandbox: self.sandbox().await,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The argv shape measured on the running `nearbee-apb` unit
+    /// (2026-11-13), with the machine paths replaced and three hosts.
+    fn sandbox_argv(drop: &str) -> String {
+        let argv = [
+            "/usr/bin/docker run --rm --name nearbee-apb-sbx",
+            "--network nearbee-sbx-int --ip 172.30.77.3 --dns 127.0.0.1",
+            "--add-host github.com:172.30.77.2",
+            "--add-host cloud-api.near.ai:172.30.77.2",
+            "--add-host api.anthropic.com:172.30.77.2",
+            "--add-host github.com:172.30.77.2",
+            "--user 1000:1000 --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g",
+            "--cap-drop ALL --security-opt no-new-privileges --pids-limit 1024",
+            "--memory 4g --cpus 4",
+            "--mount type=bind,src=/srv/nb/ws,dst=/srv/nb/ws",
+            "--mount type=bind,src=/srv/nb/cfg/policy.yaml,dst=/srv/nb/cfg/policy.yaml,readonly",
+            "-e APB_CONFIG_DIR -e HOME -e NEARAI_API_KEY",
+            "--label nearbee.config-dir=/srv/nb/cfg -w /srv/nb/ws",
+            "nearbee-sandbox:local apb dashboard --no-open --bind 0.0.0.0 --port 7322",
+        ]
+        .join(" ");
+        let argv = if drop.is_empty() {
+            argv
+        } else {
+            argv.replacen(drop, "", 1)
+        };
+        format!(
+            "ExecStart={{ path=/usr/bin/docker ; argv[]={argv} ; ignore_errors=no ; start_time=[Fri 2026-11-13 13:40:27 CET] ; stop_time=[n/a] ; pid=975921 ; code=(null) ; status=0/0 }}"
+        )
+    }
+
+    #[test]
+    fn the_sandbox_argv_gives_the_sorted_hosts() {
+        let fact = sandbox_fact(&sandbox_argv("")).expect("the sandbox argv is a sandbox");
+        assert_eq!(
+            fact.allowed_hosts,
+            vec!["api.anthropic.com", "cloud-api.near.ai", "github.com"]
+        );
+    }
+
+    #[test]
+    fn a_missing_limit_gives_no_fact() {
+        for drop in [
+            "--read-only ",
+            "--cap-drop ALL ",
+            "--security-opt no-new-privileges ",
+            "--dns 127.0.0.1 ",
+            "--network nearbee-sbx-int ",
+        ] {
+            assert_eq!(sandbox_fact(&sandbox_argv(drop)), None, "without {drop}");
+        }
+    }
+
+    #[test]
+    fn another_image_or_command_gives_no_fact() {
+        let other_image = sandbox_argv("").replace("nearbee-sandbox:local", "debian:13");
+        assert_eq!(sandbox_fact(&other_image), None);
+        let bare_name = sandbox_argv("").replace("nearbee-sandbox:local", "nearbee-sandbox");
+        assert_eq!(sandbox_fact(&bare_name), None);
+        let not_run = sandbox_argv("").replace("/usr/bin/docker run", "/usr/bin/docker create");
+        assert_eq!(sandbox_fact(&not_run), None);
+        let not_docker = sandbox_argv("").replace("/usr/bin/docker run", "/usr/bin/podman run");
+        assert_eq!(sandbox_fact(&not_docker), None);
+        let plain = "ExecStart={ path=/home/u/.cargo/bin/apb ; argv[]=/home/u/.cargo/bin/apb dashboard --no-open --port 7322 ; ignore_errors=no ; status=0/0 }";
+        assert_eq!(sandbox_fact(plain), None);
+        assert_eq!(sandbox_fact(""), None);
+        assert_eq!(sandbox_fact("Environment=XDG_CONFIG_HOME=/x"), None);
+    }
+
+    #[test]
+    fn a_widening_flag_or_host_network_gives_no_fact() {
+        for (from, to) in [
+            ("--read-only", "--read-only --privileged"),
+            ("--cap-drop ALL", "--cap-drop ALL --cap-add NET_ADMIN"),
+            ("--network nearbee-sbx-int", "--network host"),
+            ("--user 1000:1000", "--user 1000:1000 --unknown-flag x"),
+        ] {
+            let argv = sandbox_argv("").replacen(from, to, 1);
+            assert_eq!(sandbox_fact(&argv), None, "with {to}");
+        }
+    }
+
+    #[test]
+    fn the_equals_form_of_a_flag_counts() {
+        let argv = sandbox_argv("")
+            .replacen("--cap-drop ALL", "--cap-drop=ALL", 1)
+            .replacen(
+                "--add-host github.com:172.30.77.2",
+                "--add-host=github.com:172.30.77.2",
+                1,
+            );
+        let fact = sandbox_fact(&argv).expect("the equals form is the same flag");
+        assert_eq!(fact.allowed_hosts.len(), 3);
     }
 }
