@@ -109,6 +109,12 @@ pub struct ExecutionFacts {
     /// The listing's signed models, in order; same rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed_models: Vec<String>,
+    /// The listing's script models (`<agent>/<model>`), in order, as
+    /// declared by the owner; same rules as the direct models: filled by
+    /// the caller with [`ExecutionFacts::with_script_models`], left out of
+    /// the serialized facts when empty so older fingerprints hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub script_models: Vec<String>,
     /// The sandbox the instance runs in, when the runner found one. Left
     /// out of the serialized facts when absent, so the fingerprint of an
     /// instance without a sandbox is unchanged.
@@ -124,6 +130,13 @@ impl ExecutionFacts {
     pub fn with_direct_models(mut self, direct: &[String], signed: &[String]) -> Self {
         self.direct_models = direct.to_vec();
         self.signed_models = signed.to_vec();
+        self
+    }
+
+    /// The facts with the listing's script models, which the runner never
+    /// reports either: used next to [`ExecutionFacts::with_direct_models`].
+    pub fn with_script_models(mut self, script: &[String]) -> Self {
+        self.script_models = script.to_vec();
         self
     }
 }
@@ -217,6 +230,13 @@ pub fn check(tier: Tier, facts: &ExecutionFacts, catalog: &Catalog) -> Result<()
     let mut attested_breaches: Vec<String> = Vec::new();
     // An attested listing runs script nodes only: its model calls are
     // Nearbee's own direct and signed calls (S6 design 4.1).
+    // Script models (spec `privacy-tiers`, Script models are plain only):
+    // Nearbee cannot check a script's own CLI call.
+    if tier == Tier::Attested && !facts.script_models.is_empty() {
+        attested_breaches.push(
+            "script_models need tier plain: a script's own CLI call cannot be checked".to_string(),
+        );
+    }
     if tier == Tier::Attested {
         for node in &facts.nodes {
             if AGENT_NODE_KINDS.contains(&node.kind.as_str()) {
@@ -491,6 +511,7 @@ mod tests {
             compaction_enabled: Known::Yes(false),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             sandbox: None,
         }
     }
@@ -538,6 +559,29 @@ mod tests {
             .unwrap_err()
             .join("\n");
         assert!(err.contains("Qwen/Qwen3.8-27B"), "{err}");
+    }
+
+    /// Spec `privacy-tiers`, Script models are plain only: an attested
+    /// listing with any script model is refused naming `script_models` and
+    /// tier plain; a plain listing accepts it.
+    #[test]
+    fn script_models_need_tier_plain() {
+        let (facts, catalog) = script_only_setup();
+        assert_eq!(check(Tier::Attested, &facts, &catalog), Ok(()));
+        let scripted = facts.with_script_models(&["claude/claude-opus-5-5".to_string()]);
+        let err = check(Tier::Attested, &scripted, &catalog)
+            .unwrap_err()
+            .join("\n");
+        assert!(
+            err.contains("script_models") && err.contains("tier plain"),
+            "{err}"
+        );
+        assert_eq!(check(Tier::Plain, &scripted, &catalog), Ok(()));
+        // Script models are not endpoint evidence: Nearbee never calls them.
+        assert_eq!(
+            evidence_models(&scripted),
+            evidence_models(&script_only_setup().0)
+        );
     }
 
     /// The evidence set includes the direct models (task 3.1).

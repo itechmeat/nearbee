@@ -252,7 +252,8 @@ pub async fn publish(
         .inspect_source(&materialised)
         .await
         .map_err(|e| PublishError::Other(format!("the source facts cannot be read: {e}")))?
-        .with_direct_models(&l.direct_models, &l.signed_models);
+        .with_direct_models(&l.direct_models, &l.signed_models)
+        .with_script_models(&l.script_models);
     check_tier(tier, &source_facts, catalog, "before installing")?;
     let materialised_for_task = materialised.clone();
     let scripts_for_task = scripts.clone();
@@ -270,7 +271,8 @@ pub async fn publish(
         .inspect(&PlaybookId::new(handle.clone()))
         .await
         .map_err(|e| PublishError::Other(format!("the installed facts cannot be read: {e}")))?
-        .with_direct_models(&l.direct_models, &l.signed_models);
+        .with_direct_models(&l.direct_models, &l.signed_models)
+        .with_script_models(&l.script_models);
     check_tier(tier, &installed_facts, catalog, "after installing")?;
     let source_fingerprint = statement::fingerprint(tier, &source_facts);
     let fingerprint = statement::fingerprint(tier, &installed_facts);
@@ -322,6 +324,7 @@ pub async fn publish(
         evidence_models,
         direct_models: l.direct_models.clone(),
         signed_models: l.signed_models.clone(),
+        script_models: l.script_models.clone(),
         published_at: time::OffsetDateTime::now_utc(),
     };
     listing::write_resolved(state_dir, &resolved).map_err(PublishError::Other)?;

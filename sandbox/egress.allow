@@ -12,3 +12,5 @@ objects.githubusercontent.com
 # Agent CLIs with an API key or token.
 api.anthropic.com
 api.openai.com
+# DeepSeek Harness on the z.ai provider (ZAI_API_KEY).
+api.z.ai

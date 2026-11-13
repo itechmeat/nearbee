@@ -470,6 +470,52 @@ yet; each execution records their token usage in
 `digest/<execution_id>/usage.json` (worst case under 0.20 USD per hire,
 design 8).
 
+## Script models (change `script-models`)
+
+A playbook's script steps may call a model through the owner's agent CLI
+(ux-flow runs `claude -p` on the owner's Claude subscription). Nearbee does
+not see such a call, so the listing declares it:
+`script_models: [claude/claude-opus-5-5, dsh/zai/glm-5.3-flash]`, a list
+of `<agent>/<model>` entries kept in order. `<agent>` is any agent CLI
+name of lowercase letters, digits and `-` (amendment 2026-11-13: agents
+are not tied to one CLI); `<model>` is non-empty without whitespace, and
+without a further `/` for `claude` and `codex` (other agents may name a
+provider route). A malformed or duplicated entry is refused naming it.
+
+1. Tier: plain only. An attested listing with any entry is refused with
+   "script_models need tier plain: a script's own CLI call cannot be
+   checked".
+2. Statement: after the direct section the statement adds, word for word:
+
+   ```
+   ### Script model calls
+
+   The playbook's script steps call these models through the owner's agent CLIs, as declared by the owner in the listing (Nearbee does not observe these calls):
+
+   - `claude`, model `claude-opus-5-5`: the owner's Claude subscription (Anthropic).
+   ```
+
+   Each line uses the Models section's per-agent wording. A `dsh` entry
+   reads, for `dsh/zai/glm-5.3-flash`:
+
+   ```
+   - `dsh` (DeepSeek Harness), model `zai/glm-5.3-flash`: through the owner's own provider account `zai`.
+   ```
+
+   (without a route, the line ends at "provider account."). An `opencode`
+   entry, and any agent without its own wording, gets the generic "agent
+   `<agent>`, model ..." line, never the checked TEE wording. The fingerprint covers the list in order; a
+   listing without it keeps its statement and fingerprint byte for byte.
+   Script models are not endpoint evidence: Nearbee never calls them.
+3. Run param: the list is frozen with the generation's statement snapshot
+   and reaches the run as the reserved `script_models` param (a JSON list,
+   like `direct_models`), so a script can refuse a model the listing did
+   not declare.
+4. Sign-in failure: a script step whose model sign-in fails (an expired or
+   revoked token) exits non-zero; Nearbee then declines the hire `failed`,
+   which refunds the buyer in full (`docs/market.md`, decline). A listing
+   never switches to another provider.
+
 ## Deletion inventory (as built in S3)
 
 `nearbee hires` lists every journaled hire (read only, no lock): hire id,

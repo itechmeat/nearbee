@@ -630,6 +630,7 @@ async fn a_market_failure_after_the_install_leaves_the_record_on_the_installed_v
             evidence_models: Vec::new(),
             direct_models: Vec::new(),
             signed_models: Vec::new(),
+            script_models: Vec::new(),
             published_at: time::OffsetDateTime::from_unix_timestamp(0).unwrap(),
         },
     )
@@ -880,6 +881,72 @@ async fn a_passing_publish_records_the_statement_fields() {
     assert!(fp.starts_with("sha256:"), "{fp}");
     assert_eq!(r.evidence_models, vec!["claude-haiku-5-5".to_string()]);
     only_reads(&s.server).await;
+}
+
+/// A listing file of `tier` with `script_models: [claude/claude-opus-5-5]`.
+fn listing_with_script_models(s: &Setup, tier: &str) -> PathBuf {
+    let file = listing_with_tier(s, tier, None);
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("script_models: [claude/claude-opus-5-5]\n");
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// A plain listing with script models records them, names them in the
+/// statement and moves the fingerprint (spec `listing-publish`, Script
+/// models field; spec `data-statement`, Script models in the statement).
+#[tokio::test]
+async fn a_plain_publish_records_the_script_models() {
+    let s = Setup::new().await;
+    mount_market(&s.server, old_default_plan("0.50", 86400)).await;
+    let (r, _rows) = publish(
+        &listing_with_script_models(&s, "plain"),
+        &s.env,
+        &s.store,
+        &s.state_dir(),
+        s.secrets(),
+        RETENTION,
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.script_models, ["claude/claude-opus-5-5"]);
+    let stmt = r.statement.as_ref().unwrap();
+    assert!(
+        stmt.contains("### Script model calls")
+            && stmt.contains(
+                "- `claude`, model `claude-opus-5-5`: the owner's Claude subscription (Anthropic).\n"
+            ),
+        "{stmt}"
+    );
+    // The evidence set is unchanged: Nearbee never calls a script model.
+    assert_eq!(r.evidence_models, vec!["claude-haiku-5-5".to_string()]);
+    only_reads(&s.server).await;
+}
+
+/// An attested listing with script models is refused before install,
+/// naming `script_models` and tier plain (spec `privacy-tiers`, Script
+/// models are plain only).
+#[tokio::test]
+async fn an_attested_listing_with_script_models_is_refused_before_install() {
+    let s = Setup::new().await;
+    let err = publish(
+        &listing_with_script_models(&s, "attested"),
+        &s.env,
+        &s.store,
+        &s.state_dir(),
+        s.secrets(),
+        RETENTION,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("before installing"), "{err}");
+    assert!(
+        err.contains("script_models") && err.contains("tier plain"),
+        "{err}"
+    );
+    assert!(!s.apb_state().join("installed-version.txt").exists());
+    assert!(s.server.received_requests().await.unwrap().is_empty());
 }
 
 /// A profile answer that must win over the setup's default mocks: priority

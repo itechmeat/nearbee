@@ -102,11 +102,17 @@ export APB_BIN="$PWD/scripts/apb-sandboxed"   # absolute path, for nearbee
 
 1. Image (`sandbox/Dockerfile`, `sandbox/build.sh`): Ubuntu 26.04 (the host
    release, so copied binaries find the same glibc) with git, gh, ripgrep,
-   jq, curl, python3 with PyYAML (script nodes read `$APB_RUN_DIR/run.yaml`), poppler-utils, ImageMagick, Node with OpenSpec 2.0.0
-   and OpenCodeReview 1.13.8-fork.1, Code Ranker 5.0.4, and the host's
-   `apb`, `nearbee` and self-contained `claude`, `codex` and `opencode`
-   binaries (`NEARBEE_SANDBOX_CLIS` changes the list; a CLI that is a
-   script is skipped). The image is labelled with the sha256 of the copied
+   jq, curl, python3 with PyYAML (script nodes read `$APB_RUN_DIR/run.yaml`), poppler-utils, ImageMagick, Node with OpenSpec 2.0.0,
+   OpenCodeReview 1.13.8-fork.1, the Claude Code CLI 2.1.319
+   (`@anthropic-ai/claude-code`, pinned; `DISABLE_AUTOUPDATER=1` and
+   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` set in the image) and
+   DeepSeek Harness 0.2.2-rc.3 (`@deepseek-ai/dsh`, pinned, the host
+   version), Code
+   Ranker 5.0.4, and the host's `apb`, `nearbee` and self-contained
+   `codex` and `opencode` binaries (`NEARBEE_SANDBOX_CLIS` changes the
+   list; a CLI that is a script is skipped). `claude` is left out of the
+   default list since the `script-models` change: a host binary copied
+   over the pinned one would replace its version. The image is labelled with the sha256 of the copied
    `apb` and `nearbee`; `start` refuses when the host's binary (`APB_BIN`,
    `NEARBEE_BIN` or PATH) differs and names the rebuild command.
 2. Networks: `nearbee-sbx-int` (internal, `NEARBEE_SANDBOX_SUBNET`, default
@@ -229,9 +235,22 @@ Limits, stated as they are:
    unless its cache is warm in the sandbox home: add them to
    `NEARBEE_SANDBOX_ALLOW`, or warm the cache once with them allowed.
 6. Agent CLI logins go in as API keys or tokens listed in
-   `NEARBEE_APB_ENV_VARS` (for example `CLAUDE_CODE_OAUTH_TOKEN`), never as
-   the owner's config directories; a CLI that needs more hosts than the
-   default allowlist needs them in `NEARBEE_SANDBOX_ALLOW`.
+   `NEARBEE_APB_ENV_VARS`, never as the owner's config directories; a CLI
+   that needs more hosts than the default allowlist needs them in
+   `NEARBEE_SANDBOX_ALLOW`. A script step that runs `claude -p` (a listing
+   with `script_models`, `docs/privacy.md`) gets the owner's subscription
+   token this way, `api.anthropic.com` already being in
+   `sandbox/egress.allow`. A script step that runs `dsh` on the z.ai
+   provider (`dsh/zai/...`) gets the owner's provider key the same way,
+   `api.z.ai` being in `sandbox/egress.allow` since the amendment of
+   2026-11-13; the agent brings its own dsh profile (no credentials
+   plugin, the provider key from the environment):
+
+   ```bash
+   # .env holds CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and ZAI_API_KEY
+   export NEARBEE_APB_ENV_VARS="NEARAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN ZAI_API_KEY"
+   scripts/apb-instance.sh start
+   ```
 
 ## REST endpoints Nearbee uses
 
