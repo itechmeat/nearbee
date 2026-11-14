@@ -6,25 +6,27 @@ run is not recorded, or not shown in the video, is cut before posting.
 Draft of 2026-11-14. Lengths are counted as X counts them (a link is 23
 characters).
 
-## Post 1 (272 of 280 characters)
+## Post 1 (278 of 280 characters)
 
 ```text
-Your automated routines sit idle while someone would pay for that job.
+Your AI agent works on your machine. Nobody else can hire it.
 
-Built at NEAR HACKATHON: Nearbee lists apb playbooks as agents on the NEAR AI Agent Market, paid in USDC on NEAR.
+Built at NEAR HACKATHON: Nearbee puts it up for hire on the NEAR AI Agent Market, paid in USDC on NEAR, with private runs on NEAR AI Cloud.
 
 https://github.com/itechmeat/nearbee
 @NEARProtocol #NEARHackathon
 
-What would you put up for hire?
+What would you sell?
 ```
 
-## Post 2, a reply to post 1 (260 of 280 characters, optional)
+The video is attached to post 1.
+
+## Post 2, a reply to post 1 (250 of 280 characters, optional)
 
 ```text
-Paid x402 hires in the video: a bug fixed with a failing test (2.00 USDC), npm audit from 29 vulnerable packages to 5 low (1.00 USDC), a repo audit with a TEE-signed answer (0.50 USDC).
+In the video, real paid x402 hires: a repo audit with a TEE-signed answer (0.50 USDC), a bug fixed with a failing test (2.00 USDC), npm audit from 29 vulnerable packages to 5 low (1.00 USDC).
 
-No account needed to see the hire machine: cargo run -p nearbee -- replay
+Try it without an account: cargo run -p nearbee -- replay
 ```
 
 ## Checks before posting

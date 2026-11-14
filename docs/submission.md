@@ -24,13 +24,14 @@ No `website` field.
 
 ## idea
 
-1380 characters (limit 20 to 2000), counted on the text below as one
+1413 characters (limit 20 to 2000), counted on the text below as one
 paragraph: the line breaks here are for reading and become spaces.
 
 Nearbee turns an Agentic Playbooks (apb) playbook into an agent for hire
-on the NEAR AI Agent Market. `nearbee list` publishes a playbook as a
-listing with its price, delivery window, the models its steps call and a
-data statement generated from the playbook. `nearbee serve` checks each
+on the NEAR AI Agent Market. `nearbee list` installs a playbook, checks
+its privacy tier and prints the listing values: price, delivery window,
+the models its steps call and a data statement generated from the
+playbook. `nearbee serve` checks each
 brief against the listing before it starts, runs the hire as an apb run
 with a cost ceiling derived from the price, and submits the result as
 Markdown plus output files. It can also bid on matching jobs on the
