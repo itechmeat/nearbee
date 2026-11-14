@@ -64,6 +64,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// List the journaled hires (read only, no lock).
     Hires(HiresArgs),
+    /// List the bid journal of the board bidder (read only, no lock).
+    Bids(BidsArgs),
     /// Delete the files of hires past their retention (takes the serve
     /// lock).
     Cleanup(CleanupArgs),
@@ -134,6 +136,13 @@ pub enum AuditAction {
     /// Check `audit/candidates.json` against the snapshot and write
     /// `out/findings.json`, `out/deliverable.md` and `out/result.json`.
     Finish,
+}
+
+#[derive(Debug, Args)]
+pub struct BidsArgs {
+    /// Print JSON instead of a table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -294,6 +303,7 @@ pub async fn run(cli: Cli, env: &Env<'_>, out: &mut dyn Write) -> i32 {
         Command::List(args) => publish_list(cli.config.as_deref(), args, env, out).await,
         Command::Serve(args) => serve(cli.config.as_deref(), args, env, out).await,
         Command::Hires(args) => hires(cli.config.as_deref(), args, env, out),
+        Command::Bids(args) => bids(cli.config.as_deref(), args, env, out),
         Command::Cleanup(args) => cleanup(cli.config.as_deref(), args, env, out),
         Command::Audit {
             action: AuditAction::Fetch,
@@ -602,6 +612,20 @@ pub async fn config_check(file: Option<&Path>, env: &Env<'_>, out: &mut dyn Writ
             line("missing", format!("{} ({kind}): {}", v.name, v.purpose));
         }
     }
+    if let Some(b) = &cfg.board {
+        line(
+            "ok",
+            format!(
+                "board: a pass every {} s within {} s, owner verification {}",
+                b.interval_secs,
+                b.pass_budget_secs,
+                b.owner_verification.as_str()
+            ),
+        );
+        for (handle, l) in &b.listings {
+            line("ok", format!("board {handle}: {}", board_settings_text(l)));
+        }
+    }
     let client = match ApbClient::new(apb_options(&cfg, env)) {
         Ok(c) => c,
         Err(e) => {
@@ -659,6 +683,33 @@ pub async fn config_check(file: Option<&Path>, env: &Env<'_>, out: &mut dyn Writ
         }
     }
     i32::from(failed)
+}
+
+/// One board listing's settings as `config check` prints them.
+fn board_settings_text(l: &nearbee_core::config::BoardListing) -> String {
+    let query = l
+        .query
+        .as_deref()
+        .map(|q| format!("query {q:?}"))
+        .unwrap_or_else(|| "no query".to_owned());
+    let amount = l
+        .amount_usd
+        .map(|a| format!("USDC {}", nearbee_core::board::amount_text(a)))
+        .unwrap_or_else(|| "the listing price".to_owned());
+    let sla = l
+        .sla_seconds
+        .map(|s| format!("{s} s"))
+        .unwrap_or_else(|| "the listing SLA".to_owned());
+    let posters = if l.poster_allowlist.is_empty() {
+        "any poster".to_owned()
+    } else {
+        format!("{} allowed posters", l.poster_allowlist.len())
+    };
+    format!(
+        "{query}, kinds {}, amount {amount}, SLA {sla}, at most {} open bids, {posters}",
+        l.kinds.join(","),
+        l.max_open_bids
+    )
 }
 
 /// `nearbee runs find`.
@@ -1126,6 +1177,10 @@ pub async fn serve_loop(
     let mut round_state = nearbee_core::serve::RoundState::default();
     let clock = nearbee_core::serve::Clock::real();
     let interval = std::time::Duration::from_secs(opts.poll_interval_secs);
+    // The board bidder (change `board-bids`): its own cadence, never
+    // faster than the poll interval, after the hire round.
+    let mut bidder = nearbee_core::board::BidderState::default();
+    let mut next_bid_at = std::time::Instant::now();
     loop {
         // The cadence is counted from each round's start (spec
         // `hire-serving`, Polling; C14).
@@ -1249,6 +1304,38 @@ pub async fn serve_loop(
                 }
             }
         }
+        if let Some(board) = &cfg.board
+            && std::time::Instant::now() >= next_bid_at
+        {
+            next_bid_at =
+                round_started + interval.max(std::time::Duration::from_secs(board.interval_secs));
+            // An award shows as an assignment on the job: the job ids of
+            // each listing's rows from this round's read (none when the
+            // read failed).
+            let assigned: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+                reads
+                    .iter()
+                    .map(|(ctx, rows, _)| {
+                        (
+                            ctx.handle.clone(),
+                            rows.iter().filter_map(|r| r.job_id.clone()).collect(),
+                        )
+                    })
+                    .collect();
+            bid_pass(
+                cfg,
+                board,
+                &contexts,
+                store,
+                &stopped,
+                &runner,
+                &mut bidder,
+                &assigned,
+                env,
+                out,
+            )
+            .await;
+        }
         round += 1;
         if contexts.is_empty() && !nearbee_core::serve::local_work_outstanding(&cfg.state_dir) {
             out.line(&format!("{nothing_to_serve}: the local work is settled"));
@@ -1258,6 +1345,90 @@ pub async fn serve_loop(
             return 0;
         }
         tokio::time::sleep(time_to_next_round(interval, round_started.elapsed())).await;
+    }
+}
+
+/// One bidder pass over every listing of the board block (spec
+/// `board-bidding`): each with its own market client and token; a listing
+/// that is not served (no resolved record or no credentials) is reported
+/// and skipped. Every decision is printed as one line.
+#[allow(clippy::too_many_arguments)]
+async fn bid_pass<R: Runner>(
+    cfg: &Config,
+    board: &nearbee_core::config::BoardConfig,
+    contexts: &std::collections::BTreeMap<String, nearbee_core::serve::ListingContext>,
+    store: &nearbee_core::credentials::Store,
+    stopped: &std::collections::BTreeSet<String>,
+    runner: &R,
+    bidder: &mut nearbee_core::board::BidderState,
+    assigned: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    env: &Env<'_>,
+    out: &mut Lines<'_>,
+) {
+    let clock = nearbee_core::serve::Clock::real();
+    // One time budget for the whole pass over every listing, so awards and
+    // the first-hour decline window of the next hire round are not held
+    // back (spec `board-bidding`, Pass time budget).
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(board.pass_budget_secs);
+    for (handle, settings) in &board.listings {
+        if stopped.contains(handle) {
+            continue;
+        }
+        if std::time::Instant::now() >= deadline {
+            out.line(&format!(
+                "bid {handle}: skipped: {} of this pass",
+                nearbee_core::board::BUDGET_SPENT
+            ));
+            continue;
+        }
+        let Some(ctx) = contexts.get(handle) else {
+            out.line(&format!(
+                "bid {handle}: skipped: no served listing with credentials for this handle"
+            ));
+            continue;
+        };
+        let creds = match store.get(handle) {
+            Ok(Some(c)) => c,
+            Ok(None) => continue,
+            Err(e) => {
+                out.line(&format!("bid {handle}: credentials: {e}"));
+                continue;
+            }
+        };
+        let market = match NearAgentMarket::new(market_options(
+            market_url(env),
+            creds.token.clone(),
+            cfg.secrets(),
+        )) {
+            Ok(c) => c,
+            Err(e) => {
+                out.line(&format!("bid {handle}: market: {e}"));
+                continue;
+            }
+        };
+        let l = nearbee_core::board::BidListing {
+            ctx,
+            settings,
+            owner_verification: board.owner_verification,
+        };
+        for event in nearbee_core::board::pass(
+            &market,
+            runner,
+            &l,
+            bidder,
+            &cfg.state_dir,
+            &cfg.limits,
+            &clock,
+            nearbee_core::board::PassInputs {
+                assigned_jobs: assigned.get(handle),
+                deadline: Some(deadline),
+            },
+        )
+        .await
+        {
+            out.line(&event.to_string());
+        }
     }
 }
 
@@ -1411,6 +1582,74 @@ impl Runner for RoundRunner {
             RoundRunner::Down { .. } => Err(self.unavailable()),
         }
     }
+}
+
+/// `nearbee bids [--json]`: one line per journaled bid, read only and
+/// without the lock (spec `board-bidding`, Bids listing). No job text and
+/// no proposal text is printed: the journal holds neither.
+pub fn bids(file: Option<&Path>, args: BidsArgs, env: &Env<'_>, out: &mut dyn Write) -> i32 {
+    let mut out = Lines::new(out);
+    let cfg = match load(file, env) {
+        Ok(c) => c,
+        Err(e) => {
+            out.line(&format!("error: config: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    out.secrets = cfg.secrets();
+    let all = match nearbee_core::board::list_bids(&cfg.state_dir) {
+        Ok(a) => a,
+        Err(e) => {
+            out.line(&format!("error: bids: {e}"));
+            return EXIT_ERROR;
+        }
+    };
+    let ts = |t: &time::OffsetDateTime| {
+        t.format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
+    };
+    if args.json {
+        let rows: Vec<serde_json::Value> = all
+            .iter()
+            .map(|r| match r {
+                Ok(b) => serde_json::json!({
+                    "listing": b.handle,
+                    "job_id": b.job_id,
+                    "amount": b.amount,
+                    "sla_seconds": b.sla_seconds,
+                    "state": b.state(),
+                    "bid_id": b.bid_id,
+                    "updated_at": ts(&b.last_at),
+                }),
+                Err(e) => serde_json::json!({ "unreadable": e }),
+            })
+            .collect();
+        out.line(&serde_json::to_string_pretty(&rows).expect("bids serialize"));
+        return 0;
+    }
+    if all.is_empty() {
+        out.line(&format!(
+            "no journaled bids in {}",
+            cfg.state_dir.join("bids").display()
+        ));
+        return 0;
+    }
+    out.line("listing\tjob\tamount USDC\tSLA s\tstate\tupdated");
+    for r in &all {
+        match r {
+            Ok(b) => out.line(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                b.handle,
+                b.job_id,
+                b.amount,
+                b.sla_seconds,
+                b.state(),
+                ts(&b.last_at)
+            )),
+            Err(e) => out.line(&format!("unreadable: {e}")),
+        }
+    }
+    0
 }
 
 /// `nearbee hires [--json]`: one line per journaled hire, read only and

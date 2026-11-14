@@ -134,6 +134,8 @@ POST /v1/assignments/{id}/decline         {"reason":"rejected"|"failed","detail"
   `POST /v1/jobs/{id}/bids {"amount","proposal","slaSeconds"?}`; rows carry
   `minBuilderVerification` (none, verified, identity_verified). Competitions:
   `POST /v1/jobs/{id}/entries`, judged by the platform after the deadline.
+  Nearbee bids since the change `board-bids` (D-028); the facts it builds
+  on are in "Job board and bids" below.
 
 ## Buyer side
 
@@ -358,6 +360,90 @@ What it relies on, from the vendored worker skill and the OpenAPI:
    (`400 invalid_file_type` on the reserve or the complete); serve declines
    the hire `failed` naming the code.
 
+## Job board and bids (change `board-bids`, 2026-11-14)
+
+Sources: the OpenAPI refreshed on 2026-11-14 (vendored in
+`docs/reference/market-openapi.json`), the worker skill 0.67.0
+(`/skill/SKILL.md`, `/skill/flows/worker-lifecycle.md` section 2) and
+read-only measurements with the agent tokens of the owner's listings on
+2026-11-14 (GET only; no bid, job or hire was written).
+
+Changes in the OpenAPI since the 2026-11-09 copy that touch Nearbee: the
+board answers `JobView` (a `Job` plus `creator {accountId, displayName,
+avatarUrl}` and `quoteState`); `Job` gained the quote request fields
+(`invitedAgentId`, `pricingPlanId`, `quoteDeadlineAt`, `quoteDeclineNote`,
+`quoteOutcome`); `Bid` and `PlaceBidRequest` gained `validUntil` and
+`revisedAt` (quotes only); `PricingModel` gained `quote`;
+`OwnerAgentView` now requires `payable_with`. New routes: `PATCH
+/v1/bids/{id}` (revise a quote once), `POST /v1/jobs/{id}/decline`
+(decline a quote request), accounts and invitations. The contract test
+caught the two required-field and enum changes; the wire types follow
+them.
+
+| Call | Request | Answer |
+| --- | --- | --- |
+| `GET /v1/jobs/board?q=&kind=&sort=&limit=&offset=` | none | `ListBoardJobsResponse` `{"jobs": [JobView]}`; `limit` 1 to 100 (default 50); `kind` is `standard`, `instant` or `competition`; with an `aat_` token the agent's own open quote requests come first on page one when there is no `q` |
+| `GET /v1/agents/me/bids?status=&live=&limit=&offset=` | none | `MyBidsResponse` `{"bids": [Bid], "total"}`; `status` defaults to `pending`, `all` lists every status; `live=true` only with `pending` |
+| `POST /v1/jobs/{id}/bids` | `PlaceBidRequest` `{amount, proposal, slaSeconds?}`; no `agentId` with an agent token (a mismatch is 400) | 201 `Bid` `{bidId, jobId, bidderAgentId, amount, proposal, verifiableOffered, status, slaSeconds?, createdAt, updatedAt}` |
+| `GET /v1/jobs/{id}/bids` | none | creator only; an agent token that did not post the job got `401 unauthorized` on 2026-11-14 (the OpenAPI says 404) |
+
+Facts the bidder relies on:
+
+1. Job fields: `jobId`, `creatorAccountId` (and `creator.accountId`, the
+   same value on every row measured), `title`, `description` (up to 9,997
+   characters on the measured board), `tags`, `budgetAmount` (nullable
+   decimal string; 8 of 40 rows had none, others ranged from `0.0100` to
+   `1000000000`), `budgetToken` (`USDC` 35, `USD` 5), `jobKind`
+   (`standard` 36, `instant` 4), `status` (`open` 35, `filling` 5),
+   `maxSlots` and `currentMaxSlots`, `minBuilderVerification` (`none` 39,
+   `verified` 1), `isTestRun`, `isPrivate` (false on every public row), `requiresVerifiable`
+   (required on `Job`; Nearbee skips such a job, it offers no verifiable
+   delivery),
+   `acceptanceWindowDays`. **No deadline field** for standard jobs (only
+   `entriesCloseAt` on competitions and `quoteDeadlineAt` on quotes) and
+   **no attachments** on the row: `GET /v1/jobs/{id}/attachments` lists
+   them while the job is open, and the award row embeds them.
+2. The poster is on every row, so a poster allowlist by account id works.
+3. Throttling: a `408`, a `429` or another 4xx with `Retry-After` on a
+   bid is not a refusal; Nearbee keeps the intent open and sends the bid
+   again on a later pass. `GET /v1/jobs/{job_id}/attachments` answers
+   `429` to too many brief reads by a non-party (OpenAPI).
+4. Refusals of a bid: `409 duplicate_bid` (one bid per job),
+   `409 cluster_already_in_job` (another agent of the same owner, or of
+   an account sharing the owner's GitHub or X, holds a bid, slot or entry
+   on the job), `400 builder_verification_required`, `400
+   usd_not_accepted` (a `USD` job needs Stripe on the owner's account),
+   `400 validation_error` (a bid on a competition), and `400 own_job`,
+   which the OpenAPI lists without a description; by its name it refuses
+   a bid on a job the agent's own owner posted (not measured: no write was
+   allowed). A demo poster is therefore a second market account.
+5. The agent token cannot read the owner's verification badge; Nearbee
+   takes it from the config (`board.owner_verification`).
+6. An instant hire creates a bid too: on 2026-11-14 the agents'
+   `GET /v1/agents/me/bids?status=all` listed one `accepted` bid per
+   instant hire with the proposal "Direct hire at the listed price" and
+   `slaSeconds: null`, and the assignment rows carry its `bidId`. An award
+   on the board is the same: the bid turns `accepted` and an assignment
+   with `bidId` appears in `GET /v1/agents/me/assignments`, in the shape
+   serve already reads (`MyAssignmentItem`: brief in `job.title` and
+   `job.description`, `job.attachments`, `assignment.escrowAmount`). The
+   award freezes the bid's `slaSeconds` onto the assignment. Because
+   `status=all` grows by one bid per instant hire, the bidder reads only
+   `status=pending` and learns of an award from the assignment on the
+   job: the agent token has no read of one bid by id (`GET /v1/me/bids`
+   is the owner's account route, `GET /v1/jobs/{id}/bids` is the
+   creator's).
+7. After an award the funding can still fail (a second or two later): the
+   bid returns to `pending` and the assignment is removed or cancelled.
+   A bid on a job its owner deleted drops out of the bids list.
+8. A bid's proposal is shown to the poster with `proposalReuseCount`, the
+   number of the poster's other jobs carrying the same proposal from the
+   same agent.
+9. The poster may write on the bid's thread (`GET/POST
+   /v1/bids/{id}/messages`, 60 requests a minute per IP); nothing pushes
+   it. Nearbee does not read bid threads (change `board-bids`, out of
+   scope).
+
 ## Not yet checked (to verify before relying on it)
 
 1. Number of listings one owner may have, and any review before a listing goes
@@ -369,4 +455,7 @@ What it relies on, from the vendored worker skill and the OpenAPI:
    complete answering `200` after a PUT to `uploadUrl`: the trio itself is
    confirmed live (2026-11-10), the limits and the stored-digest answer are
    not measured. No output file has been delivered on a live hire yet.
-5. `verifiableOffered` on bids.
+5. `verifiableOffered` on bids (Nearbee never sets it).
+6. A live bid by Nearbee and its award: built against the facts above,
+   not yet run against the market (no market write was allowed while
+   building).

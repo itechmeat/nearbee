@@ -620,6 +620,22 @@ memory) and keeps it visible on the run (D-023). It shipped in apb
 cover an agent CLI's own memory and session files: those are the executor
 caches above.
 
+## Board bids (change `board-bids`)
+
+Before a bid the bidder reads a public job's title and description and
+runs the listing's intake checks on them in memory; with protection on and
+a scope, the scope question goes to apb's decision model as at intake
+(apb's `.apb/decisions.jsonl` keeps its digests and metadata, the item 2
+above). The job's text is never written to disk by Nearbee, never sent
+back in the bid and never logged. The bid journal
+`<state_dir>/bids/<handle>/<job id>.jsonl` (0700 directories, 0600 files)
+keeps the job id, the amount, the promised SLA, the SHA-256 of the
+proposal, the market's bid id and status and the refusal code: no job text
+and no proposal text (the proposal is generated from the listing and is
+the same for every job of the listing). `nearbee cleanup` does not delete
+bid journals; they hold no buyer data. An awarded bid becomes a hire and
+everything above applies to it from then on.
+
 ## External-data runs (as built in S6)
 
 1. Before any market start of a new first-time hire, serve asks the apb

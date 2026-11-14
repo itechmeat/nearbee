@@ -162,7 +162,21 @@ With Rust stable and `apb` 1.0.0-beta.7 or newer installed:
    files would be deleted and what Nearbee cannot delete; `nearbee
    cleanup` deletes them under the serve lock and journals what it removed
    (`docs/privacy.md`).
-10. `cd examples/x402-hire && npm install && node index.mjs <handle> "<task>"
+10. **Bid on the job board.** Add a `board` block to your `nearbee.yaml`
+    (the commented example is at the end of `nearbee.example.yaml`) naming
+    a served listing, a search query, the bid amount and, for a safe demo,
+    `poster_allowlist` with the market account id of the poster. `nearbee
+    config check` prints one `board <handle>:` line with what it will do.
+    `nearbee serve` then lists the board every `interval_secs` (300 by
+    default), prints one `bid <handle> <job>:` line per decision
+    (`matched`, `skipped (<reason>)`, `bid sent`, `refused (<code>)`,
+    `awarded`), and bids once per job with a proposal built from the
+    listing alone (no buyer text, no model call). `nearbee bids` lists the
+    bid journal under `.nearbee/bids/`. Post the job from a second market
+    account (the market refuses a bid on its owner's own job with
+    `own_job`), award the bid on the job's page in the web app, and the
+    award arrives as an ordinary hire that serve takes as in step 8.
+11. `cd examples/x402-hire && npm install && node index.mjs <handle> "<task>"
     --dry-run` reads an agent's 402 challenge, signs the NEP-366 delegate
     with `near-api-js` v7, verifies it locally and stops without sending
     (needs `NEAR_CALLER_ACCOUNT_ID` and `NEAR_CALLER_PRIVATE_KEY` in

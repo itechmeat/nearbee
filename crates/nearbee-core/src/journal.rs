@@ -89,6 +89,7 @@ pub enum Event {
     EvidenceCollected(EvidenceCollected),
     EvidenceFailed(EvidenceFailed),
     PrivacyFlagMissing(PrivacyFlagMissing),
+    OutputSkipped(OutputSkipped),
     Unknown {
         event_type: String,
         raw: serde_json::Value,
@@ -113,6 +114,7 @@ impl Event {
             Event::EvidenceCollected(_) => "evidence_collected",
             Event::EvidenceFailed(_) => "evidence_failed",
             Event::PrivacyFlagMissing(_) => "privacy_flag_missing",
+            Event::OutputSkipped(_) => "output_skipped",
             Event::Unknown { event_type, .. } => event_type,
         }
     }
@@ -280,6 +282,17 @@ pub struct InputFile {
     pub sha256: String,
 }
 
+/// An output file the manifest lists that serve did not deliver, with
+/// why (`empty`: the market refuses a zero-byte upload with `400
+/// invalid_byte_size`). Not an error: the rest of the result is
+/// delivered (change `board-bids`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputSkipped {
+    /// The path the manifest names, under `out/`.
+    pub path: String,
+    pub reason: String,
+}
+
 /// The hire needs the operator; cleared by a later `attention` with
 /// `code: none`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +382,7 @@ impl Record {
             Event::EvidenceCollected(p) => to_value(p),
             Event::EvidenceFailed(p) => to_value(p),
             Event::PrivacyFlagMissing(p) => to_value(p),
+            Event::OutputSkipped(p) => to_value(p),
             Event::Unknown { raw, .. } => raw.clone(),
         };
         let wire = Wire {
@@ -417,6 +431,7 @@ impl Record {
             "privacy_flag_missing" => {
                 typed(serde_json::from_value(p).map(Event::PrivacyFlagMissing))?
             }
+            "output_skipped" => typed(serde_json::from_value(p).map(Event::OutputSkipped))?,
             other => Event::Unknown {
                 event_type: other.to_owned(),
                 raw: p,

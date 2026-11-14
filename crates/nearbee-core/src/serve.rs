@@ -4095,6 +4095,19 @@ async fn finish_terminal<M: Market>(
             Ok(s) => s,
             Err(r) => return refuse(w, r),
         };
+    // Each skipped zero-byte file is journaled once per generation.
+    for path in &submission.skipped_empty {
+        let already = records.iter().any(|r| {
+            r.generation == generation
+                && matches!(&r.event, Event::OutputSkipped(o) if o.path == *path)
+        });
+        if !already {
+            w.append(Event::OutputSkipped(journal::OutputSkipped {
+                path: path.clone(),
+                reason: "empty".into(),
+            }))?;
+        }
+    }
     // Output files (design 6): each is uploaded under its own intent
     // before the Markdown that lists them is assembled; a resumed
     // delivery reuses every upload the journal shows completed.
@@ -6437,6 +6450,9 @@ struct Submission {
     outputs: Vec<OutputFile>,
     /// The links of the uploaded output files, submitted with the Markdown.
     files: Vec<String>,
+    /// The manifest paths of the zero-byte output files, not delivered
+    /// (the market refuses a zero-byte upload, `400 invalid_byte_size`).
+    skipped_empty: Vec<String>,
 }
 
 /// An output file the manifest lists, with its delivered name.
@@ -6579,7 +6595,16 @@ fn validate_deliverable(
             attention: Some(e.code()),
         }
     })?;
-    let outputs = plan_outputs(validated.files.clone(), opts)?;
+    // A zero-byte file is not delivered: the market refuses it with `400
+    // invalid_byte_size` (live, 2026-11-13), which would decline the whole
+    // hire. The skip is journaled by the caller (change `board-bids`).
+    let (empty, files): (Vec<_>, Vec<_>) = validated
+        .files
+        .iter()
+        .cloned()
+        .partition(|f| f.bytes.is_empty());
+    let skipped_empty: Vec<String> = empty.into_iter().map(|f| f.path).collect();
+    let outputs = plan_outputs(files, opts)?;
     let mut markdown = validated.markdown_text;
     let mut appended = false;
     // The Files list follows the playbook Markdown, before the signature,
@@ -6630,6 +6655,7 @@ fn validate_deliverable(
         signed_private: signed.map(|s| (s.request, s.response)),
         outputs,
         files: Vec::new(),
+        skipped_empty,
     })
 }
 

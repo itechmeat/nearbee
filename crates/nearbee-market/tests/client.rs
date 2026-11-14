@@ -1422,3 +1422,276 @@ async fn a_linked_reserve_without_a_file_url_is_refused_before_the_put() {
         requests[1].url
     );
 }
+
+// ---------------------------------------------------------------------------
+// Job board and bids (change `board-bids`)
+// ---------------------------------------------------------------------------
+
+fn board_job(i: usize) -> Value {
+    instance(
+        "JobView",
+        json!({
+            "jobId": format!("00000000-0000-4000-8000-{i:012}"),
+            "jobKind": "standard",
+            "status": "open",
+            "budgetToken": "USDC",
+        }),
+    )
+}
+
+#[tokio::test]
+async fn the_board_is_read_page_by_page_with_query_and_kind() {
+    use nearbee_core::board::Board;
+    let server = MockServer::start().await;
+    let first: Vec<Value> = (0..100).map(board_job).collect();
+    Mock::given(method("GET"))
+        .and(path("/v1/jobs/board"))
+        .and(query_param("q", "website astro"))
+        .and(query_param("kind", "standard"))
+        .and(query_param("offset", "0"))
+        .and(query_param("limit", "100"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ok_json(json!({ "jobs": first })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut last = board_job(100);
+    last["creator"] =
+        json!({ "accountId": "11111111-1111-4111-8111-111111111111", "displayName": "Poster" });
+    last["budgetAmount"] = json!("5.00");
+    Mock::given(method("GET"))
+        .and(path("/v1/jobs/board"))
+        .and(query_param("offset", "100"))
+        .respond_with(ok_json(json!({ "jobs": [last] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server, Duration::from_secs(5)).await;
+    let jobs = c
+        .board_jobs(Some("website astro"), "standard")
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 101);
+    let j = &jobs[100];
+    assert_eq!(j.creator_account_id, "11111111-1111-4111-8111-111111111111");
+    assert_eq!(j.budget_amount.as_deref(), Some("5.00"));
+    assert_eq!(j.job_kind, "standard");
+}
+
+/// Only the pending bids are read (never `status=all`, which grows with
+/// every instant hire), page by page until the total.
+#[tokio::test]
+async fn pending_bids_read_only_the_pending_status_until_the_total() {
+    use nearbee_core::board::Board;
+    let server = MockServer::start().await;
+    let bid = |job: &str| {
+        instance(
+            "Bid",
+            json!({ "jobId": job, "status": "pending", "amount": "2.000000000000" }),
+        )
+    };
+    let first: Vec<Value> = (0..100).map(|i| bid(&format!("j{i}"))).collect();
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/bids"))
+        .and(query_param("status", "pending"))
+        .and(query_param("offset", "0"))
+        .respond_with(ok_json(json!({ "bids": first, "total": 101 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/bids"))
+        .and(query_param("status", "pending"))
+        .and(query_param("offset", "100"))
+        .respond_with(ok_json(json!({ "bids": [bid("last")], "total": 101 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server, Duration::from_secs(5)).await;
+    let bids = c.pending_bids().await.unwrap();
+    assert_eq!(bids.len(), 101);
+    assert_eq!(bids[100].job_id, "last");
+    assert!(bids.iter().all(|b| b.status == "pending"));
+}
+
+/// A job's attachments are read from `GET /v1/jobs/{job_id}/attachments`.
+#[tokio::test]
+async fn a_jobs_attachments_are_read_for_the_hard_limits() {
+    use nearbee_core::board::Board;
+    let server = MockServer::start().await;
+    let job = "00000000-0000-4000-8000-000000000001";
+    let file = instance(
+        "AttachmentBrief",
+        json!({ "filename": "brief.pdf", "byteSize": 2048 }),
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/jobs/{job}/attachments")))
+        .respond_with(ok_json(instance(
+            "ListJobAttachmentsResponse",
+            json!({ "attachments": [file] }),
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server, Duration::from_secs(5)).await;
+    let files = c.job_attachments(job).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].filename, "brief.pdf");
+    assert_eq!(files[0].byte_size, 2048);
+}
+
+/// A throttled bid (429, 408, or a 4xx naming `Retry-After`) is an unknown
+/// outcome, sent once: the bidder keeps the intent open for a later pass.
+#[tokio::test]
+async fn a_throttled_bid_is_an_unknown_outcome_sent_once() {
+    use nearbee_core::board::{BidRequest, Board};
+    let server = MockServer::start().await;
+    let answers = [
+        ResponseTemplate::new(429).set_body_json(fx::refusal("rate_limited", "slow down")),
+        ResponseTemplate::new(408).set_body_string("timeout"),
+        ResponseTemplate::new(400)
+            .insert_header("Retry-After", "30")
+            .set_body_json(fx::refusal("busy", "later")),
+    ];
+    for (i, answer) in answers.into_iter().enumerate() {
+        let job = format!("00000000-0000-4000-8000-{i:012}");
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/jobs/{job}/bids")))
+            .respond_with(answer)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = client(&server, Duration::from_secs(5)).await;
+        let req = BidRequest {
+            amount: "2.00".into(),
+            proposal: "p".into(),
+            sla_seconds: 3600,
+        };
+        match c.place_bid(&job, &req).await {
+            Err(MarketError::WriteOutcomeUnknown { detail }) => {
+                assert!(detail.contains("throttled"), "{detail}");
+            }
+            other => panic!("expected an unknown outcome, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_bid_sends_amount_proposal_and_sla_without_agent_id() {
+    use nearbee_core::board::{BidRequest, Board, PlaceOutcome};
+    let server = MockServer::start().await;
+    let job = "00000000-0000-4000-8000-000000000001";
+    let answer = instance(
+        "Bid",
+        json!({ "bidId": "22222222-2222-4222-8222-222222222222" }),
+    );
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/jobs/{job}/bids")))
+        .and(body_string(
+            json!({ "amount": "2.00", "proposal": "I will do it.", "slaSeconds": 86400 })
+                .to_string(),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(answer))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server, Duration::from_secs(5)).await;
+    let req = BidRequest {
+        amount: "2.00".into(),
+        proposal: "I will do it.".into(),
+        sla_seconds: 86_400,
+    };
+    assert_eq!(
+        c.place_bid(job, &req).await.unwrap(),
+        PlaceOutcome::Placed {
+            bid_id: "22222222-2222-4222-8222-222222222222".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_duplicate_bid_reads_as_placed_and_a_refusal_keeps_its_code() {
+    use nearbee_core::board::{BidRequest, Board, PlaceOutcome};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/jobs/00000000-0000-4000-8000-000000000001/bids"))
+        .respond_with(
+            ResponseTemplate::new(409).set_body_json(fx::refusal("duplicate_bid", "already bid")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/jobs/00000000-0000-4000-8000-000000000002/bids"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(fx::refusal(
+            "builder_verification_required",
+            "verified needed",
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server, Duration::from_secs(5)).await;
+    let req = BidRequest {
+        amount: "2.00".into(),
+        proposal: "p".into(),
+        sla_seconds: 3600,
+    };
+    assert_eq!(
+        c.place_bid("00000000-0000-4000-8000-000000000001", &req)
+            .await
+            .unwrap(),
+        PlaceOutcome::Duplicate
+    );
+    match c
+        .place_bid("00000000-0000-4000-8000-000000000002", &req)
+        .await
+    {
+        Err(MarketError::Refused { status, code, .. }) => {
+            assert_eq!(status, 400);
+            assert_eq!(code, "builder_verification_required");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// An awarded board bid arrives as an ordinary assignment (change
+/// `board-bids`): `bidId` set, a `standard` job, the award's escrow. It
+/// maps onto the same row fields as an instant hire.
+#[tokio::test]
+async fn a_board_award_maps_onto_the_same_row_as_an_instant_hire() {
+    let server = MockServer::start().await;
+    let item = |id: &str, kind: &str, bid: Option<&str>| {
+        fx::assignment_item(
+            id,
+            "in_progress",
+            json!({ "bidId": bid, "escrowAmount": "2.000000000000", "escrowToken": "USDC" }),
+            json!({ "jobKind": kind, "title": "Build a site", "description": "A landing page." }),
+        )
+    };
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(ok_json(fx::assignments(vec![
+            item(
+                "board",
+                "standard",
+                Some("22222222-2222-4222-8222-222222222222"),
+            ),
+            item(
+                "instant",
+                "instant",
+                Some("33333333-3333-4333-8333-333333333333"),
+            ),
+        ])))
+        .mount(&server)
+        .await;
+    let c = client(&server, Duration::from_secs(5)).await;
+    let rows = c.assignments().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert_eq!(r.kind(), RowKind::FirstTime);
+        assert_eq!(r.status(), RowStatus::InProgress);
+        assert_eq!(r.escrow_amount.as_deref(), Some("2.000000000000"));
+        assert_eq!(r.title.as_deref(), Some("Build a site"));
+        assert_eq!(r.description.as_deref(), Some("A landing page."));
+    }
+}
