@@ -288,8 +288,8 @@ pub async fn publish(
     let statement_sha256 = sha256_hex(stmt.as_bytes());
     let evidence_models = tiers::evidence_models(&installed_facts);
 
-    // Market update: patch, then the pricing plan. The token travels only
-    // as a bearer header to the market origin.
+    // The market client for the pricing plans read below. The token
+    // travels only as a bearer header to the market origin.
     let mut redact = secrets;
     redact.push(creds.token.clone());
     let market = NearAgentMarket::new(nearbee_market::MarketOptions {
