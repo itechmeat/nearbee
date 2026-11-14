@@ -4019,6 +4019,26 @@ async fn the_run_budget_is_the_ceiling_from_the_escrow() {
     }
 }
 
+/// An awarded board bid (change `board-bids`, spec `hire-serving`, Awarded
+/// bids are hires): the market maps it onto the same row as an instant
+/// hire, with the escrow the award holds (twelve decimals on the wire),
+/// so serve takes it through intake and the run with the ceiling from
+/// that escrow.
+#[tokio::test]
+async fn a_board_award_is_served_like_an_instant_hire() {
+    let mut d = Driver::with_rows(vec![fresh_row(
+        "a1",
+        serde_json::json!({"escrowAmount": "2.000000000000", "escrowToken": "USDC"}),
+    )]);
+    d.runner = FakeRunner::new(vec!["running"]).with_decide(vec![yes("0.9")]);
+    d.run_until(|o| matches!(o, HireOutcome::Working { .. }))
+        .await;
+    let starts = d.runner.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 1);
+    let b = starts[0].budget.clone().expect("a budget");
+    assert_eq!(b.usd, Some("1.65".parse().unwrap()));
+}
+
 #[tokio::test]
 async fn protection_off_starts_without_a_budget_and_asks_nothing() {
     let mut d = Driver::with_rows(vec![fresh_row(
@@ -5754,6 +5774,51 @@ fn decline_intent_detail(dir: &Path, row_id: &str) -> String {
             _ => None,
         })
         .expect("a decline intent")
+}
+
+/// The output files the journal records as skipped, in order.
+fn skipped_outputs(dir: &Path, row_id: &str) -> Vec<String> {
+    read_journal_records(dir, row_id)
+        .records
+        .iter()
+        .filter_map(|r| match &r.event {
+            journal::Event::OutputSkipped(o) => Some(format!("{} {}", o.path, o.reason)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Spec `hire-serving`, Zero-byte output files, "Empty patch": the market
+/// refuses a zero-byte upload (`400 invalid_byte_size`, live 2026-11-13),
+/// so serve skips the empty file, journals it once and delivers the rest.
+#[tokio::test]
+async fn an_empty_output_file_is_skipped_and_the_rest_is_delivered() {
+    let mut d = files_driver(&[("docs.patch", b""), ("report.json", b"{}")]);
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload docs.patch 0"), 0);
+    assert_eq!(d.market.calls.count("upload report.json 2"), 1);
+    assert_eq!(d.market.submitted_files(0).len(), 1);
+    let md = d.market.submitted_markdown(0);
+    assert!(!md.contains("docs.patch"), "{md}");
+    assert_eq!(
+        skipped_outputs(d.dir.path(), "a1"),
+        vec!["docs.patch empty".to_owned()]
+    );
+}
+
+/// "Only an empty file": the Markdown goes out with no file.
+#[tokio::test]
+async fn an_empty_only_output_file_leaves_the_markdown_alone() {
+    let mut d = files_driver(&[("docs.patch", b"")]);
+    d.run_until(|o| matches!(o, HireOutcome::Delivered { .. }))
+        .await;
+    assert_eq!(d.market.calls.count("upload docs.patch 0"), 0);
+    assert!(d.market.submitted_files(0).is_empty());
+    assert_eq!(
+        skipped_outputs(d.dir.path(), "a1"),
+        vec!["docs.patch empty".to_owned()]
+    );
 }
 
 /// Spec `hire-serving`, Delivery, "Manifest with output files": the file

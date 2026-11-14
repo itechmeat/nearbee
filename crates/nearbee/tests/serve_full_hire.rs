@@ -1115,3 +1115,162 @@ async fn with_no_listing_loaded_the_local_work_still_settles_before_exit() {
     assert!(out.contains("nothing to serve"), "{out}");
     assert_eq!(code, 1, "{out}");
 }
+
+/// The board bidder inside `nearbee serve` (change `board-bids`): one
+/// pass per board interval, never per poll; a matching job gets exactly
+/// one bid with the configured amount and SLA, and the decision is
+/// printed without the job's text.
+#[tokio::test]
+async fn serve_bids_once_per_board_interval_on_a_matching_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let market = MockServer::start().await;
+    let apb = MockServer::start().await;
+    let ws = dir.path().join("apb-workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let store = Store::at(dir.path().join("nearbee").join("credentials"));
+    store
+        .put(
+            HANDLE,
+            AgentCredentials {
+                agent_id: "ag_123".into(),
+                token: Secret::new(TOKEN),
+            },
+        )
+        .unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(state_dir.join("listings")).unwrap();
+    std::fs::write(
+        state_dir.join("listings").join(format!("{HANDLE}.json")),
+        listing_record("1.0.0", b"playbook"),
+    )
+    .unwrap();
+    const POSTER: &str = "1729637e-8362-4026-98c3-5d597983f018";
+    let cfg_path = dir.path().join("nearbee.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "state_dir: {}\napb:\n  url: {}\n  workspace_path: {}\nboard:\n  interval_secs: 600\n  listings:\n    {HANDLE}:\n      query: audit\n      amount_usd: \"1.00\"\n      sla_seconds: 7200\n      poster_allowlist: [\"{POSTER}\"]\n",
+            state_dir.display(),
+            apb.uri(),
+            ws.display()
+        ),
+    )
+    .unwrap();
+    let projects = fixture("projects")["response"]["body"].to_string();
+    let projects: Value = serde_json::from_str(&projects.replace(
+        "<home>/.local/share/nearbee/apb-workspace",
+        &ws.to_string_lossy(),
+    ))
+    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(projects))
+        .mount(&apb)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/assignments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fx::assignments(vec![])))
+        .mount(&market)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/agents/me/bids"))
+        .and(query_param("status", "pending"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "bids": [], "total": 0 })))
+        .expect(1)
+        .mount(&market)
+        .await;
+    let job_id = "00000000-0000-4000-8000-000000000042";
+    let job = fx::instance(
+        "JobView",
+        json!({
+            "jobId": job_id,
+            "creatorAccountId": POSTER,
+            "title": "Audit my repository",
+            "description": "A distinctive-phrase-xyz brief for https://github.com/o/r",
+            "budgetAmount": "3.00",
+            "budgetToken": "USDC",
+            "jobKind": "standard",
+            "status": "open",
+            "currentMaxSlots": 1,
+            "minBuilderVerification": "none",
+            "requiresVerifiable": false,
+        }),
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/jobs/{job_id}/attachments")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "attachments": [] })))
+        .expect(1)
+        .mount(&market)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/jobs/board"))
+        .and(query_param("q", "audit"))
+        .and(query_param("kind", "standard"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jobs": [job] })))
+        .expect(1)
+        .mount(&market)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/jobs/{job_id}/bids")))
+        .and(body_partial_json(
+            json!({ "amount": "1.00", "slaSeconds": 7200 }),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(fx::instance(
+            "Bid",
+            json!({ "bidId": "33333333-3333-4333-8333-333333333333", "jobId": job_id }),
+        )))
+        .expect(1)
+        .mount(&market)
+        .await;
+
+    let cfg = config::load(
+        LoadOptions {
+            file: Some(&cfg_path),
+            cwd: dir.path(),
+        },
+        |k| (k == "HOME").then(|| "/home/u".to_owned()),
+    )
+    .unwrap();
+    let opts = ServeOptions {
+        poll_interval_secs: 0,
+        run_poll_interval: std::time::Duration::ZERO,
+        progress_every: None,
+        reject_handle: None,
+        sla_margin_minutes: 10,
+        forbidden: Vec::new(),
+        statement_retention_days: 7,
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = nearbee::Lines::new(&mut buf);
+    let (env, _) = env_of(&[("MARKET_URL", market.uri())]);
+    let code = nearbee::serve_loop(&cfg, &store, &opts, &env, &mut lines, Some(3)).await;
+    let text = String::from_utf8_lossy(&buf);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(&format!("bid {HANDLE} {job_id}: matched")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "bid {HANDLE} {job_id}: bid sent, USDC 1.00, bid 33333333-3333-4333-8333-333333333333"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("distinctive-phrase-xyz"), "{text}");
+    // The proposal sent carries no job text.
+    let requests = market.received_requests().await.unwrap();
+    let bid = requests
+        .iter()
+        .find(|r| r.method.as_str() == "POST")
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bid.body).unwrap();
+    let proposal = body["proposal"].as_str().unwrap();
+    assert!(proposal.contains(HANDLE), "{proposal}");
+    assert!(!proposal.contains("distinctive-phrase-xyz"), "{proposal}");
+    assert!(body.get("agentId").is_none());
+    let journal =
+        nearbee_core::board::read_bid(&nearbee_core::board::bid_path(&state_dir, HANDLE, job_id))
+            .unwrap()
+            .unwrap();
+    assert_eq!(journal.state(), "placed");
+}

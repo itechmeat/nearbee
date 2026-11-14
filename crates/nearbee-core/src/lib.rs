@@ -5,6 +5,7 @@
 //! `nearbee-market`) implement the traits defined here.
 
 pub mod attachments;
+pub mod board;
 pub mod catalog;
 pub mod clock;
 pub mod config;

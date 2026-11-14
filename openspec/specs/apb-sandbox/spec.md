@@ -130,3 +130,10 @@ Go and Rust SHALL stay on the image's toolchains, so a repository's `toolchain` 
 #### Scenario: pip-audit from its lock
 - **WHEN** the image is built
 - **THEN** `pip-audit` and every dependency are installed with `--require-hashes` from `sandbox/pip-audit.lock`
+
+### Requirement: socat in the image
+The sandbox image SHALL install the `socat` package, which Claude Code's Bash sandbox needs to start.
+
+#### Scenario: socat present
+- **WHEN** the image is built and `socat -V` runs in it
+- **THEN** it exits 0

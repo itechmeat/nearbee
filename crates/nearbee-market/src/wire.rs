@@ -79,6 +79,9 @@ pub enum PricingModel {
     PerCall,
     PerTask,
     Subscription,
+    /// A quote plan (added to the API by 2026-11-14): the buyer asks for a
+    /// price first. Nearbee never creates one.
+    Quote,
 }
 
 /// `WorkerCancelReason`: the two reasons a worker may give.
@@ -309,6 +312,9 @@ pub struct OwnerAgentView {
     pub funding_paused: bool,
     pub availability: AgentAvailability,
     pub available_now: bool,
+    /// Balances a hire can be paid from (required since the OpenAPI of
+    /// 2026-11-14).
+    pub payable_with: Vec<String>,
     pub active_jobs: i64,
     pub allow_admin_test_runs: bool,
     pub description: Option<String>,
@@ -449,6 +455,103 @@ pub struct PatchAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     /// `int32` on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sla_seconds: Option<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// Job board and bids (change `board-bids`)
+// ---------------------------------------------------------------------------
+
+/// The poster of a job (`JobCreatorView`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCreatorView {
+    pub account_id: String,
+    pub display_name: String,
+}
+
+/// One job of the board (`JobView`: `Job` plus `creator` and
+/// `quoteState`; only what Nearbee reads). `jobKind`, `status` and
+/// `minBuilderVerification` are closed enums in the component but are
+/// read as text: the board lists every poster's jobs, and one row with a
+/// value added later must not fail the whole read (the bidder skips a row
+/// it does not know).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardJobView {
+    pub job_id: String,
+    pub creator_account_id: String,
+    pub title: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub budget_amount: Option<String>,
+    pub budget_token: String,
+    pub job_kind: String,
+    pub status: String,
+    pub max_slots: i32,
+    pub current_max_slots: i32,
+    pub is_private: bool,
+    pub min_builder_verification: String,
+    pub is_test_run: bool,
+    pub requires_verifiable: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub invited_agent_id: Option<String>,
+    #[serde(default)]
+    pub creator: Option<JobCreatorView>,
+}
+
+/// Response of `GET /v1/jobs/board` (`ListBoardJobsResponse`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListBoardJobsResponse {
+    pub jobs: Vec<BoardJobView>,
+}
+
+/// One bid (`Bid`; only what Nearbee reads). `status` is the closed
+/// `BidStatus` set, read as text for the same reason as the job fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bid {
+    pub bid_id: String,
+    pub job_id: String,
+    pub bidder_agent_id: String,
+    pub amount: String,
+    pub proposal: String,
+    pub verifiable_offered: bool,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub sla_seconds: Option<i32>,
+}
+
+/// Response of `GET /v1/jobs/{job_id}/attachments`
+/// (`ListJobAttachmentsResponse`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListJobAttachmentsResponse {
+    pub attachments: Vec<AttachmentBrief>,
+}
+
+/// Response of `GET /v1/agents/me/bids` (`MyBidsResponse`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyBidsResponse {
+    pub bids: Vec<Bid>,
+    pub total: i64,
+}
+
+/// Body of `POST /v1/jobs/{id}/bids` (`PlaceBidRequest`). No `agentId`:
+/// an `aat_` caller is the bidder its token pins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceBidRequest {
+    pub amount: String,
+    pub proposal: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sla_seconds: Option<i32>,
 }

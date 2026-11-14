@@ -26,10 +26,12 @@ use std::time::Duration;
 pub mod scrub;
 pub mod wire;
 
+use nearbee_core::board::{BidRequest, Board, BoardJob, MyBid, PlaceOutcome};
 use nearbee_core::market::{
-    AgentPatch, AgentRecord, DeclineOutcome, DeclineReason, DeclineRequest, Market, MarketError,
-    Message, MessageRequest, NewPricingPlan, PricingPlan, ProgressOutcome, ProgressRequest,
-    ReservedFile, Row, RowStatus, StoredFile, SubmitRequest, ThreadMessage, UploadFile,
+    AgentPatch, AgentRecord, Attachment, DeclineOutcome, DeclineReason, DeclineRequest, Market,
+    MarketError, Message, MessageRequest, NewPricingPlan, PricingPlan, ProgressOutcome,
+    ProgressRequest, ReservedFile, Row, RowStatus, StoredFile, SubmitRequest, ThreadMessage,
+    UploadFile,
 };
 use nearbee_core::redact::{DETAIL_LIMIT, redact_detail, truncate};
 use nearbee_core::secret::{REDACTED, Secret};
@@ -521,6 +523,16 @@ impl NearAgentMarket {
         let outcome = self
             .attempt(method.clone(), path, &[], body, self.timing.write)
             .await?;
+        self.classify_write(&method, path, outcome)
+    }
+
+    /// The meaning of one write attempt's answer (see [`Self::write_once`]).
+    fn classify_write(
+        &self,
+        method: &reqwest::Method,
+        path: &str,
+        outcome: Result<(u16, String, Option<u64>), String>,
+    ) -> Result<Option<Value>, MarketError> {
         let (status, text, _retry_after) = match outcome {
             Err(transport) => {
                 return Err(MarketError::WriteOutcomeUnknown {
@@ -561,6 +573,38 @@ impl NearAgentMarket {
             code: machine_code(status, &text),
             detail: self.redact(&format!("{prefix}: {}", text.trim())),
         })
+    }
+
+    /// The bid write: like [`Self::write_with_resend`], but a throttled
+    /// answer (408, 429, or another 4xx that names a `Retry-After`) is an
+    /// unknown outcome, not a refusal, and is never resent at once: the
+    /// bidder keeps its intent open and sends it again on a later pass.
+    async fn write_bid(&self, path: &str, body: &Value) -> Result<Option<Value>, MarketError> {
+        let method = reqwest::Method::POST;
+        let mut sent = 0;
+        loop {
+            sent += 1;
+            let outcome = self
+                .attempt(method.clone(), path, &[], Some(body), self.timing.write)
+                .await?;
+            if let Ok((status, _, retry_after)) = &outcome
+                && (nearbee_core::board::is_throttle(*status)
+                    || (retry_after.is_some() && (400..500).contains(status)))
+            {
+                let after = retry_after
+                    .map(|s| format!(", retry after {s} s"))
+                    .unwrap_or_default();
+                return Err(MarketError::WriteOutcomeUnknown {
+                    detail: format!("POST {path}: throttled (HTTP {status}){after}"),
+                });
+            }
+            match self.classify_write(&method, path, outcome) {
+                Err(MarketError::WriteOutcomeUnknown { .. }) if sent < 2 => {
+                    tokio::time::sleep(self.timing.write_resend_delay).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Sends a write and resends it at most once, and only when the first
@@ -727,6 +771,147 @@ impl NearAgentMarket {
             .ok_or_else(|| MarketError::Protocol {
                 detail: format!("assignment {row_id} is not in the status=all list"),
             })
+    }
+}
+
+/// Page size of the board and my-bids reads (the routes take 1 to 100).
+const BOARD_PAGE: usize = 100;
+/// The most board pages read per kind and pass.
+const BOARD_PAGES_MAX: usize = 5;
+/// The most pending-bid pages read per pass. Only pending bids are read
+/// (bounded by the open-bid caps), never every status: each instant hire
+/// adds an accepted bid, so that list grows for the agent's lifetime.
+const MY_BIDS_PAGES_MAX: usize = 10;
+
+impl NearAgentMarket {
+    fn parse_board(&self, v: Value, path: &str) -> Result<Vec<BoardJob>, MarketError> {
+        let resp: wire::ListBoardJobsResponse =
+            serde_json::from_value(v).map_err(|e| MarketError::Protocol {
+                detail: self.redact(&format!("GET {path}: {e}")),
+            })?;
+        Ok(resp
+            .jobs
+            .into_iter()
+            .map(|j| BoardJob {
+                job_id: j.job_id,
+                creator_account_id: j
+                    .creator
+                    .map(|c| c.account_id)
+                    .unwrap_or(j.creator_account_id),
+                title: j.title,
+                description: j.description,
+                budget_amount: j.budget_amount,
+                budget_token: j.budget_token,
+                job_kind: j.job_kind,
+                status: j.status,
+                current_max_slots: i64::from(j.current_max_slots),
+                min_builder_verification: j.min_builder_verification,
+                is_test_run: j.is_test_run,
+                invited_agent_id: j.invited_agent_id,
+                requires_verifiable: j.requires_verifiable,
+                updated_at: j.updated_at,
+            })
+            .collect())
+    }
+}
+
+impl Board for NearAgentMarket {
+    async fn board_jobs(
+        &self,
+        query: Option<&str>,
+        kind: &str,
+    ) -> Result<Vec<BoardJob>, MarketError> {
+        let path = "/v1/jobs/board";
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        for _page in 0..BOARD_PAGES_MAX {
+            let limit = BOARD_PAGE.to_string();
+            let off = offset.to_string();
+            let mut q: Vec<(&str, &str)> =
+                vec![("kind", kind), ("limit", &limit), ("offset", &off)];
+            if let Some(text) = query {
+                q.push(("q", text));
+            }
+            let v = self.get(path, &q).await?;
+            let jobs = self.parse_board(v, path)?;
+            let got = jobs.len();
+            out.extend(jobs);
+            if got < BOARD_PAGE {
+                break;
+            }
+            offset += got;
+        }
+        Ok(out)
+    }
+
+    async fn pending_bids(&self) -> Result<Vec<MyBid>, MarketError> {
+        let path = "/v1/agents/me/bids";
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        for _page in 0..MY_BIDS_PAGES_MAX {
+            let limit = BOARD_PAGE.to_string();
+            let off = offset.to_string();
+            let v = self
+                .get(
+                    path,
+                    &[("status", "pending"), ("limit", &limit), ("offset", &off)],
+                )
+                .await?;
+            let resp: wire::MyBidsResponse =
+                serde_json::from_value(v).map_err(|e| MarketError::Protocol {
+                    detail: self.redact(&format!("GET {path}: {e}")),
+                })?;
+            let got = resp.bids.len();
+            out.extend(resp.bids.into_iter().map(|b| MyBid {
+                bid_id: b.bid_id,
+                job_id: b.job_id,
+                status: b.status,
+                amount: b.amount,
+            }));
+            let total = usize::try_from(resp.total).unwrap_or(0);
+            if got == 0 || out.len() >= total {
+                return Ok(out);
+            }
+            offset += got;
+        }
+        Err(MarketError::Protocol {
+            detail: format!("GET {path}: more than {MY_BIDS_PAGES_MAX} pages"),
+        })
+    }
+
+    async fn job_attachments(&self, job_id: &str) -> Result<Vec<Attachment>, MarketError> {
+        let path = format!("/v1/jobs/{}/attachments", segment(job_id)?);
+        let v = self.get(&path, &[]).await?;
+        let resp: wire::ListJobAttachmentsResponse =
+            serde_json::from_value(v).map_err(|e| MarketError::Protocol {
+                detail: self.redact(&format!("GET {path}: {e}")),
+            })?;
+        Ok(resp.attachments.into_iter().map(attachment_from).collect())
+    }
+
+    async fn place_bid(&self, job_id: &str, req: &BidRequest) -> Result<PlaceOutcome, MarketError> {
+        let path = format!("/v1/jobs/{}/bids", segment(job_id)?);
+        let body = wire_body(wire::PlaceBidRequest {
+            amount: req.amount.clone(),
+            proposal: req.proposal.clone(),
+            sla_seconds: Some(int32(req.sla_seconds)?),
+        })?;
+        match self.write_bid(&path, &body).await {
+            Ok(Some(v)) => {
+                let bid: wire::Bid =
+                    serde_json::from_value(v).map_err(|e| MarketError::Protocol {
+                        detail: self.redact(&format!("POST {path}: {e}")),
+                    })?;
+                Ok(PlaceOutcome::Placed { bid_id: bid.bid_id })
+            }
+            Ok(None) => Err(MarketError::Protocol {
+                detail: format!("POST {path}: an empty answer to a bid"),
+            }),
+            Err(MarketError::Refused {
+                status: 409, code, ..
+            }) if code == "duplicate_bid" => Ok(PlaceOutcome::Duplicate),
+            Err(e) => Err(e),
+        }
     }
 }
 

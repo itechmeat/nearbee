@@ -234,6 +234,37 @@ async fn config_check_fails_an_apb_without_external_data_runs() {
 }
 
 #[tokio::test]
+async fn config_check_prints_the_board_listings() {
+    let s = Setup::new(DEAD_URL);
+    let cfg = s.config();
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(
+        "board:\n  interval_secs: 120\n  listings:\n    astro-site:\n      query: website astro\n      amount_usd: \"2\"\n      poster_allowlist: [\"1729637e-8362-4026-98c3-5d597983f018\"]\n",
+    );
+    std::fs::write(&cfg, text).unwrap();
+    let (_code, out) = run(
+        &["--config", cfg.to_str().unwrap(), "config", "check"],
+        Path::new("/"),
+        &[("NEARAI_API_KEY", "sk-synthetic-test-key")],
+    )
+    .await;
+    assert!(
+        out.lines().any(|l| l.starts_with("ok")
+            && l.contains("board: a pass every 120 s within 90 s, owner verification none")),
+        "{out}"
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("board astro-site:"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(line.contains("query \"website astro\""), "{line}");
+    assert!(line.contains("kinds standard"), "{line}");
+    assert!(line.contains("amount USDC 2.00"), "{line}");
+    assert!(line.contains("at most 3 open bids"), "{line}");
+    assert!(line.contains("1 allowed posters"), "{line}");
+}
+
+#[tokio::test]
 async fn config_check_unknown_key_fails() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("nearbee.yaml"), "apb:\n  port: 1\n").unwrap();
@@ -494,4 +525,91 @@ async fn serve_exits_4_naming_the_lock_while_another_process_holds_it() {
         server.received_requests().await.unwrap().is_empty(),
         "apb was called before the lock check"
     );
+}
+
+#[tokio::test]
+async fn bids_lists_the_bid_journal_as_a_table_and_as_json() {
+    use nearbee_core::board::{BidEntry, append_bid};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("nearbee.yaml"), "state_dir: state\n").unwrap();
+    let state = dir.path().join("state");
+    let clock = nearbee_core::serve::Clock::real();
+    let placed = "00000000-0000-4000-8000-000000000001";
+    let refused = "00000000-0000-4000-8000-000000000002";
+    for (job, outcome, code) in [
+        (placed, "placed", None),
+        (
+            refused,
+            "refused",
+            Some("cluster_already_in_job".to_owned()),
+        ),
+    ] {
+        append_bid(
+            &state,
+            "astro-site",
+            job,
+            1,
+            BidEntry::Intent {
+                operation_id: "op".into(),
+                amount: "2.00".into(),
+                sla_seconds: 86_400,
+                proposal_sha256: "aa".into(),
+            },
+            &clock,
+        )
+        .unwrap();
+        append_bid(
+            &state,
+            "astro-site",
+            job,
+            2,
+            BidEntry::Result {
+                operation_id: "op".into(),
+                outcome: outcome.into(),
+                bid_id: None,
+                code,
+            },
+            &clock,
+        )
+        .unwrap();
+    }
+    let cfg = dir.path().join("nearbee.yaml");
+    let (code, out) = run(
+        &["--config", cfg.to_str().unwrap(), "bids"],
+        dir.path(),
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[1].starts_with(&format!("astro-site\t{placed}\t2.00\t86400\tplaced\t")),
+        "{out}"
+    );
+    assert!(
+        lines[2].contains("refused (cluster_already_in_job)"),
+        "{out}"
+    );
+    let (code, out) = run(
+        &["--config", cfg.to_str().unwrap(), "bids", "--json"],
+        dir.path(),
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0, "{out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    assert_eq!(v[0]["job_id"], placed);
+    assert_eq!(v[1]["state"], "refused (cluster_already_in_job)");
+    // An empty state directory says so.
+    std::fs::write(dir.path().join("nearbee.yaml"), "state_dir: empty\n").unwrap();
+    let (code, out) = run(
+        &["--config", cfg.to_str().unwrap(), "bids"],
+        dir.path(),
+        &[],
+    )
+    .await;
+    assert_eq!(code, 0);
+    assert!(out.starts_with("no journaled bids in"), "{out}");
 }

@@ -40,6 +40,7 @@ is files under `.nearbee/` (one durable journal per hire) and the market itself.
 | `core/deliverable` | validate the run's `out/result.json` manifest (containment, hashes, sizes; `nearbee_core::manifest` since S1), build Markdown + files, append evidence and the data statement, enforce 256 KiB in UTF-8 bytes | the local filesystem (narrow synchronous reads of the finished run's `out/`) |
 | `core/hire` | the state machine of one hire with a durable journal: received → intake → start-intent → started → run-intent → running → submitted → accepted / rework / redo / cancelled / disputed → closed → deleted | `Market`, `Runner` |
 | `core/recovery` | on boot and on every poll: reconcile journal vs market rows vs apb runs; resolve ambiguous starts; stop local work on cancelled or refunded hires | `Market`, `Runner` |
+| `core/board` (change `board-bids`) | the `Board` seam (board read, the agent's bids, bid placement), the bid journal under `<state_dir>/bids/`, the choice of jobs, the intake checks on a job, the generated proposal and one bidder pass per listing | `Board`, `Runner.decide` |
 | `market/` | `Market` interface and its one implementation `NearAgentMarket`: REST client with retries, `clientRequestId` on sends, file upload, assignments in every status with paging | fetch |
 | `runner/` | `Runner` interface and its implementation `ApbRunner` (`crates/nearbee-apb`): REST client to Nearbee's own apb instance pinned to one workspace, run start with params, worktree and budget, run lookup by the `hire_id` and `execution_id` search fields with completeness, polling, `decide`; since S4 `inspect` and `inspect_source` (the execution facts, `inspect.rs`), the per-attempt models of a run (`attempt_models`), materialisation with the listing's profile; `run_params` reads a script node's run params from `APB_RUN_DIR` | fetch, child process |
 | `cloud/` (S4) | `CloudAttestor` (`crates/nearbee-cloud`): the NEAR AI Cloud attestation report client behind `Attestor` (no redirects, 2 MiB cap, two attempts within 20 s, the key never in an error) | fetch |
@@ -48,7 +49,7 @@ is files under `.nearbee/` (one durable journal per hire) and the market itself.
 | `cli/signed_call`, `cli/digest` (S5) | `nearbee signed-call` (one exact-bytes completion with its `provider_tee` signature, state in its out directory) and `nearbee digest pages\|extract\|classify\|compose` (agent B), run by the `doc-digest` playbook's script nodes | fetch, child process (`pdfinfo`, `pdftoppm`, `magick` under `prlimit`), the local filesystem |
 | `core/signature` (S5) | the delivery recheck of a `tee_signature` manifest entry and the `Response signature` section with the Verification Center receipt link | none (pure) |
 | `cli/replay` (S6) | `nearbee replay [--scenario <name>]... [--keep <dir>] [--verbose]`: five scripted hires (success, decline, redo, restart, cancellation) through the real `serve::round` against its own scripted `Market`, `Runner` and `Attestor` (`crates/nearbee/src/replay/`), rows shaped like the recorded market answers, the fast audit's outputs and the Cloud fixtures embedded; reads no config, credential or `.env`, opens no socket, starts no process; checks each scenario's journal end state, ordered market writes, run starts and receipt link; CI runs it | `core/serve` and the core it drives |
-| `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee cleanup`, `nearbee config check` (since S6 with the apb version line), `nearbee audit`, `nearbee replay` | all of the above |
+| `cli/` | `nearbee list`, `nearbee serve`, `nearbee hires`, `nearbee bids`, `nearbee cleanup`, `nearbee config check` (since S6 with the apb version line), `nearbee audit`, `nearbee replay` | all of the above |
 | `config` | `nearbee.yaml` (committed example) + `.env` secrets | |
 
 Interfaces are small and typed; the core never imports `market/`, `runner/`
@@ -132,7 +133,7 @@ through its own market client and token. No step of a round waits for a run:
    minus `min(10 min, window / 5)`), cancellation, progress (a `409 too soon`
    records a due time), then the output files the manifest lists (design 6
    of `sandbox-toolchains`: at most 20, 10 MiB each, 50 MiB in all, names
-   of `[A-Za-z0-9._-]`, a secret scan on every file; per file a
+   of `[A-Za-z0-9._-]`, a secret scan on every file; a zero-byte file is not uploaded, since the market refuses it with `400 invalid_byte_size`, and is journaled once per generation as `output_skipped` (change `board-bids`); per file a
    `market_upload` intent for the reserve, closed with the file id, and a
    `market_upload_complete` intent naming that id for the PUT and
    complete, closed with the link; the Markdown gains a linked "Files"
@@ -209,6 +210,63 @@ generation's run.
 `nearbee serve` still runs its rounds while any journal on disk holds local
 work (the slot predicate) and exits with "nothing to serve" only once that
 work is settled: stopping a run needs neither a listing nor a token.
+
+### 2b. Bid on the job board (`nearbee serve` with a `board` block, change `board-bids`)
+
+The bidder runs in the serve loop after the hire round, once per
+`board.interval_secs` (60 to 3600, default 300) and never more often than
+the poll interval. For each handle in `board.listings` that is also a
+served listing with credentials, with that agent's own token
+(`nearbee_core::board::pass` over the `Board` trait, which
+`NearAgentMarket` implements):
+
+1. Read the agent's pending bids (`GET /v1/agents/me/bids?status=pending`;
+   never `status=all`, which holds an accepted bid per instant hire and
+   grows for the agent's lifetime). Without them nothing is bid this pass.
+2. Settle the bid journal against them and the job ids of the listing's
+   assignment rows from the same loop's hire read: an intent left open by
+   a crash closes as `placed` when a pending bid or an assignment is on
+   its job, else it is sent once more (`409 duplicate_bid` closes it as
+   placed); a bid's status (`pending`, `accepted` once an assignment is on
+   its job, `closed` otherwise) is recorded on each change, and
+   `accepted` is logged as awarded.
+3. List the board per configured kind with the query, and for each job
+   not journaled and not already bid on: the row filters (kind, open or
+   filling with a free slot, not a test run or a quote request, no
+   verifiable delivery required, `USDC`,
+   a budget at or above the amount when one is named, the owner's
+   configured verification level, the poster allowlist), then the open-bid
+   cap (before any further read or question), then the job's attachments
+   (`GET /v1/jobs/{job_id}/attachments`; unreadable skips the job this
+   pass), then the intake checks on the job as a row (title and
+   description as the brief, the attachments, the bid amount as the escrow: daily loss, hard limits, cost admission, the
+   listing's intake check, the scope question with at most three
+   questions per pass). A content-based skip is remembered for the job's
+   `updatedAt` while serve runs, and so is a passing scope answer, so the
+   scope question is asked once per job version.
+4. While the open bids (pending on the market plus open intents) are under
+   `max_open_bids`: write the intent (amount, SLA, proposal digest), `POST
+   /v1/jobs/{id}/bids` (the client's write rule: one resend on an unknown
+   outcome; a throttled `408`, `429` or `Retry-After` keeps the intent
+   open for a later pass), write the result (`placed` with the bid id, or
+   `refused` with the machine code, never retried).
+
+The whole bidder pass over every listing has one time budget,
+`board.pass_budget_secs` (15 to 300, default 90): it is checked before
+every read, question and bid, a scope question is cut at the time left,
+and what is left waits for the next pass, so awards and the first-hour
+decline window of the next hire round are not held back.
+
+The proposal is rendered from the listing record: its scope, the privacy
+tier, the declared models, the delivery window and a pointer to the data
+statement. The award is not a separate flow: the bid turns `accepted`,
+the market creates an assignment with `bidId`, and the hire round takes it
+like an instant hire (spec `hire-serving`, Awarded bids are hires).
+
+Bid journal: `<state_dir>/bids/<handle>/<job id>.jsonl`, append-only JSON
+lines (`intent`, `result`, `status`) with `seq` and `timestamp`, each
+fsynced; a journal that cannot be read counts as a bid on that job and is
+reported every pass. `nearbee bids [--json]` lists it, read only.
 
 ### 3. Agent-to-agent (x402)
 
@@ -310,6 +368,11 @@ limits:                                   # result manifest limits (S1) and the 
   daily_loss_usd: "20"                    # stop taking hires for the UTC day once failed runs cost this
 retention:
   after_acceptance_days: 7
+board:                                    # optional; no block, no bidding (change `board-bids`)
+  interval_secs: 300
+  owner_verification: none
+  listings:
+    <handle>: {query: "website astro", kinds: [standard], amount_usd: "2.00", sla_seconds: 86400, max_open_bids: 3, poster_allowlist: [<account uuid>]}
 ```
 
 These are the keys as built in S3 (`nearbee.example.yaml`); an unknown key
@@ -375,5 +438,6 @@ table above maps onto these crates. See `docs/decisions.md` D-003.
 2. No webhooks (polling covers the lifecycle; webhooks need owner-side setup
    and fast `2xx` answers, which conflict with synchronous intake).
 3. No buyer questions during a run; no owner review gates in market playbooks.
-4. No board bidding (v1.1: the only place with a custom price).
+4. No bid threads, bid withdrawal or revision, quote requests or
+   competitions (board bidding itself is in since `board-bids`, D-028).
 5. No on-chain writes by Nearbee itself.

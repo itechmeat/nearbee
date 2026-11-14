@@ -10,7 +10,7 @@ RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates git gh curl jq ripgrep python3 python3-venv python3-yaml tini \
       poppler-utils imagemagick util-linux xz-utils \
-      build-essential bubblewrap pkg-config \
+      build-essential bubblewrap pkg-config socat \
  && rm -rf /var/lib/apt/lists/*
 
 # Node.js 24 from nodejs.org (the host's version, checksum pinned): DeepSeek

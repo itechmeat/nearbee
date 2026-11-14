@@ -152,6 +152,9 @@ pub struct Config {
     pub apb: ApbConfig,
     pub limits: Limits,
     pub retention: Retention,
+    /// The optional board block (change `board-bids`): which listings bid
+    /// on job board jobs, and how. `None`: no bidding.
+    pub board: Option<BoardConfig>,
     pub nearai_api_key: Option<Secret>,
     /// Which known variables are set (by name; values are never kept here).
     pub present: BTreeMap<&'static str, bool>,
@@ -176,6 +179,209 @@ struct FileConfig {
     apb: Option<FileApb>,
     limits: Option<Limits>,
     retention: Option<Retention>,
+    board: Option<FileBoard>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileBoard {
+    interval_secs: Option<u64>,
+    pass_budget_secs: Option<u64>,
+    owner_verification: Option<String>,
+    #[serde(default)]
+    listings: BTreeMap<String, FileBoardListing>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileBoardListing {
+    query: Option<String>,
+    kinds: Option<Vec<String>>,
+    amount_usd: Option<serde_json::Value>,
+    sla_seconds: Option<u64>,
+    max_open_bids: Option<u32>,
+    poster_allowlist: Option<Vec<String>>,
+}
+
+/// The board interval bounds and default, in seconds.
+pub const BOARD_INTERVAL_MIN_SECS: u64 = 60;
+pub const BOARD_INTERVAL_MAX_SECS: u64 = 3600;
+pub const BOARD_INTERVAL_DEFAULT_SECS: u64 = 300;
+/// The time budget of one bidder pass over every listing, so the pass
+/// never holds back the next hire round for long.
+pub const BOARD_PASS_BUDGET_MIN_SECS: u64 = 15;
+pub const BOARD_PASS_BUDGET_MAX_SECS: u64 = 300;
+pub const BOARD_PASS_BUDGET_DEFAULT_SECS: u64 = 90;
+/// The bid SLA bounds: 10 minutes to 30 days.
+pub const BOARD_SLA_MIN_SECS: u64 = 600;
+pub const BOARD_SLA_MAX_SECS: u64 = 2_592_000;
+/// The default cap on open bids per listing.
+pub const BOARD_MAX_OPEN_BIDS_DEFAULT: u32 = 3;
+
+/// The builder verification levels of the market (`VerificationLevel`),
+/// in rising order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Verification {
+    None,
+    Verified,
+    IdentityVerified,
+}
+
+impl Verification {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Verification::None),
+            "verified" => Some(Verification::Verified),
+            "identity_verified" => Some(Verification::IdentityVerified),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verification::None => "none",
+            Verification::Verified => "verified",
+            Verification::IdentityVerified => "identity_verified",
+        }
+    }
+}
+
+/// The board block (spec `nearbee-config`, Board block).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardConfig {
+    /// Seconds between bidder passes, 60 to 3600.
+    pub interval_secs: u64,
+    /// Seconds one bidder pass over every listing may take, 15 to 300.
+    pub pass_budget_secs: u64,
+    /// The verification badge the owner holds; the token cannot read it.
+    pub owner_verification: Verification,
+    /// Board settings per listing handle.
+    pub listings: BTreeMap<String, BoardListing>,
+}
+
+/// One listing's board settings (spec `nearbee-config`, Board listing
+/// settings).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardListing {
+    /// The board search text (`q`); `None` lists every job.
+    pub query: Option<String>,
+    /// Job kinds to bid on: `standard` and or `instant`.
+    pub kinds: Vec<String>,
+    /// The bid amount in USD; `None` is the listing price.
+    pub amount_usd: Option<rust_decimal::Decimal>,
+    /// The promised SLA; `None` is the listing SLA.
+    pub sla_seconds: Option<u64>,
+    /// The most open bids at a time.
+    pub max_open_bids: u32,
+    /// Poster account ids to bid for; empty means any poster.
+    pub poster_allowlist: Vec<String>,
+}
+
+fn board_from_file(b: FileBoard) -> Result<BoardConfig, String> {
+    let interval_secs = b.interval_secs.unwrap_or(BOARD_INTERVAL_DEFAULT_SECS);
+    if !(BOARD_INTERVAL_MIN_SECS..=BOARD_INTERVAL_MAX_SECS).contains(&interval_secs) {
+        return Err(format!(
+            "board.interval_secs must be from {BOARD_INTERVAL_MIN_SECS} to {BOARD_INTERVAL_MAX_SECS}"
+        ));
+    }
+    let pass_budget_secs = b.pass_budget_secs.unwrap_or(BOARD_PASS_BUDGET_DEFAULT_SECS);
+    if !(BOARD_PASS_BUDGET_MIN_SECS..=BOARD_PASS_BUDGET_MAX_SECS).contains(&pass_budget_secs) {
+        return Err(format!(
+            "board.pass_budget_secs must be from {BOARD_PASS_BUDGET_MIN_SECS} to {BOARD_PASS_BUDGET_MAX_SECS}"
+        ));
+    }
+    let owner_verification = match b.owner_verification.as_deref() {
+        None => Verification::None,
+        Some(v) => Verification::parse(v).ok_or_else(|| {
+            format!(
+                "board.owner_verification must be none, verified or identity_verified, not {v:?}"
+            )
+        })?,
+    };
+    let mut listings = BTreeMap::new();
+    for (handle, l) in b.listings {
+        let at = |key: &str| format!("board.listings.{handle}.{key}");
+        if !crate::listing::handle_ok(&handle) {
+            return Err(format!(
+                "board.listings: {handle:?} is not a listing handle"
+            ));
+        }
+        let kinds = l.kinds.unwrap_or_else(|| vec!["standard".to_owned()]);
+        if kinds.is_empty() {
+            return Err(format!("{} must name at least one kind", at("kinds")));
+        }
+        for k in &kinds {
+            if !matches!(k.as_str(), "standard" | "instant") {
+                return Err(format!(
+                    "{} takes standard or instant, not {k:?} (competitions take entries, not bids)",
+                    at("kinds")
+                ));
+            }
+        }
+        let amount_usd = match l.amount_usd {
+            None => None,
+            Some(serde_json::Value::String(text)) => {
+                let v: rust_decimal::Decimal = text.trim().parse().map_err(|_| {
+                    format!(
+                        "{} must be a decimal string in quotes (like \"2.00\")",
+                        at("amount_usd")
+                    )
+                })?;
+                if v <= rust_decimal::Decimal::ZERO {
+                    return Err(format!("{} must be above zero", at("amount_usd")));
+                }
+                Some(v)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{} must be a decimal string in quotes (like \"2.00\")",
+                    at("amount_usd")
+                ));
+            }
+        };
+        if let Some(s) = l.sla_seconds
+            && !(BOARD_SLA_MIN_SECS..=BOARD_SLA_MAX_SECS).contains(&s)
+        {
+            return Err(format!(
+                "{} must be from {BOARD_SLA_MIN_SECS} to {BOARD_SLA_MAX_SECS}",
+                at("sla_seconds")
+            ));
+        }
+        let max_open_bids = l.max_open_bids.unwrap_or(BOARD_MAX_OPEN_BIDS_DEFAULT);
+        if !(1..=50).contains(&max_open_bids) {
+            return Err(format!("{} must be from 1 to 50", at("max_open_bids")));
+        }
+        let poster_allowlist = l.poster_allowlist.unwrap_or_default();
+        for p in &poster_allowlist {
+            if uuid::Uuid::parse_str(p).is_err() {
+                return Err(format!(
+                    "{} takes market account ids (UUIDs), not {p:?}",
+                    at("poster_allowlist")
+                ));
+            }
+        }
+        let query = l
+            .query
+            .map(|q| q.trim().to_owned())
+            .filter(|q| !q.is_empty());
+        listings.insert(
+            handle,
+            BoardListing {
+                query,
+                kinds,
+                amount_usd,
+                sla_seconds: l.sla_seconds,
+                max_open_bids,
+                poster_allowlist: poster_allowlist.iter().map(|p| p.to_lowercase()).collect(),
+            },
+        );
+    }
+    Ok(BoardConfig {
+        interval_secs,
+        pass_budget_secs,
+        owner_verification,
+        listings,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -341,6 +547,14 @@ pub fn load(
             message: "retention.after_acceptance_days must be at least 1".into(),
         });
     }
+    let board = file_cfg
+        .board
+        .map(board_from_file)
+        .transpose()
+        .map_err(|message| ConfigError::Parse {
+            path: file_path.clone(),
+            message,
+        })?;
     let present = VARIABLES
         .iter()
         .map(|v| (v.name, var(v.name).is_some()))
@@ -358,6 +572,7 @@ pub fn load(
         },
         limits: file_cfg.limits.unwrap_or_default(),
         retention,
+        board,
         nearai_api_key: var("NEARAI_API_KEY").map(Secret::new),
         present,
     })
@@ -465,6 +680,103 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, text).unwrap();
         p
+    }
+
+    #[test]
+    fn board_block_defaults_and_refusals() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |text: &str| write(dir.path(), "nearbee.yaml", text);
+        fn opts<'a>(p: &'a Path, cwd: &'a Path) -> LoadOptions<'a> {
+            LoadOptions { file: Some(p), cwd }
+        }
+        let none = file("state_dir: s\n");
+        assert!(
+            load(opts(&none, dir.path()), env_of(&[]))
+                .unwrap()
+                .board
+                .is_none()
+        );
+        let p = file("board:\n  listings:\n    astro-site:\n      query: website\n");
+        let b = load(opts(&p, dir.path()), env_of(&[]))
+            .unwrap()
+            .board
+            .unwrap();
+        assert_eq!(b.interval_secs, BOARD_INTERVAL_DEFAULT_SECS);
+        assert_eq!(b.pass_budget_secs, BOARD_PASS_BUDGET_DEFAULT_SECS);
+        assert_eq!(b.owner_verification, Verification::None);
+        let l = &b.listings["astro-site"];
+        assert_eq!(l.query.as_deref(), Some("website"));
+        assert_eq!(l.kinds, vec!["standard".to_owned()]);
+        assert_eq!(l.amount_usd, None);
+        assert_eq!(l.sla_seconds, None);
+        assert_eq!(l.max_open_bids, BOARD_MAX_OPEN_BIDS_DEFAULT);
+        assert!(l.poster_allowlist.is_empty());
+        let full = file(
+            "board:\n  interval_secs: 120\n  pass_budget_secs: 45\n  owner_verification: verified\n  listings:\n    astro-site:\n      kinds: [standard, instant]\n      amount_usd: \"2.50\"\n      sla_seconds: 7200\n      max_open_bids: 5\n      poster_allowlist: [\"1729637E-8362-4026-98C3-5D597983F018\"]\n",
+        );
+        let b = load(opts(&full, dir.path()), env_of(&[]))
+            .unwrap()
+            .board
+            .unwrap();
+        assert_eq!(b.interval_secs, 120);
+        assert_eq!(b.pass_budget_secs, 45);
+        assert_eq!(b.owner_verification, Verification::Verified);
+        let l = &b.listings["astro-site"];
+        assert_eq!(l.amount_usd, Some(rust_decimal::Decimal::new(250, 2)));
+        assert_eq!(l.sla_seconds, Some(7200));
+        assert_eq!(l.max_open_bids, 5);
+        assert_eq!(
+            l.poster_allowlist,
+            vec!["1729637e-8362-4026-98c3-5d597983f018".to_owned()]
+        );
+        for (text, named) in [
+            ("board:\n  interval_secs: 10\n", "board.interval_secs"),
+            ("board:\n  pass_budget_secs: 5\n", "board.pass_budget_secs"),
+            (
+                "board:\n  pass_budget_secs: 900\n",
+                "board.pass_budget_secs",
+            ),
+            (
+                "board:\n  owner_verification: gold\n",
+                "board.owner_verification",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      kinds: [competition]\n",
+                "competition",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      amount_usd: \"0\"\n",
+                "amount_usd",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      amount_usd: \"two\"\n",
+                "amount_usd",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      amount_usd: 2.5\n",
+                "amount_usd",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      sla_seconds: 60\n",
+                "sla_seconds",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      max_open_bids: 0\n",
+                "max_open_bids",
+            ),
+            (
+                "board:\n  listings:\n    a-b:\n      poster_allowlist: [bob]\n",
+                "poster_allowlist",
+            ),
+            ("board:\n  listings:\n    A_B:\n      query: x\n", "A_B"),
+            ("board:\n  listings:\n    a-b:\n      price: 1\n", "price"),
+        ] {
+            let p = file(text);
+            let err = load(opts(&p, dir.path()), env_of(&[]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(named), "{text}: {err}");
+        }
     }
 
     #[test]

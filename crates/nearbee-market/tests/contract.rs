@@ -143,6 +143,34 @@ fn every_operation_the_client_calls_uses_the_component_its_wire_type_models() {
             "200",
             Some("PricingPlan"),
         ),
+        (
+            "/v1/jobs/board",
+            "get",
+            None,
+            "200",
+            Some("ListBoardJobsResponse"),
+        ),
+        (
+            "/v1/agents/me/bids",
+            "get",
+            None,
+            "200",
+            Some("MyBidsResponse"),
+        ),
+        (
+            "/v1/jobs/{id}/bids",
+            "post",
+            Some("PlaceBidRequest"),
+            "201",
+            Some("Bid"),
+        ),
+        (
+            "/v1/jobs/{job_id}/attachments",
+            "get",
+            None,
+            "200",
+            Some("ListJobAttachmentsResponse"),
+        ),
     ];
     for (path, method, req, code, resp) in table {
         assert_eq!(
@@ -496,6 +524,81 @@ fn every_request_body_the_client_sends_fits_its_component() {
         },
     );
     check_request("PatchAgentRequest", &wire::PatchAgentRequest::default());
+    // The bid: no `agentId` (the token pins the bidder), with and without
+    // the promised SLA.
+    for sla_seconds in [None, Some(86_400)] {
+        check_request(
+            "PlaceBidRequest",
+            &wire::PlaceBidRequest {
+                amount: "2.00".into(),
+                proposal: "I will deliver X.".into(),
+                sla_seconds,
+            },
+        );
+    }
+}
+
+/// The board answer parses minimal (no budget, no creator) and with the
+/// optional fields the bidder reads; every enum value of the job's closed
+/// sets reads as its text.
+#[test]
+fn the_board_answer_parses_minimal_and_with_the_optionals_the_bidder_reads() {
+    let min: wire::ListBoardJobsResponse = parse(
+        "ListBoardJobsResponse",
+        instance("ListBoardJobsResponse", Value::Null),
+    );
+    assert_eq!(min.jobs.len(), 1);
+    assert!(min.jobs[0].budget_amount.is_none());
+    assert!(min.jobs[0].creator.is_none());
+    let job = instance_with(
+        "JobView",
+        &["budgetAmount", "invitedAgentId", "creator"],
+        json!({ "budgetAmount": "5.00", "jobKind": "standard", "status": "filling",
+                "minBuilderVerification": "identity_verified", "budgetToken": "USDC" }),
+    );
+    let v: wire::BoardJobView = parse("JobView", job);
+    assert_eq!(v.budget_amount.as_deref(), Some("5.00"));
+    // `requiresVerifiable` is required on `Job` and read as is.
+    let verifiable = instance("JobView", json!({ "requiresVerifiable": true }));
+    let w: wire::BoardJobView = parse("JobView", verifiable.clone());
+    assert!(w.requires_verifiable);
+    let mut without = verifiable;
+    without
+        .as_object_mut()
+        .unwrap()
+        .remove("requiresVerifiable");
+    assert!(serde_json::from_value::<wire::BoardJobView>(without).is_err());
+    assert_eq!(v.job_kind, "standard");
+    assert_eq!(v.status, "filling");
+    assert_eq!(v.min_builder_verification, "identity_verified");
+    assert!(v.invited_agent_id.is_some());
+    assert!(v.creator.is_some());
+    for (field, set) in [
+        ("jobKind", "JobKind"),
+        ("status", "JobStatus"),
+        ("minBuilderVerification", "VerificationLevel"),
+    ] {
+        for value in component_schema(spec(), set)["enum"].as_array().unwrap() {
+            let job = instance("JobView", json!({ field: value }));
+            let _: wire::BoardJobView = parse("JobView", job);
+        }
+    }
+}
+
+/// The bid list parses with every bid status as text.
+#[test]
+fn the_bid_list_parses_every_status() {
+    for value in component_schema(spec(), "BidStatus")["enum"]
+        .as_array()
+        .unwrap()
+    {
+        let bid = instance("Bid", json!({ "status": value }));
+        let r: wire::MyBidsResponse = parse(
+            "MyBidsResponse",
+            instance("MyBidsResponse", json!({ "bids": [bid], "total": 1 })),
+        );
+        assert_eq!(r.bids[0].status, value.as_str().unwrap());
+    }
 }
 
 /// Every Rust enum covers exactly its component's closed set.
@@ -565,6 +668,7 @@ fn every_wire_enum_matches_its_component_set() {
             PricingModel::PerCall,
             PricingModel::PerTask,
             PricingModel::Subscription,
+            PricingModel::Quote,
         ],
     );
     same(
@@ -634,4 +738,8 @@ fn the_parsed_types_require_what_the_components_require() {
     each_required::<wire::OwnerAgentView>("OwnerAgentView");
     each_required::<wire::PricingPlan>("PricingPlan");
     each_required::<wire::ReserveFileResponse>("ReserveFileResponse");
+    each_required::<wire::ListBoardJobsResponse>("ListBoardJobsResponse");
+    each_required::<wire::MyBidsResponse>("MyBidsResponse");
+    each_required::<wire::ListJobAttachmentsResponse>("ListJobAttachmentsResponse");
+    each_required::<wire::Bid>("Bid");
 }

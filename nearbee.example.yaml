@@ -30,3 +30,20 @@ limits:
 retention:
   # Days after acceptance before `nearbee cleanup` deletes a hire's files.
   after_acceptance_days: 7
+
+# Board bidding (off without this block). Per listing handle: what to search
+# on the market's job board, the bid and how many bids may be open at once.
+# The bidder runs inside `nearbee serve`; `nearbee bids` lists its journal.
+# board:
+#   interval_secs: 300              # a pass every 5 minutes (60 to 3600)
+#   pass_budget_secs: 90            # one pass over every listing stops after this (15 to 300)
+#   owner_verification: none        # your market badge: none, verified or identity_verified
+#   listings:
+#     astro-site:
+#       query: "website astro"      # the board search text; omit to see every job
+#       kinds: [standard]           # standard and or instant; competitions take entries, not bids
+#       amount_usd: "2.00"          # default: the listing price
+#       sla_seconds: 86400          # default: the listing SLA (600 to 2592000)
+#       max_open_bids: 3
+#       poster_allowlist:           # optional: bid only on jobs these market accounts post
+#         - 00000000-0000-0000-0000-000000000000
