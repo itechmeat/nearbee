@@ -57,8 +57,8 @@ pub enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Publish a listing: materialise the playbook, patch the agent, set
-    /// the pricing plan.
+    /// Publish a listing: install the playbook, check its tier and print the
+    /// values to set in the market web app (no market write).
     List(ListArgs),
     /// Serve hires for the published listings.
     Serve(ServeArgs),
@@ -1010,8 +1010,9 @@ fn apb_bin(env: &Env<'_>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("apb"))
 }
 
-/// `nearbee list <listing.yaml>`: materialise the playbook, patch
-/// the agent, set the pricing plan; see [`publish::publish`].
+/// `nearbee list <listing.yaml>`: materialise the playbook, check its
+/// tier and print what the owner sets in the web app (no market write);
+/// see [`publish::publish`].
 pub async fn publish_list(
     file: Option<&Path>,
     args: ListArgs,

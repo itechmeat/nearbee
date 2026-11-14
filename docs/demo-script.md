@@ -1,44 +1,41 @@
 # Demo script (shot list)
 
 The video for the X post (O-8) and the submission's `demoUrl`. The owner
-records and posts; agents prepare. Shots in order, each with the exact
-command or page, what the viewer sees, and the owner item it needs. A shot
-whose owner item is still open is skipped, and the post says nothing about
-it (`docs/x-post.md`: every claim backed by `docs/demo-log.md`).
+records, edits and posts; agents prepare. 60 to 90 seconds, cut from
+material already recorded: the replay, the paid hires of 2026-11-13 and
+2026-11-14 with their deliverables, the market pages, the sandbox and the
+`astro-site` result. Every claim on screen or in the voice-over is backed
+by `docs/demo-log.md`; a shot without its record is cut, and the post says
+nothing about it (`docs/x-post.md`).
 
-Before recording: `cargo build -p nearbee` once, apb `1.0.0-beta.7` on
-Nearbee's own instance in the sandbox (`sandbox/build.sh`, then
-`NEARBEE_APB_SANDBOX=1 scripts/apb-instance.sh start`, and
-`APB_BIN=$PWD/scripts/apb-sandboxed` for every `nearbee` command),
-`nearbee config check` all `ok`, a terminal with a large font, the market web app signed in
-as the owner in a browser.
-
-| # | Shot | Command or page | What the viewer sees | Owner item |
+| # | Seconds | Shot | Source | What the viewer sees |
 | --- | --- | --- | --- | --- |
-| 1 | The walkthrough without any account | `cargo run -p nearbee -- replay` | The banner (scripted, contacts nothing, the signature is synthetic), five scenarios step by step with the hire state and each market write, then `replay: 5 of 5 scenarios ok` | none |
-| 2 | One playbook becomes a listing | `nearbee list playbooks/repo-audit/listing.repo-audit-fast.yaml` | The tier check passes as `attested` (script nodes only, one direct and signed model), the installed version, the table of values for the web app and the generated data statement | O-2 (agent id and token of `repo-audit-fast`, done) |
-| 3 | The listing in the market | the agent's page on https://market.near.ai | The `repo-audit-fast` agent with its price and the statement in its bio | O-6 (go-ahead to set the listing live) |
-| 4 | Nearbee serves | `nearbee serve` in one pane, `nearbee hires` in another | serve polling; the hire arriving, intake, the start reports, the run, the end reports, the submit | O-3 (Cloud credits), O-6 |
-| 5 | Another agent hires and pays | `cd examples/x402-hire && node index.mjs repo-audit-fast "Audit https://github.com/itechmeat/nearbee for security problems." --max-usd 0.60` | The 402 challenge, the quoted amount within the ceiling, the signed NEP-366 delegate, the paid call accepted and its task id | O-5 (caller account with USDC), O-6 (the spend) |
-| 6 | The deliverable | the hire's deliverable in the market web app | Findings with checked file and line citations, the endpoint attestation disclosure, the `Response signature` section and the data statement | as shot 5 |
-| 7 | The receipt checks | the `Check the signature in the NEAR AI Verification Center` link of shot 6 | The Verification Center checking the response signature of the review call | as shot 5 |
-| 8 | Agent B on an invoice scan | a hire of `doc-digest-private` from the web app with one invoice PDF or PNG attached; `nearbee serve` running | The digest: summary, entities, checked figures, personal data counts by category, the response signature | O-2 (agent of `doc-digest-private`), O-3, O-6 |
-| 9 | Accepted and paid | Building > My agents > `repo-audit-fast` > Edit > View hires, then Building > Payouts | The A2A payer with one row per job (accepted, or cancelled for a declined one); A2A jobs are accepted at submit and Payouts settles them daily, so the balance shows the earnings only after the next settlement (`docs/market.md`) | O-6; O-4 is the prize payout account, not shown |
-| 10 | The sandbox | `NEARBEE_APB_SANDBOX=1 scripts/apb-instance.sh status`, then `docker exec nearbee-apb-sbx curl -sS -m 5 https://example.com` | The instance in its container, the image matching the host binaries; an outside host does not resolve from inside, while the statement lists the allowed hosts | none |
+| 1 | 0 to 8 | The problem | title card over the banner (`brand/poster/banner.png`) | "Your playbooks earn nothing while idle. Nearbee lists them as agents on the NEAR AI Agent Market." |
+| 2 | 8 to 18 | No account needed | terminal: `cargo run -p nearbee -- replay` | The banner lines (scripted, contacts nothing, the signature is synthetic), scenarios scrolling, then `replay: 5 of 5 scenarios ok` |
+| 3 | 18 to 28 | The agents on the market | the owner's agent pages on https://market.near.ai | `bug-repro-fix`, `vuln-deps-fix` and `repo-audit-fast` with their prices and the data statement in the bio |
+| 4 | 28 to 40 | Another agent hires and pays | terminal: `examples/x402-hire` hiring `bug-repro-fix` (hire `d28caae2`), `nearbee serve` in a second pane | The 402 quote of 2.00 USDC, the signed NEP-366 delegate, the paid call accepted; serve taking the hire, the run, the uploads, the submit |
+| 5 | 40 to 50 | The deliverable | the hire `d28caae2` in the market web app | The report with the failing test before the fix and passing after, and the files `fix.patch` and `bugfix.json` |
+| 6 | 50 to 58 | A second paid hire | the hire `37008197` (`vuln-deps-fix`, 1.00 USDC) in the web app | The report and `patch.diff`; caption "npm audit: 29 vulnerable packages to 5 low, tests still pass" |
+| 7 | 58 to 66 | Private AI on NEAR AI Cloud | the `repo-audit-fast` deliverable of hire `dbfbe061` | Findings with checked file and line citations, the `Response signature` section and its Verification Center link |
+| 8 | 66 to 74 | The sandbox | terminal: `NEARBEE_APB_SANDBOX=1 scripts/apb-instance.sh status`, then `docker exec nearbee-apb-sbx curl -sS -m 5 https://example.com` | The instance in its container; an outside host does not resolve from inside |
+| 9 | 74 to 84 | A website from one brief | the `astro-site` result: the delivered site opened in a browser | The built pages of the site with its brand, copy and generated images |
+| 10 | 84 to 90 | Close | title card | The repository link, "MIT", `cargo run -p nearbee -- replay`, `@NEARProtocol #NEARHackathon` |
 
-Notes for the voice-over, all facts from the repository:
+Shot 9 is the only one whose run is not yet in `docs/demo-log.md`: record
+the `astro-site` hire there before posting, or keep the shot without any
+claim of a paid hire in the post.
 
-1. Nearbee is an adapter: any apb playbook becomes an agent for hire;
-   the two agents are examples.
-2. The attested listings run no agent: every model call is Nearbee's own
-   direct call to a NEAR AI Cloud TEE model, and one call per hire is
-   signed by the model TEE (D-026, D-027).
-3. Every market run is an apb external-data run, so apb learns nothing
-   from buyer data (`docs/privacy.md`).
-4. Every run executes in a container with a read-only system, no added
-   privileges, none of the owner's files or keys, and outbound traffic
-   limited to named hosts; the data statement says so from the unit's own
-   command line (`docs/apb.md`, "Sandboxed instance").
-5. The replay in shot 1 is scripted: it proves the state machine and the
-   deliverable path, not the live market; shots 4 to 9 are the live
-   proof, recorded in `docs/demo-log.md`.
+Notes for the voice-over or captions, all facts from the repository:
+
+1. Nearbee is an adapter: any apb playbook becomes an agent for hire; the
+   agents shown are the owner's.
+2. Buyers pay in USDC on NEAR through the market; another agent pays over
+   x402 (shots 4 and 6, `docs/demo-log.md`, 2026-11-14).
+3. The attested listing runs no agent: every model call is Nearbee's own
+   direct call to a NEAR AI Cloud TEE model, and the response is signed by
+   the model TEE (shot 7, D-026, D-027).
+4. Every run executes in a container with a read-only system, none of the
+   owner's files or keys, and outbound traffic limited to named hosts
+   (shot 8, `docs/apb.md`, "Sandboxed instance").
+5. The replay in shot 2 is scripted: it proves the state machine and the
+   deliverable path, not the live market; shots 4 to 7 are the live proof.

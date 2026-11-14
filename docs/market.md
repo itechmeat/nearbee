@@ -454,7 +454,9 @@ Facts the bidder relies on:
    MiB per version, 100 unfinished slots and 5 GiB declared per owner) and a
    complete answering `200` after a PUT to `uploadUrl`: the trio itself is
    confirmed live (2026-11-10), the limits and the stored-digest answer are
-   not measured. No output file has been delivered on a live hire yet.
+   not measured. Output files were delivered on live hires on 2026-11-14
+   (`docs/demo-log.md`); a zero-byte file is refused with `400
+   invalid_byte_size`, so serve skips it.
 5. `verifiableOffered` on bids (Nearbee never sets it).
 6. A live bid by Nearbee and its award: built against the facts above,
    not yet run against the market (no market write was allowed while

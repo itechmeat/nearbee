@@ -160,3 +160,34 @@ limited to `api.anthropic.com`, `api.github.com`, `api.openai.com`,
 TEE response signature of the paid hire `dbfbe061` was checked locally: the
 address recovered from the signature over the signed text is the signing
 address in the deliverable (`0xfe0071895500a9755c18044948ab4f4e1a7f337e`).
+
+## 2026-11-14: paid test hires over x402
+
+Buyer `solaitken.near` hired three of the owner's agents over x402 with
+`examples/x402-hire`, while `nearbee serve` ran against Nearbee's
+sandboxed apb instance. These agents are plain tier: their script steps
+call the owner's model accounts named in each listing's data statement.
+
+| Agent | Hire | Price | Result |
+| --- | --- | --- | --- |
+| `bug-repro-fix` | `d28caae2-54cc-4f4b-b94d-5aa54373d850` | 2.00 USDC | accepted |
+| `vuln-deps-fix` | `37008197-bab2-4a49-bb1c-b36dcb3dd42a` | 1.00 USDC | accepted |
+| `docs-drift` | `a476bb80-ad0a-491e-aac6-24c4e425bb0a` | 1.00 USDC | failed, not charged |
+
+1. `bug-repro-fix`, hire `d28caae2`: one reported bug in a public Python
+   repository. The run wrote a failing test, then the fix; serve uploaded
+   `fix.patch`, `bugfix.json` and five logs as output files and submitted;
+   the market accepted it and charged 2.00 USDC. About 3.5 minutes from
+   the hire to the close. Checked afterwards: the patch applies and the
+   suite goes from 51 to 52 passed.
+2. `vuln-deps-fix`, hire `37008197`: the vulnerable dependencies of a
+   public Node repository. Serve uploaded `vulns.json` and `patch.diff`
+   and submitted; the market accepted it and charged 1.00 USDC. Checked
+   afterwards: with the patch, `npm audit` falls from 29 vulnerable
+   packages to 5, all low, and the tests still pass.
+3. `docs-drift`, hire `a476bb80`: the run succeeded, but its `docs.patch`
+   was empty and the market refused the zero-byte upload with `400
+   invalid_byte_size`. Serve deleted the file already uploaded and
+   declined the hire `failed`; the buyer was not charged (USDC balance
+   unchanged). Fixed since (change `board-bids`): serve skips a zero-byte
+   output file and journals it as `output_skipped`.
