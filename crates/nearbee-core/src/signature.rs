@@ -280,7 +280,11 @@ pub fn receipt_link(s: &SignatureFile) -> String {
 }
 
 /// The section `Response signature` (every field in a code span; the
-/// fields were checked, so none holds a backtick).
+/// fields were checked, so none holds a backtick). The receipt link is a
+/// bare URL alone on its line, never wrapped in Markdown link syntax:
+/// a buyer who sees the raw text (a terminal, a plain-text view) would
+/// otherwise copy or click the closing `)` with it, and the Verification
+/// Center rejects such a receipt as invalid.
 fn section(s: &SignatureFile) -> String {
     format!(
         "## Response signature\n\n\
@@ -293,7 +297,8 @@ fn section(s: &SignatureFile) -> String {
          - Signed text: `{text}`\n\
          - Signature: `{sig}`\n\n\
          What you can verify: the signature binds a response with the response hash above, produced in a model TEE with the signing address above. The request and response bytes stay with the owner, so you cannot recompute the hashes yourself; the proof is that a model TEE signed a response with that hash, not that this deliverable was derived from it.\n\n\
-         [Check the signature in the NEAR AI Verification Center]({link})\n",
+         Check the signature in the NEAR AI Verification Center: open the link below, whole. The page recovers the signer of the signature in the browser and checks it against the model's current TEE attestation; the receipt stays in the URL fragment.\n\n\
+         {link}\n",
         model = s.model,
         id = s.completion_id,
         address = s.signing_address,
@@ -409,7 +414,7 @@ mod tests {
         let link = format!("{VERIFY_URL}?model=deepseek-ai%2FDeepSeek-V4.1-Flash-1017#receipt=");
         let at = md.find(&link).expect("the receipt link");
         let rest = &md[at + link.len()..];
-        let encoded = &rest[..rest.find(')').unwrap()];
+        let encoded = &rest[..rest.find('\n').unwrap()];
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
             .unwrap();
@@ -423,6 +428,102 @@ mod tests {
         );
         // The private bytes never reach the section.
         assert!(!md.contains("{\"b\":2}"));
+    }
+
+    /// The link of the real paid hire `dbfbe061` (2026-11-13), as the
+    /// Verification Center showed it valid on 2026-11-14.
+    const DBFBE061_LINK: &str = include_str!("../tests/fixtures/receipt-link-dbfbe061.txt");
+
+    /// The Verification Center's own receipt parser (its page bundle, read
+    /// 2026-11-14): the fragment as URL search parameters, exactly one
+    /// `receipt`, at most 32768 characters of `[A-Za-z0-9_-]` with at most
+    /// two `=`, base64url JSON, the six keys as non-empty strings and a
+    /// `signatureKind` of `provider_tee` or `gateway`. Anything else is
+    /// "The response receipt is invalid."
+    fn page_accepts(link: &str) -> Result<serde_json::Value, String> {
+        let (_, fragment) = link.split_once('#').ok_or("no fragment")?;
+        let receipts: Vec<&str> = fragment
+            .split('&')
+            .filter_map(|p| p.strip_prefix("receipt="))
+            .collect();
+        let [r] = receipts.as_slice() else {
+            return Err(format!("{} receipts", receipts.len()));
+        };
+        let body = r.trim_end_matches('=');
+        let well_formed = !r.is_empty()
+            && r.len() <= 32768
+            && r.len() - body.len() <= 2
+            && body
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !well_formed {
+            return Err(format!("the receipt {r:?} is not base64url"));
+        }
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .map_err(|e| e.to_string())?;
+        let v: serde_json::Value = serde_json::from_slice(&json).map_err(|e| e.to_string())?;
+        for key in [
+            "completionId",
+            "model",
+            "signingAlgo",
+            "signingAddress",
+            "signedText",
+            "signature",
+        ] {
+            if !v[key].as_str().is_some_and(|s| !s.is_empty()) {
+                return Err(format!("{key} is missing"));
+            }
+        }
+        if !matches!(
+            v["signatureKind"].as_str(),
+            Some("provider_tee" | "gateway")
+        ) {
+            return Err("signatureKind is neither provider_tee nor gateway".into());
+        }
+        Ok(v)
+    }
+
+    fn dbfbe061() -> SignatureFile {
+        SignatureFile {
+            version: 1,
+            completion_id: "chatcmpl-ee1d004e-2109-4673-85a9-580682bb51f6".into(),
+            model: MODEL.into(),
+            signature_kind: "provider_tee".into(),
+            signing_algo: "ecdsa".into(),
+            signing_address: "0xfe0071895500a9755c18044948ab4f4e1a7f337e".into(),
+            signed_text: format!(
+                "{MODEL}:3b2edf7af715f3105641fe1266b906b73fd6a4191a1b857dc3f30c7a441cb79b:214bc08dd9f3897236841b6247d66d64e6f132003cd5de1683e27a085062e879"
+            ),
+            signature: "0x7b7ae52a4809d5f1214d2d5340d39a0b4cba0709a3abda0dcda651c61878798b5df8714fc83eca0610d173d33e514111ad3157922dd77fcce5a3db26f0c36c221c".into(),
+            request_sha256: "3b2edf7af715f3105641fe1266b906b73fd6a4191a1b857dc3f30c7a441cb79b".into(),
+            response_sha256: "214bc08dd9f3897236841b6247d66d64e6f132003cd5de1683e27a085062e879".into(),
+        }
+    }
+
+    #[test]
+    fn the_dbfbe061_link_is_the_one_the_verification_center_accepted() {
+        let s = dbfbe061();
+        assert_eq!(receipt_link(&s), DBFBE061_LINK.trim_end());
+        let v = page_accepts(&receipt_link(&s)).unwrap();
+        assert_eq!(v["completionId"], s.completion_id.as_str());
+        assert_eq!(v["signedText"], s.signed_text.as_str());
+    }
+
+    #[test]
+    fn the_section_puts_the_link_alone_on_its_line() {
+        let s = dbfbe061();
+        let md = section(&s);
+        let line = md
+            .lines()
+            .find(|l| l.contains("#receipt="))
+            .expect("the link line");
+        assert_eq!(line, receipt_link(&s), "{md}");
+        assert!(page_accepts(line).is_ok());
+        // A closing parenthesis glued to the link (a raw Markdown link seen
+        // as plain text) is what the page rejects as invalid.
+        assert!(page_accepts(&format!("{line})")).is_err());
+        assert!(!md.contains("](http"), "{md}");
     }
 
     #[test]

@@ -469,7 +469,12 @@ call (`signed_models`).
    entry adds a `Response signature` section before the evidence section:
    every field in a code span and a receipt link
    `https://cloud.near.ai/verify?model=<id>#receipt=<base64url JSON>` the
-   buyer opens in the Verification Center. The two private files are
+   buyer opens in the Verification Center, written as a bare URL alone on
+   its line so that a buyer reading the raw text never takes a closing
+   parenthesis with it (the page rejects such a receipt as invalid). The
+   page recovers the signer from the signature in the browser and checks
+   it against the model's TEE attestation fetched when the page opens; the
+   receipt stays in the URL fragment. The two private files are
    snapshotted with the generation when the submit intent opens and are
    never delivered.
 
