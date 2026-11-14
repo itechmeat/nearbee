@@ -105,6 +105,16 @@ ENV PATH=/usr/local/cargo/bin:/usr/local/go/bin:$PATH \
     GOTOOLCHAIN=local \
     RUSTUP_TOOLCHAIN=${RUST_VERSION}
 
+# Headless Chromium for script steps that render and check web pages
+# (screenshots, axe): Playwright's own build at one pinned revision, shared
+# read-only under PLAYWRIGHT_BROWSERS_PATH. An agent pins the same
+# Playwright version in its own lock (astro-site: 1.64.1, Chromium 1248).
+ARG PLAYWRIGHT_VERSION=1.64.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium chromium-headless-shell \
+ && chmod -R a+rX /opt/ms-playwright \
+ && rm -rf /root/.npm /var/lib/apt/lists/*
+
 COPY bin/ /usr/local/bin/
 
 # Agent CLIs must not update themselves or phone home from the sandbox.
