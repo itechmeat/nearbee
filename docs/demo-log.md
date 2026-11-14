@@ -161,6 +161,35 @@ TEE response signature of the paid hire `dbfbe061` was checked locally: the
 address recovered from the signature over the signed text is the signing
 address in the deliverable (`0xfe0071895500a9755c18044948ab4f4e1a7f337e`).
 
+## 2026-11-14: the receipt link verifies in the Verification Center
+
+The receipt link of the paid hire `dbfbe061` opened in a browser without
+login shows "Response Verified" for
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`: "Verified ECDSA signature" with
+completion `chatcmpl-ee1d004e-2109-4673-85a9-580682bb51f6`, signing
+address `0xfe0071895500a9755c18044948ab4f4e1a7f337e`, signature scope
+"Model TEE", and "Hardware verification: Verified" with two model reports
+(TCB status UpToDate, measurements verified) carrying the same signing
+address. Screenshot: `assets/chain/verification-center-dbfbe061-valid.png`
+in the demo video assets.
+
+The page parses the receipt in the browser (its bundle, read the same
+day): one `receipt` parameter in the fragment, base64url characters only,
+the keys `completionId`, `model`, `signatureKind`, `signingAlgo`,
+`signingAddress`, `signedText` and `signature`. It recovers the signer of
+the signed text and compares it with the signing address, then fetches the
+model's attestation report with a fresh nonce and checks the GPU and TDX
+evidence. It does not fetch the completion, so the link does not depend on
+the completion still being stored by NEAR AI Cloud; the hardware part
+checks the attestation current when the page opens.
+
+An earlier "The response receipt is invalid" came from the link with the
+closing parenthesis of the Markdown link glued to it, which is what a
+reader of the raw deliverable text (the x402 caller prints it to a
+terminal) copies or clicks: the same receipt with `)` appended reproduces
+the message. Deliverables now carry the link as a bare URL alone on its
+line.
+
 ## 2026-11-14: paid test hires over x402
 
 Buyer `solaitken.near` hired three of the owner's agents over x402 with

@@ -34,7 +34,8 @@ No account needed to see the hire machine: cargo run -p nearbee -- replay
    (2026-11-14); `vuln-deps-fix` hire `37008197`, 1.00 USDC, accepted,
    `npm audit` from 29 vulnerable packages to 5 low (2026-11-14);
    `repo-audit-fast` hire `dbfbe061`, 0.50 USDC, the response signature
-   checked locally (2026-11-13).
+   checked locally (2026-11-13) and its receipt link shown as verified in
+   the NEAR AI Verification Center (2026-11-14).
 2. Post 2 says "in the video": each of those hires is in the video
    (`docs/demo-script.md`); cut the ones that are not.
 3. The video is attached (screenshots alone do not count,

@@ -138,9 +138,12 @@ flowchart LR
 2. **Private AI on NEAR AI Cloud.** An `attested` listing runs no agent:
    every model call is Nearbee's own direct call to a NEAR AI Cloud TEE
    model, and the deliverable carries the model TEE's response signature
-   with a Verification Center link. The signature of hire `dbfbe061` was
-   checked
-   ([2026-11-13](docs/demo-log.md#2026-11-13-the-statement-names-the-sandbox)).
+   with a Verification Center link. The signature of hire `dbfbe061`
+   recovers locally to the TEE signing address
+   ([2026-11-13](docs/demo-log.md#2026-11-13-the-statement-names-the-sandbox)),
+   and its receipt link opens as verified in the NEAR AI Verification
+   Center
+   ([2026-11-14](docs/demo-log.md#2026-11-14-the-receipt-link-verifies-in-the-verification-center)).
    What this does and does not prove: `docs/privacy.md`.
 
 ## Agents the owner runs with Nearbee

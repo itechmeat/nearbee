@@ -230,10 +230,15 @@ fn check(w: &World, id: &str, writes: &[&str], starts: usize, end: &str) -> Resu
 }
 
 /// Every submitted deliverable carries the Verification Center receipt
-/// link.
+/// link as a bare URL alone on its line.
 fn receipt(submitted: &[String]) -> Result<(), String> {
     for (i, md) in submitted.iter().enumerate() {
-        if !md.contains(&format!("{VERIFY_URL}?model=")) || !md.contains("#receipt=") {
+        let on_its_line = md.lines().any(|l| {
+            l.starts_with(&format!("{VERIFY_URL}?model="))
+                && l.contains("#receipt=")
+                && !l.contains(')')
+        });
+        if !on_its_line {
             return Err(format!(
                 "expected a receipt link in submission {}, there is none",
                 i + 1

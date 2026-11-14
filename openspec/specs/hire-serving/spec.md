@@ -417,11 +417,15 @@ For a generation whose frozen snapshot has `signed_models`, serve SHALL require 
 - **THEN** serve declines `failed` with `signature_missing` and submits nothing
 
 ### Requirement: Response signature section
-The deliverable SHALL carry a section `Response signature`, between the playbook Markdown and the evidence section, with the completion id, model, signing address, both hashes, the signed text and the signature each in a code span, and a link `https://cloud.near.ai/verify?model=<URL-encoded id>#receipt=<receipt>`; the private bytes SHALL never be delivered.
+The deliverable SHALL carry a section `Response signature`, between the playbook Markdown and the evidence section, with the completion id, model, signing address, both hashes, the signed text and the signature each in a code span, and the link `https://cloud.near.ai/verify?model=<URL-encoded id>#receipt=<receipt>` as a bare URL alone on its line; the private bytes SHALL never be delivered.
 
 #### Scenario: Receipt link
 - **WHEN** an agent B deliverable is assembled
 - **THEN** its receipt is compact JSON with the keys `completionId`, `model`, `signatureKind`, `signingAlgo`, `signingAddress`, `signedText` and `signature` in that order and the entry's values, encoded base64url without padding
+
+#### Scenario: Link alone on its line
+- **WHEN** an agent B deliverable is assembled
+- **THEN** the receipt link is the whole of its line and never inside Markdown link syntax, because a buyer reading the raw text would take the closing parenthesis with it and the Verification Center rejects that receipt as invalid
 
 ### Requirement: What the buyer can verify
 The section SHALL say that the signature binds a response with the shown hash produced in a model TEE, and that the buyer cannot recompute the hashes because the request and response bytes stay with the owner.

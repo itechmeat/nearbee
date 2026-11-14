@@ -122,7 +122,13 @@ first live answers are recorded in task 7.2.
 4. The Verification Center takes a receipt in the URL fragment:
    `https://cloud.near.ai/verify?model=<URL-encoded id>#receipt=<base64url JSON>`
    with the keys `completionId`, `model`, `signatureKind`, `signingAlgo`,
-   `signingAddress`, `signedText`, `signature`.
+   `signingAddress`, `signedText`, `signature`. The page (bundle read
+   2026-11-14) rejects a receipt with any character outside base64url, so
+   the deliverable writes the link as a bare URL alone on its line, never
+   as `[text](url)`, whose closing parenthesis a raw-text reader takes
+   along. It recovers the ECDSA signer locally and checks the model's
+   attestation fetched with a fresh nonce; it does not fetch the
+   completion.
 5. `POST /v1/privacy/classify` with `{"model": "openai/privacy-filter",
    "input": <text>}` answers `data[].spans[]` with `category`, `start`,
    `end`, `text` and `score`; Nearbee drops `text` while parsing and keeps
